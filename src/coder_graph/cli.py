@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from .graph import build_graph
 from .module_map import build_module_map, write_module_map
+from .specs import load_workflow_spec, summarize_workflow_spec
 from .state import CodingState
 from .tools.filesystem import resolve_existing_dir, summarize_project
 
@@ -29,6 +30,8 @@ def main() -> None:
     parser.add_argument("--base-url", help="Override CODER_BASE_URL for this run.")
     parser.add_argument("--map-only", action="store_true", help="Generate a clickable module map and exit.")
     parser.add_argument("--output-dir", default="outputs", help="Output directory for generated artifacts.")
+    parser.add_argument("--workflow-spec", help="Load and validate a declarative workflow JSON spec.")
+    parser.add_argument("--describe-workflow", action="store_true", help="Print workflow spec summary and exit.")
     args = parser.parse_args()
 
     if args.provider:
@@ -37,6 +40,12 @@ def main() -> None:
         os.environ["CODER_MODEL"] = args.model
     if args.base_url:
         os.environ["CODER_BASE_URL"] = args.base_url
+
+    if args.workflow_spec:
+        spec = load_workflow_spec(args.workflow_spec)
+        if args.describe_workflow:
+            print(summarize_workflow_spec(spec))
+            return
 
     if args.map_only:
         repo_root = resolve_existing_dir(args.repo)

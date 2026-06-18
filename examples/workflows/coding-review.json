@@ -1,0 +1,83 @@
+{
+  "id": "coding-review",
+  "name": "Coding Review Workflow",
+  "description": "A small coding workflow: map project, plan changes, review risk, then stop before mutation.",
+  "max_loops": 3,
+  "agents": [
+    {
+      "id": "planner",
+      "role": "Planner Agent",
+      "goal": "Create a short, scoped implementation plan.",
+      "input_keys": ["user_request", "modules", "allowed_paths", "repo_files"],
+      "output_schema": {
+        "summary": "string",
+        "target_files": "list[string]",
+        "steps": "list[string]",
+        "risks": "list[string]",
+        "checks": "list[string]",
+        "needs_human": "boolean"
+      },
+      "model": null,
+      "tools": []
+    },
+    {
+      "id": "reviewer",
+      "role": "Reviewer Agent",
+      "goal": "Reject scope escape, high risk, and unclear plans.",
+      "input_keys": ["user_request", "planner_result", "allowed_paths", "modules", "changed_files", "check_output"],
+      "output_schema": {
+        "approved": "boolean",
+        "risk_level": "low|medium|high",
+        "scope_escape": "boolean",
+        "stop_reasons": "list[string]",
+        "notes": "string"
+      },
+      "model": null,
+      "tools": []
+    }
+  ],
+  "steps": [
+    {
+      "id": "scan",
+      "kind": "deterministic",
+      "uses": "scan_repo_node",
+      "input_keys": ["repo_root", "target_scope"],
+      "output_key": "repo_files"
+    },
+    {
+      "id": "map",
+      "kind": "deterministic",
+      "uses": "module_map_node",
+      "input_keys": ["repo_files"],
+      "output_key": "modules"
+    },
+    {
+      "id": "plan",
+      "kind": "agent",
+      "uses": "planner",
+      "input_keys": ["user_request", "modules", "allowed_paths", "repo_files"],
+      "output_key": "planner_result"
+    },
+    {
+      "id": "review",
+      "kind": "agent",
+      "uses": "reviewer",
+      "input_keys": ["user_request", "planner_result", "allowed_paths", "modules"],
+      "output_key": "reviewer_result"
+    },
+    {
+      "id": "approve",
+      "kind": "human_gate",
+      "uses": "approval_node",
+      "input_keys": ["planner_result", "reviewer_result"],
+      "output_key": "approved"
+    }
+  ],
+  "stop_conditions": [
+    "scope_escape",
+    "risk_level == high",
+    "max_loops reached",
+    "needs files outside selected module",
+    "dependency/config/build changes required"
+  ]
+}
