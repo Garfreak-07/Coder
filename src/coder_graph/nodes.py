@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .agents.planner import planner_prompt, run_planner_agent
+from .agents.reviewer import reviewer_prompt, run_reviewer_agent
 from .config import load_runtime_config
 from .llm import create_chat_model
 from .module_map import build_module_map
@@ -71,11 +73,13 @@ def plan_node(state: CodingState) -> CodingState:
         }
 
     llm = create_chat_model(config)
-    response = llm.invoke(_planning_prompt(state))
+    planner_result = run_planner_agent(planner_prompt(_planning_context(state)), llm)
+    plan = _format_planner_result(planner_result)
     return {
         **state,
-        "plan": response.content,
-        "proposed_changes": _split_plan_lines(response.content),
+        "plan": plan,
+        "planner_result": planner_result,
+        "proposed_changes": planner_result["steps"],
         "status": "planned",
     }
 
@@ -140,6 +144,20 @@ def review_node(state: CodingState) -> CodingState:
             "status": "checked",
         }
 
+    config = load_runtime_config()
+    if config.has_llm_credentials and state.get("planner_result"):
+        llm = create_chat_model(config)
+        reviewer_result = run_reviewer_agent(reviewer_prompt(_review_context(state)), llm)
+        if not reviewer_result["approved"]:
+            return {
+                **state,
+                "reviewer_result": reviewer_result,
+                "risk_level": reviewer_result["risk_level"],
+                "review_notes": reviewer_result["notes"] or "; ".join(reviewer_result["stop_reasons"]),
+                "next_step": "blocked",
+                "status": "blocked",
+            }
+
     return {
         **state,
         "risk_level": "low",
@@ -169,7 +187,7 @@ def _fallback_plan(state: CodingState) -> str:
     )
 
 
-def _planning_prompt(state: CodingState) -> str:
+def _planning_context(state: CodingState) -> str:
     repo_files = "\n".join(
         f"- {item['path']} ({item['kind']}, {item['size_bytes']} bytes)"
         for item in _candidate_files(state, limit=40)
@@ -179,11 +197,7 @@ def _planning_prompt(state: CodingState) -> str:
         lines = "\n".join(f"  - {item['path']} ({item['kind']})" for item in files[:80])
         references.append(f"Reference root: {root}\n{lines}")
 
-    return f"""
-You are a terse, cautious coding workflow planner.
-Use as few words as possible while preserving useful decisions.
-
-Goal:
+    return f"""Goal:
 {state['user_request']}
 
 Target repo:
@@ -200,19 +214,51 @@ Detected modules:
 
 Reference projects:
 {chr(10).join(references) if references else 'None'}
-
-Produce a conservative implementation plan. Do not produce code yet.
-Return only:
-1. Scope: files/modules likely relevant
-2. Steps: up to 5 small steps
-3. Risks: only real risks
-4. Checks: commands to run
-5. Stop-if: conditions requiring human approval
 """
 
 
 def _split_plan_lines(plan: str) -> list[str]:
     return [line.strip() for line in plan.splitlines() if line.strip()]
+
+
+def _format_planner_result(result: dict) -> str:
+    lines = [
+        f"Summary: {result.get('summary', '')}",
+        "Target files:",
+        *[f"- {path}" for path in result.get("target_files", [])],
+        "Steps:",
+        *[f"- {step}" for step in result.get("steps", [])],
+        "Risks:",
+        *[f"- {risk}" for risk in result.get("risks", [])],
+        "Checks:",
+        *[f"- {check}" for check in result.get("checks", [])],
+        f"Needs human: {result.get('needs_human', False)}",
+    ]
+    return "\n".join(line for line in lines if line)
+
+
+def _review_context(state: CodingState) -> str:
+    return f"""Goal:
+{state['user_request']}
+
+Allowed paths:
+{state.get('allowed_paths', [])}
+
+Modules:
+{_module_lines(state)}
+
+Planner result:
+{state.get('planner_result', {})}
+
+Changed files:
+{state.get('changed_files', [])}
+
+Check passed:
+{state.get('check_passed')}
+
+Check output:
+{_truncate(state.get('check_output', ''), 2000)}
+"""
 
 
 def _module_lines(state: CodingState) -> str:
@@ -237,3 +283,9 @@ def _candidate_files(state: CodingState, limit: int) -> list[dict]:
         if scoped:
             return scoped[:limit]
     return files[:limit]
+
+
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n...<truncated>"

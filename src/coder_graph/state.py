@@ -20,6 +20,23 @@ class ModuleSummary(TypedDict):
     reason: str
 
 
+class PlannerAgentResult(TypedDict):
+    summary: str
+    target_files: list[str]
+    steps: list[str]
+    risks: list[str]
+    checks: list[str]
+    needs_human: bool
+
+
+class ReviewerAgentResult(TypedDict):
+    approved: bool
+    risk_level: Literal["low", "medium", "high"]
+    scope_escape: bool
+    stop_reasons: list[str]
+    notes: str
+
+
 class CodingState(TypedDict, total=False):
     user_request: str
 
@@ -33,6 +50,8 @@ class CodingState(TypedDict, total=False):
     modules: list[ModuleSummary]
 
     plan: str
+    planner_result: PlannerAgentResult
+    reviewer_result: ReviewerAgentResult
     approval_required: bool
     approved: bool
 
