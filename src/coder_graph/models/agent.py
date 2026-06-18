@@ -23,6 +23,7 @@ class ClaudeCodeRuntime(BaseModel):
     mcp_servers: list[dict] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
     tools: list[str] = Field(default_factory=lambda: ["read", "search", "edit", "shell"])
+    enabled_capabilities: list[str] = Field(default_factory=list)
     permissions: dict[str, bool] = Field(
         default_factory=lambda: {
             "read_files": True,

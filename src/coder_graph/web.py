@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .capabilities import apply_capabilities_to_agent, list_capabilities, recommend_capabilities
 from .graph import build_graph
 from .models import AgentCard
 from .module_map import build_module_map
@@ -159,6 +160,9 @@ class CoderWebHandler(BaseHTTPRequestHandler):
             repo = query.get("repo", [""])[0]
             self._send_json(_load_library(repo))
             return
+        if parsed.path == "/api/capabilities":
+            self._send_json({"capabilities": list_capabilities()})
+            return
         self.send_error(404)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -178,6 +182,17 @@ class CoderWebHandler(BaseHTTPRequestHandler):
                 return
             if self.path == "/api/save-agent":
                 self._send_json(_save_agent(body))
+                return
+            if self.path == "/api/recommend-capabilities":
+                self._send_json(
+                    {
+                        "capabilities": recommend_capabilities(
+                            query=str(body.get("query", "")),
+                            agent=body.get("agent") or {},
+                            modules=body.get("modules") or [],
+                        )
+                    }
+                )
                 return
             self.send_error(404)
         except Exception as exc:  # pragma: no cover - defensive web boundary
@@ -257,8 +272,10 @@ def _save_workflow(body: dict[str, Any]) -> dict[str, Any]:
 def _save_agent(body: dict[str, Any]) -> dict[str, Any]:
     repo = str(body.get("repo", "")).strip()
     agent = body.get("agent") or {}
+    capability_ids = body.get("capabilities") or agent.get("runtime", {}).get("enabled_capabilities", [])
     if not repo:
         return {"error": "Project path is empty. Select a project folder before saving."}
+    agent = apply_capabilities_to_agent(agent, capability_ids)
     saved = save_agent(repo, agent)
     return {"agent": saved, "library": _load_library(repo)}
 
@@ -427,6 +444,14 @@ INDEX_HTML = r"""<!doctype html>
     .checkbox-row { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:6px 10px; margin-top:8px; }
     .checkbox-row label { display:flex; align-items:center; gap:6px; margin:0; }
     .checkbox-row input { width:auto; margin:0; }
+    .capability-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap:10px; margin-top:8px; }
+    .capability-card { border:1px solid #334155; border-radius:12px; background:#0f172a; padding:10px; }
+    .capability-card.recommended { border-color:#38bdf8; }
+    .capability-card label { display:flex; align-items:flex-start; gap:8px; margin:0; }
+    .capability-card input { width:auto; margin:3px 0 0; }
+    .capability-card strong { display:block; }
+    .capability-card span { display:block; color:#94a3b8; font-size:12px; margin-top:4px; }
+    .capability-meta { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
     .workbench-wide { grid-column: 1 / -1; }
     details.workbench-card summary { cursor:pointer; font-weight:650; }
     .agent-workbench-overlay { display:none; position:fixed; inset:18px; z-index:18; overflow:auto; border:1px solid #334155; border-radius:18px; background:#111827; padding:16px; box-shadow:0 24px 80px rgba(0,0,0,.55); }
@@ -558,6 +583,12 @@ INDEX_HTML = r"""<!doctype html>
         <input id="agentWorkbenchA2ASubscriptions" />
       </section>
       <section class="workbench-card workbench-wide">
+        <h3>Capabilities</h3>
+        <p>Use capability packs instead of asking users to hand-write skills, tools, MCP, or A2A settings.</p>
+        <button class="secondary" onclick="refreshCapabilityRecommendations()">Recommend capabilities</button>
+        <div id="capabilityList" class="capability-grid"></div>
+      </section>
+      <section class="workbench-card workbench-wide">
         <h3>System Prompt / Instructions</h3>
         <textarea id="agentWorkbenchPrompt"></textarea>
       </section>
@@ -577,6 +608,8 @@ INDEX_HTML = r"""<!doctype html>
     let current = { modules: [], workflow: null };
     let savedWorkflows = [];
     let availableAgents = [];
+    let capabilityCatalog = [];
+    let recommendedCapabilityIds = new Set();
     let canvasAgents = [];
     let agentEdges = [];
     let draggedAgentId = null;
@@ -616,6 +649,7 @@ INDEX_HTML = r"""<!doctype html>
     async function analyze() {
       const repo = document.getElementById("repo").value;
       const query = document.getElementById("request").value;
+      await loadCapabilities();
       current = await post("/api/analyze", { repo, query });
       if (current.workflow) {
         const agents = (current.workflow.agents || []).map(withClaudeCode);
@@ -628,6 +662,12 @@ INDEX_HTML = r"""<!doctype html>
       applyLibrary(current.library || { workflows: [], agents: [] });
       renderProjectTree();
       renderAgents();
+    }
+
+    async function loadCapabilities() {
+      if (capabilityCatalog.length) return;
+      const data = await getJson("/api/capabilities");
+      capabilityCatalog = data.capabilities || [];
     }
 
     async function runWorkflow() {
@@ -702,6 +742,7 @@ INDEX_HTML = r"""<!doctype html>
           mcp_servers: [],
           skills: [...runtimeSkills],
           tools: [...runtimeTools],
+          enabled_capabilities: [],
           permissions: {
             read_files: true,
             edit_files: false,
@@ -724,6 +765,97 @@ INDEX_HTML = r"""<!doctype html>
           ...(agent.a2a || {})
         }
       };
+    }
+
+    function enabledCapabilities(agent) {
+      return new Set(agent?.runtime?.enabled_capabilities || []);
+    }
+
+    function renderCapabilities(agent) {
+      const root = document.getElementById("capabilityList");
+      if (!root) return;
+      const selected = enabledCapabilities(agent);
+      root.innerHTML = capabilityCatalog.map(capability => {
+        const checked = selected.has(capability.id) ? "checked" : "";
+        const recommended = recommendedCapabilityIds.has(capability.id) ? " recommended" : "";
+        const riskClass = capability.risk === "medium" ? "medium" : capability.risk === "high" ? "high" : "low";
+        return `
+          <article class="capability-card${recommended}">
+            <label>
+              <input type="checkbox" ${checked} onchange="toggleCapability('${escapeAttr(capability.id)}', this.checked)" />
+              <span>
+                <strong>${escapeHtml(capability.name)}</strong>
+                <span>${escapeHtml(capability.description || "")}</span>
+                <span class="capability-meta">
+                  <span class="badge ${riskClass}">${escapeHtml(capability.risk || "low")} risk</span>
+                  <span class="badge low">${escapeHtml(capability.kind || "capability")}</span>
+                  ${recommendedCapabilityIds.has(capability.id) ? '<span class="badge low">recommended</span>' : ''}
+                </span>
+              </span>
+            </label>
+          </article>
+        `;
+      }).join("");
+    }
+
+    function toggleCapability(id, checked) {
+      const agent = canvasAgents.find(item => item.id === editingAgentId);
+      if (!agent) return;
+      const runtime = agent.runtime || {};
+      const selected = enabledCapabilities(agent);
+      if (checked) selected.add(id);
+      else selected.delete(id);
+      runtime.enabled_capabilities = [...selected];
+      agent.runtime = runtime;
+      fillAgentWorkbench(agent);
+    }
+
+    async function refreshCapabilityRecommendations() {
+      await loadCapabilities();
+      const agent = canvasAgents.find(item => item.id === editingAgentId) || {};
+      const data = await post("/api/recommend-capabilities", {
+        query: document.getElementById("request").value,
+        agent,
+        modules: current.modules || []
+      });
+      recommendedCapabilityIds = new Set((data.capabilities || []).map(capability => capability.id));
+      renderCapabilities(agent);
+    }
+
+    function applyCapabilitiesLocally(agent) {
+      const selected = enabledCapabilities(agent);
+      const updated = withClaudeCode(agent);
+      const runtime = updated.runtime || {};
+      const permissions = runtime.permissions || {};
+      const skills = new Set([...(updated.skills || []), ...(runtime.skills || [])]);
+      const runtimeTools = new Set(runtime.tools || []);
+      const topTools = new Set(updated.tools || []);
+      const mcpServers = [...(runtime.mcp_servers || [])];
+      const mcpNames = new Set(mcpServers.map(server => server && server.name).filter(Boolean));
+      for (const capability of capabilityCatalog) {
+        if (!selected.has(capability.id)) continue;
+        (capability.skills || []).forEach(skill => skills.add(skill));
+        (capability.tools || []).forEach(tool => {
+          runtimeTools.add(tool);
+          topTools.add(tool);
+        });
+        Object.assign(permissions, capability.permissions || {});
+        for (const server of capability.mcp_servers || []) {
+          if (server.name && !mcpNames.has(server.name)) {
+            mcpServers.push(server);
+            mcpNames.add(server.name);
+          }
+        }
+      }
+      runtime.enabled_capabilities = [...selected];
+      runtime.skills = [...skills].sort();
+      runtime.tools = [...runtimeTools].sort();
+      runtime.mcp_servers = mcpServers;
+      runtime.permissions = permissions;
+      updated.skills = [...skills].sort();
+      updated.tools = [...topTools].sort();
+      updated.runtime = runtime;
+      return updated;
     }
 
     function applyLibrary(library) {
@@ -758,6 +890,27 @@ INDEX_HTML = r"""<!doctype html>
       };
     }
 
+    function withLocalA2ARouting(agent) {
+      const normalized = applyCapabilitiesLocally(withClaudeCode(agent));
+      const subscriptions = agentEdges
+        .filter(edge => normalizeCanvasEdge(edge).to === normalized.id)
+        .map(edge => normalizeCanvasEdge(edge).from);
+      const messageTypes = subscriptions.map(source => `${source}.result`);
+      return {
+        ...normalized,
+        a2a: {
+          ...(normalized.a2a || {}),
+          enabled: true,
+          endpoint: `local://agent/${normalized.id}`,
+          protocol_version: "local-a2a-v1",
+          input_modes: ["application/json"],
+          output_modes: ["application/json"],
+          subscriptions: [...new Set([...(normalized.a2a?.subscriptions || []), ...subscriptions])],
+          message_types: [...new Set([...(normalized.a2a?.message_types || []), ...messageTypes])]
+        }
+      };
+    }
+
     function selectWorkflowMode() {
       const mode = document.getElementById("mode").value;
       if (mode === "default") {
@@ -786,7 +939,7 @@ INDEX_HTML = r"""<!doctype html>
         id: workflowId,
         name,
         description: base.description || "User-composed workflow",
-        agents: canvasAgents.map(withClaudeCode),
+        agents: canvasAgents.map(withLocalA2ARouting),
         edges: agentEdges.map(workflowSpecEdge),
         steps: canvasAgents.map(agent => ({
           id: agent.id,
@@ -1102,6 +1255,11 @@ INDEX_HTML = r"""<!doctype html>
       setChecked("permUseNetwork", permissions.use_network);
       setChecked("permRequiresApproval", permissions.requires_approval);
       document.getElementById("agentEditor").value = JSON.stringify(normalized, null, 2);
+      const mcpSection = document.getElementById("agentWorkbenchMcp")?.closest("section");
+      const a2aSection = document.getElementById("agentWorkbenchA2AEndpoint")?.closest("section");
+      if (mcpSection) mcpSection.style.display = "none";
+      if (a2aSection) a2aSection.style.display = "none";
+      renderCapabilities(normalized);
     }
 
     function readAgentWorkbench() {
@@ -1109,6 +1267,8 @@ INDEX_HTML = r"""<!doctype html>
       const mcpServers = JSON.parse(document.getElementById("agentWorkbenchMcp").value || "[]");
       const skills = csvToList(document.getElementById("agentWorkbenchSkills").value);
       const runtimeTools = csvToList(document.getElementById("agentWorkbenchTools").value);
+      const existingAgent = canvasAgents.find(item => item.id === editingAgentId) || {};
+      const enabled = existingAgent.runtime?.enabled_capabilities || base.runtime?.enabled_capabilities || [];
       const updated = {
         ...base,
         id: editingAgentId,
@@ -1128,6 +1288,7 @@ INDEX_HTML = r"""<!doctype html>
           mcp_servers: mcpServers,
           skills,
           tools: runtimeTools,
+          enabled_capabilities: enabled,
           permissions: {
             read_files: document.getElementById("permReadFiles").checked,
             edit_files: document.getElementById("permEditFiles").checked,
@@ -1147,16 +1308,18 @@ INDEX_HTML = r"""<!doctype html>
           subscriptions: csvToList(document.getElementById("agentWorkbenchA2ASubscriptions").value),
         }
       };
-      return withClaudeCode(updated);
+      return applyCapabilitiesLocally(withClaudeCode(updated));
     }
 
-    function openAgentEditor(event, id) {
+    async function openAgentEditor(event, id) {
       event.stopPropagation();
       editingAgentId = id;
+      await loadCapabilities();
       const agent = canvasAgents.find(item => item.id === id);
       if (!agent) return;
       fillAgentWorkbench(agent);
       document.getElementById("agentPage").classList.add("open");
+      await refreshCapabilityRecommendations();
     }
 
     function closeAgentEditor() {
@@ -1170,7 +1333,12 @@ INDEX_HTML = r"""<!doctype html>
         const updated = readAgentWorkbench();
         canvasAgents = canvasAgents.map(agent => agent.id === editingAgentId ? withClaudeCode({ ...agent, ...updated, id: editingAgentId }) : agent);
         availableAgents = mergeAgents(availableAgents, [canvasAgents.find(agent => agent.id === editingAgentId)]);
-        const data = await post("/api/save-agent", { repo: document.getElementById("repo").value, agent: canvasAgents.find(agent => agent.id === editingAgentId) });
+        const savedAgent = canvasAgents.find(agent => agent.id === editingAgentId);
+        const data = await post("/api/save-agent", {
+          repo: document.getElementById("repo").value,
+          agent: savedAgent,
+          capabilities: savedAgent?.runtime?.enabled_capabilities || []
+        });
         if (data.error) {
           alert(data.error);
           return;
