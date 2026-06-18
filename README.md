@@ -94,6 +94,14 @@ CODER_API_KEY=你的 key
 
 ## 使用
 
+Windows 交互式入口：
+
+```powershell
+.\run.ps1
+```
+
+第一次运行时，如果没有 `.venv`，脚本会询问是否创建虚拟环境并安装依赖。
+
 分析当前项目：
 
 ```powershell
