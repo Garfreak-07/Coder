@@ -29,7 +29,7 @@ def intake_node(state: CodingState) -> CodingState:
         "target_scope": target_scope,
         "allowed_paths": normalize_allowed_paths(repo_root, allowed_paths) if allowed_paths else [],
         "approval_required": True,
-        "approved": False,
+        "approved": bool(state.get("approved", False)),
         "iteration": state.get("iteration", 0),
         "max_iterations": state.get("max_iterations", 2),
         "status": "created",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -18,19 +19,19 @@ from .tools.filesystem import resolve_existing_dir, summarize_project
 
 
 DEFAULT_WORKFLOW = {
-    "id": "coding-review",
-    "name": "Default Coding Workflow",
-    "description": "Map project, plan with Planner Agent, review with Reviewer Agent, then stop before mutation.",
+    "id": "codex-cc-default",
+    "name": "Codex + CC Execution Workflow",
+    "description": "Codex plans and judges; DeepSeek-backed Claude Code agents execute and test; failures route back to Codex for direction.",
     "max_loops": 3,
     "agents": [
         {
-            "id": "planner",
-            "name": "Planner",
-            "role": "Planner Agent",
-            "goal": "Create a short, scoped implementation plan.",
-            "instructions": "Use project context and selected constraints. Return compact JSON. Do not write code.",
-            "skills": ["read_project_index", "reason_about_scope", "produce_plan"],
-            "input_keys": ["user_request", "modules", "allowed_paths", "repo_files"],
+            "id": "codex_planner",
+            "name": "Codex Planner",
+            "role": "Planning, Judgment, and Direction Agent",
+            "goal": "Create the high-level plan, judge test results, and give retry instructions when execution fails.",
+            "instructions": "Act like Codex: inspect project structure, choose target files, produce implementation/testing instructions, then judge tester results. If tests pass, end. If tests fail, give concrete retry instructions to the executor. Default retry budget is 3.",
+            "skills": ["read_project_index", "reason_about_scope", "produce_plan", "assess_risk", "direct_executor"],
+            "input_keys": ["user_request", "modules", "allowed_paths", "repo_files", "test_result", "check_output"],
             "output_schema": {
                 "summary": "string",
                 "target_files": "list[string]",
@@ -39,20 +40,21 @@ DEFAULT_WORKFLOW = {
                 "checks": "list[string]",
                 "needs_human": "boolean",
             },
-            "stop_rules": ["Do not request broad edits", "Ask for approval when dependencies or config must change"],
-            "model": None,
+            "stop_rules": ["Do not request broad edits", "End when tests pass", "Retry executor on actionable test failures", "Block high-risk or unclear failures"],
+            "model": "codex",
             "tools": ["claude_code"],
             "runtime": {
                 "enabled": True,
                 "page": "agent_workbench",
                 "session_id": None,
-                "provider": None,
-                "model": None,
-                "system_prompt": "Act as a scoped planning agent. Use tools only within approved project boundaries.",
+                "provider": "openai",
+                "model": "codex",
+                "system_prompt": "Plan the work, judge test results, and give exact retry instructions. Do not mutate files directly. Default retry budget is 3.",
                 "context_files": [],
                 "mcp_servers": [],
-                "skills": ["read_project_index", "reason_about_scope", "produce_plan"],
+                "skills": ["read_project_index", "reason_about_scope", "produce_plan", "assess_risk", "direct_executor"],
                 "tools": ["read", "search", "shell"],
+                "enabled_capabilities": ["project-planning"],
                 "permissions": {
                     "read_files": True,
                     "edit_files": False,
@@ -64,47 +66,45 @@ DEFAULT_WORKFLOW = {
             },
             "a2a": {
                 "enabled": True,
-                "endpoint": "local://agent/planner",
+                "endpoint": "local://agent/codex_planner",
                 "protocol_version": "local-a2a-v1",
                 "input_modes": ["application/json"],
                 "output_modes": ["application/json"],
-                "message_types": ["context.modules_ready", "review.retry_requested"],
-                "subscriptions": ["module_map", "reviewer"],
+                "message_types": ["context.modules_ready", "tester.result"],
+                "subscriptions": ["module_map", "cc_tester"],
             },
         },
         {
-            "id": "reviewer",
-            "name": "Reviewer",
-            "role": "Reviewer Agent",
-            "goal": "Reject scope escape, high risk, and unclear plans.",
-            "instructions": "Review plans and future patches against scope, risk, and stop rules. Return compact JSON.",
-            "skills": ["detect_scope_escape", "assess_risk", "produce_stop_reasons"],
-            "input_keys": ["user_request", "planner_result", "allowed_paths", "modules"],
+            "id": "cc_executor",
+            "name": "DeepSeek CC Executor",
+            "role": "Implementation Agent",
+            "goal": "Use Claude Code-style tools with a DeepSeek model to make the concrete code changes requested by Codex.",
+            "instructions": "Follow Codex Planner instructions exactly. Edit only allowed paths. Return changed files and implementation notes.",
+            "skills": ["apply_scoped_patch", "follow_codex_instructions"],
+            "input_keys": ["planner_result", "allowed_paths", "modules"],
             "output_schema": {
-                "approved": "boolean",
-                "risk_level": "low|medium|high",
-                "scope_escape": "boolean",
-                "stop_reasons": "list[string]",
+                "changed_files": "list[string]",
                 "notes": "string",
             },
-            "stop_rules": ["Block scope escape", "Block high-risk changes without human approval"],
-            "model": None,
+            "stop_rules": ["Do not edit outside allowed paths", "Stop on ambiguous instructions"],
+            "model": "deepseek-chat",
             "tools": ["claude_code"],
             "runtime": {
                 "enabled": True,
                 "page": "agent_workbench",
                 "session_id": None,
-                "provider": None,
-                "model": None,
-                "system_prompt": "Act as a scoped review agent. Validate plans and patches against user intent, risk, and stop rules.",
+                "provider": "deepseek",
+                "model": "deepseek-chat",
+                "system_prompt": "Execute the approved Codex plan using Claude Code-style local tools. Keep changes scoped.",
                 "context_files": [],
                 "mcp_servers": [],
-                "skills": ["detect_scope_escape", "assess_risk", "produce_stop_reasons"],
-                "tools": ["read", "search", "shell"],
+                "skills": ["apply_scoped_patch", "follow_codex_instructions"],
+                "tools": ["read", "search", "edit", "shell"],
+                "enabled_capabilities": ["local-editing"],
                 "permissions": {
                     "read_files": True,
-                    "edit_files": False,
-                    "run_commands": False,
+                    "edit_files": True,
+                    "run_commands": True,
                     "use_network": False,
                     "requires_approval": True,
                 },
@@ -112,29 +112,78 @@ DEFAULT_WORKFLOW = {
             },
             "a2a": {
                 "enabled": True,
-                "endpoint": "local://agent/reviewer",
+                "endpoint": "local://agent/cc_executor",
                 "protocol_version": "local-a2a-v1",
                 "input_modes": ["application/json"],
                 "output_modes": ["application/json"],
-                "message_types": ["plan.proposed", "check.result"],
-                "subscriptions": ["planner", "check"],
+                "message_types": ["plan.proposed", "codex.retry_requested"],
+                "subscriptions": ["codex_planner"],
+            },
+        },
+        {
+            "id": "cc_tester",
+            "name": "DeepSeek CC Tester",
+            "role": "Testing Agent",
+            "goal": "Run or choose validation checks for the executor's changes and summarize failures.",
+            "instructions": "Use Claude Code-style command tools to run appropriate checks. Return pass/fail and concise failure evidence.",
+            "skills": ["choose_validation_checks", "interpret_check_output"],
+            "input_keys": ["changed_files", "planner_result", "allowed_paths"],
+            "output_schema": {
+                "passed": "boolean",
+                "output": "string",
+            },
+            "stop_rules": ["Do not mutate files while testing", "Return exact failure evidence"],
+            "model": "deepseek-chat",
+            "tools": ["claude_code"],
+            "runtime": {
+                "enabled": True,
+                "page": "agent_workbench",
+                "session_id": None,
+                "provider": "deepseek",
+                "model": "deepseek-chat",
+                "system_prompt": "Test the executor changes. Prefer project-native checks and concise evidence.",
+                "context_files": [],
+                "mcp_servers": [],
+                "skills": ["choose_validation_checks", "interpret_check_output"],
+                "tools": ["read", "search", "shell"],
+                "enabled_capabilities": ["local-checks"],
+                "permissions": {
+                    "read_files": True,
+                    "edit_files": False,
+                    "run_commands": True,
+                    "use_network": False,
+                    "requires_approval": True,
+                },
+                "memory": {},
+            },
+            "a2a": {
+                "enabled": True,
+                "endpoint": "local://agent/cc_tester",
+                "protocol_version": "local-a2a-v1",
+                "input_modes": ["application/json"],
+                "output_modes": ["application/json"],
+                "message_types": ["executor.changed_files"],
+                "subscriptions": ["cc_executor"],
             },
         },
     ],
     "steps": [
         {"id": "scan", "kind": "deterministic", "uses": "scan_repo_node", "input_keys": ["repo_root"], "output_key": "repo_files"},
         {"id": "map", "kind": "deterministic", "uses": "module_map_node", "input_keys": ["repo_files"], "output_key": "modules"},
-        {"id": "plan", "kind": "agent", "uses": "planner", "input_keys": ["user_request", "modules"], "output_key": "planner_result"},
-        {"id": "review", "kind": "agent", "uses": "reviewer", "input_keys": ["planner_result"], "output_key": "reviewer_result"},
-        {"id": "approve", "kind": "human_gate", "uses": "approval_node", "input_keys": ["planner_result", "reviewer_result"], "output_key": "approved"},
+        {"id": "plan", "kind": "agent", "uses": "codex_planner", "input_keys": ["user_request", "modules"], "output_key": "planner_result"},
+        {"id": "execute", "kind": "agent", "uses": "cc_executor", "input_keys": ["planner_result"], "output_key": "execution_result"},
+        {"id": "test", "kind": "agent", "uses": "cc_tester", "input_keys": ["execution_result"], "output_key": "test_result"},
+        {"id": "judge", "kind": "agent", "uses": "codex_planner", "input_keys": ["test_result"], "output_key": "judge_result"},
     ],
     "edges": [
         {"source": "scan", "target": "map"},
         {"source": "map", "target": "plan"},
-        {"source": "plan", "target": "review"},
-        {"source": "review", "target": "approve"},
+        {"source": "plan", "target": "execute"},
+        {"source": "execute", "target": "test"},
+        {"source": "test", "target": "judge"},
+        {"source": "judge", "target": "execute", "condition": "retry"},
     ],
-    "stop_conditions": ["scope_escape", "risk_level == high", "max_loops reached"],
+    "stop_conditions": ["tests pass", "scope_escape", "risk_level == high", "max_loops reached"],
 }
 
 
@@ -283,23 +332,22 @@ def _save_agent(body: dict[str, Any]) -> dict[str, Any]:
 def _run_workflow(body: dict[str, Any]) -> dict[str, Any]:
     repo = str(body.get("repo", "")).strip()
     request = str(body.get("request", "")).strip() or "Analyze this project and propose a safe improvement plan."
-    target_scope = _coerce_string_list(body.get("target_scope"))
-    allowed_paths = _coerce_string_list(body.get("allowed_paths")) or target_scope
-    check_command = str(body.get("check_command", "")).strip()
-    approved = bool(body.get("approved", False))
-    max_iterations = int(body.get("max_iterations", 2) or 2)
     if not repo:
         return {"error": "Project path is empty. Select a project folder before running."}
+    repo_root = resolve_existing_dir(repo)
+    files = summarize_project(repo_root, [], max_files=800)
+    modules = build_module_map(files)
+    run_settings = _infer_run_settings(repo_root, request, modules, files)
 
     state = {
         "user_request": request,
-        "repo_root": str(resolve_existing_dir(repo)),
+        "repo_root": str(repo_root),
         "reference_roots": [],
-        "target_scope": target_scope,
-        "allowed_paths": allowed_paths,
-        "check_command": check_command,
-        "approved": approved,
-        "max_iterations": max(1, min(max_iterations, 5)),
+        "target_scope": run_settings["target_scope"],
+        "allowed_paths": run_settings["allowed_paths"],
+        "check_command": run_settings["check_command"],
+        "approved": True,
+        "max_iterations": run_settings["max_iterations"],
     }
     agents = [AgentCard.model_validate(agent) for agent in DEFAULT_WORKFLOW["agents"]]
     events = RuntimeEventBus(agents=agents)
@@ -318,17 +366,37 @@ def _run_workflow(body: dict[str, Any]) -> dict[str, Any]:
         "events": events.dump(),
         "messages": events.dump_messages(),
         "a2a_queues": events.dump_a2a_queues(),
+        "run_settings": run_settings,
     }
 
 
-def _coerce_string_list(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [item.strip() for item in value.split(",") if item.strip()]
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    return []
+def _infer_run_settings(repo_root: Path, request: str, modules: list[dict], files: list[dict]) -> dict[str, Any]:
+    recommendations = recommend_modules(request, modules, files) if request else []
+    target_scope = [item["path"] for item in recommendations[:2] if item.get("path")]
+    return {
+        "target_scope": target_scope,
+        "allowed_paths": target_scope,
+        "check_command": _detect_check_command(repo_root, files),
+        "max_iterations": 3,
+        "source": "auto",
+    }
+
+
+def _detect_check_command(repo_root: Path, files: list[dict]) -> str:
+    paths = {item["path"] for item in files}
+    package_json = repo_root / "package.json"
+    if "package.json" in paths and package_json.exists():
+        try:
+            package = json.loads(package_json.read_text(encoding="utf-8"))
+            scripts = package.get("scripts", {})
+            for script in ["test", "typecheck", "lint", "build"]:
+                if script in scripts:
+                    return f"npm run {script}"
+        except json.JSONDecodeError:
+            pass
+    if "pyproject.toml" in paths or any(path.startswith("src/") and path.endswith(".py") for path in paths):
+        return "python -m compileall src"
+    return ""
 
 
 def _select_folder() -> str:
@@ -494,17 +562,7 @@ INDEX_HTML = r"""<!doctype html>
         </select>
         <label>导入 workflow / agent JSON</label>
         <input id="importFile" type="file" accept=".json,application/json" onchange="importWorkflow(event)" />
-        <label>Target scope (comma-separated)</label>
-        <input id="targetScope" placeholder="src, docs" />
-        <label>Allowed write paths (defaults to scope)</label>
-        <input id="allowedPaths" placeholder="src/coder_graph" />
-        <label>Check command</label>
-        <input id="checkCommand" placeholder="python -m compileall src" />
-        <label>Max iterations</label>
-        <input id="maxIterations" type="number" min="1" max="5" value="2" />
-        <div class="checkbox-row" style="margin-top:12px">
-          <label><input id="approveRun" type="checkbox" />Approve dry-run execution</label>
-        </div>
+        <p>默认工作流会自动选择相关范围、检查命令和重试次数。普通用户只需要选择项目并输入需求。</p>
         <p>限制范围不让用户手填。后续由模块选择、Project Index 和 Reviewer Agent 自动生成与审查边界。</p>
       </section>
 
@@ -700,12 +758,7 @@ INDEX_HTML = r"""<!doctype html>
       document.getElementById("result").textContent = "运行中...";
       const data = await post("/api/run", {
         repo: document.getElementById("repo").value,
-        request: document.getElementById("request").value,
-        target_scope: csvToList(document.getElementById("targetScope").value),
-        allowed_paths: csvToList(document.getElementById("allowedPaths").value),
-        check_command: document.getElementById("checkCommand").value,
-        approved: document.getElementById("approveRun").checked,
-        max_iterations: Number(document.getElementById("maxIterations").value || 2)
+        request: document.getElementById("request").value
       });
       document.getElementById("result").textContent = formatRunResult(data);
     }
@@ -714,7 +767,7 @@ INDEX_HTML = r"""<!doctype html>
       if (data.error) return data.error;
       const events = (data.events || []).map(event => `• [${event.source}] ${event.message} (${event.status || event.type})`).join("\n");
       const messages = (data.messages || []).map(message => `→ [${message.sender} -> ${message.recipient}] ${message.type}`).join("\n");
-      return `${events}\n\nA2A MESSAGES\n${messages || "No messages"}\n\nA2A QUEUES\n${JSON.stringify(data.a2a_queues || {}, null, 2)}\n\nPLAN\n${data.plan || ""}\n\nREVIEW\n${data.review || ""}\n\nSTATUS\n${JSON.stringify(data.status || {}, null, 2)}`;
+      return `${events}\n\nAUTO SETTINGS\n${JSON.stringify(data.run_settings || {}, null, 2)}\n\nA2A MESSAGES\n${messages || "No messages"}\n\nA2A QUEUES\n${JSON.stringify(data.a2a_queues || {}, null, 2)}\n\nPLAN\n${data.plan || ""}\n\nREVIEW\n${data.review || ""}\n\nSTATUS\n${JSON.stringify(data.status || {}, null, 2)}`;
     }
 
     function switchPage(page) {
