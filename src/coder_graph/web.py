@@ -174,9 +174,7 @@ def _run_workflow(body: dict[str, Any]) -> dict[str, Any]:
     }
     events = RuntimeEventBus()
     events.emit("ui", "status", "Workflow requested", status="running", payload={"repo": repo})
-    events.emit("planner", "message", "Planning started", status="running")
-    result = build_graph().invoke(state)
-    events.emit("reviewer", "message", "Review completed", status=str(result.get("status", "unknown")))
+    result = build_graph(event_bus=events).invoke(state)
     events.emit("ui", "result", "Workflow finished", status=str(result.get("status", "unknown")))
     return {
         "plan": result.get("plan", ""),
@@ -257,7 +255,7 @@ INDEX_HTML = r"""<!doctype html>
     h3 { margin:0 0 8px; font-size:15px; }
     p { color:#94a3b8; line-height:1.5; }
     main { display:grid; grid-template-rows: 1fr auto; min-height:calc(100vh - 82px); }
-    .workspace { display:grid; grid-template-columns: 300px minmax(520px,1fr) 360px; gap:14px; padding:14px; min-height:0; }
+    .workspace { display:grid; grid-template-columns: 300px minmax(620px,1fr) 320px; gap:14px; padding:14px; min-height:0; }
     .panel { border:1px solid #334155; background:#111827; border-radius:16px; padding:14px; min-height:0; }
     label { display:block; margin-top:12px; color:#cbd5e1; font-size:13px; }
     input, textarea, select { width:100%; margin-top:6px; padding:10px; border-radius:10px; border:1px solid #334155; background:#020617; color:#e5e7eb; }
@@ -282,8 +280,10 @@ INDEX_HTML = r"""<!doctype html>
     .agent-list { display:flex; flex-wrap:wrap; gap:10px; align-content:flex-start; min-height:120px; border:1px dashed #334155; border-radius:14px; padding:10px; background:#020617; }
     .agent { width:150px; min-height:86px; border:1px solid #334155; border-radius:14px; padding:10px; background:#0f172a; cursor:grab; user-select:none; }
     .agent.selected { border-color:#38bdf8; }
-    .canvas { position:relative; min-height:270px; margin-top:12px; border:1px dashed #334155; border-radius:14px; padding:10px; background:#020617; overflow:hidden; }
-    .agent-canvas-svg { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+    .canvas { position:relative; height:calc(100vh - 205px); margin-top:12px; border:1px dashed #334155; border-radius:14px; padding:10px; background:#020617; overflow:hidden; }
+    .agent-canvas-svg { position:absolute; inset:0; width:100%; height:100%; pointer-events:auto; }
+    .agent-edge { cursor:pointer; pointer-events:stroke; }
+    .agent-edge:hover { stroke:#ef4444; stroke-width:4; }
     .canvas .agent { position:absolute; cursor:pointer; }
     .config { white-space:pre-wrap; background:#020617; border:1px solid #334155; padding:12px; border-radius:12px; max-height:260px; overflow:auto; }
     .tabs { display:flex; gap:8px; margin-bottom:10px; }
@@ -328,8 +328,9 @@ INDEX_HTML = r"""<!doctype html>
           <div id="modules" class="modules"></div>
         </div>
         <div id="workflowPage" class="page">
-          <h3>当前工作流画布</h3>
-          <button class="secondary" id="connectButton" onclick="toggleConnectMode()">连接 agent：关闭</button>
+        <h3>当前工作流画布</h3>
+        <p>拖动 agent 调整位置。点击“连接 agent”后，依次点击起点和终点创建箭头。点击箭头可删除。</p>
+        <button class="secondary" id="connectButton" onclick="toggleConnectMode()">连接 agent：关闭</button>
           <div id="agentCanvas" class="canvas" ondragover="event.preventDefault()" ondrop="dropToCanvas(event)"></div>
         </div>
       </section>
@@ -622,8 +623,13 @@ INDEX_HTML = r"""<!doctype html>
       if (!from || !to) return "";
       const x1 = (from.x || 0) + 150, y1 = (from.y || 0) + 42;
       const x2 = (to.x || 0), y2 = (to.y || 0) + 42;
-      return `<path d="M${x1},${y1} C${x1 + 45},${y1} ${x2 - 45},${y2} ${x2},${y2}" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#agentArrow)" />
+      return `<path class="agent-edge" onclick="deleteAgentEdge('${edge.from}', '${edge.to}')" d="M${x1},${y1} C${x1 + 45},${y1} ${x2 - 45},${y2} ${x2},${y2}" stroke="#38bdf8" stroke-width="2" fill="none" marker-end="url(#agentArrow)" />
         <defs><marker id="agentArrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#38bdf8" /></marker></defs>`;
+    }
+
+    function deleteAgentEdge(from, to) {
+      agentEdges = agentEdges.filter(edge => !(edge.from === from && edge.to === to));
+      renderAgents();
     }
 
     function selectAgentNode(event, id, encoded) {
