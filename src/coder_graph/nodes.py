@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from langchain_openai import ChatOpenAI
-
 from .config import load_runtime_config
+from .llm import create_chat_model
 from .state import CodingState
 from .tools.commands import run_check
 from .tools.filesystem import normalize_allowed_paths, resolve_existing_dir, summarize_project
@@ -52,18 +51,18 @@ def scan_repo_node(state: CodingState) -> CodingState:
 
 def plan_node(state: CodingState) -> CodingState:
     config = load_runtime_config()
-    if not config.has_openai_key:
+    if not config.has_llm_credentials:
         return {
             **state,
             "plan": _fallback_plan(state),
             "proposed_changes": [
-                "No LLM key found. Add OPENAI_API_KEY to generate a concrete implementation plan.",
+                "No LLM credentials found. Configure CODER_PROVIDER and the matching API key to generate a concrete implementation plan.",
                 "Keep execution in dry-run until a human approves specific files and changes.",
             ],
             "status": "planned",
         }
 
-    llm = ChatOpenAI(model=config.model, temperature=0)
+    llm = create_chat_model(config)
     response = llm.invoke(_planning_prompt(state))
     return {
         **state,
@@ -154,11 +153,11 @@ def _fallback_plan(state: CodingState) -> str:
     files = state.get("repo_files", [])[:30]
     file_list = "\n".join(f"- {item['path']} ({item['kind']})" for item in files)
     return (
-        "LLM planning is disabled because OPENAI_API_KEY is not set.\n\n"
+        "LLM planning is disabled because no model credentials are configured.\n\n"
         f"User request:\n{state['user_request']}\n\n"
         "Visible candidate files:\n"
         f"{file_list or '- No text files found in scope.'}\n\n"
-        "Recommended next step: set OPENAI_API_KEY, provide a narrow --scope, then review the generated plan."
+        "Recommended next step: configure CODER_PROVIDER and the matching API key, provide a narrow --scope, then review the generated plan."
     )
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pprint import pprint
 
 from dotenv import load_dotenv
@@ -20,7 +21,17 @@ def main() -> None:
     parser.add_argument("--check", default="", help="Check command to run in repo root.")
     parser.add_argument("--approve", action="store_true", help="Approve dry-run execution after planning.")
     parser.add_argument("--max-iterations", type=int, default=2)
+    parser.add_argument("--provider", help="Override CODER_PROVIDER for this run.")
+    parser.add_argument("--model", help="Override CODER_MODEL for this run.")
+    parser.add_argument("--base-url", help="Override CODER_BASE_URL for this run.")
     args = parser.parse_args()
+
+    if args.provider:
+        os.environ["CODER_PROVIDER"] = args.provider
+    if args.model:
+        os.environ["CODER_MODEL"] = args.model
+    if args.base_url:
+        os.environ["CODER_BASE_URL"] = args.base_url
 
     initial_state: CodingState = {
         "user_request": args.request,
