@@ -9,6 +9,17 @@ class FileSummary(TypedDict):
     kind: str
 
 
+class ModuleSummary(TypedDict):
+    id: str
+    name: str
+    path: str
+    file_count: int
+    size_bytes: int
+    importance: Literal["low", "medium", "high"]
+    risk: Literal["low", "medium", "high"]
+    reason: str
+
+
 class CodingState(TypedDict, total=False):
     user_request: str
 
@@ -19,6 +30,7 @@ class CodingState(TypedDict, total=False):
 
     repo_files: list[FileSummary]
     reference_files: dict[str, list[FileSummary]]
+    modules: list[ModuleSummary]
 
     plan: str
     approval_required: bool
@@ -26,6 +38,7 @@ class CodingState(TypedDict, total=False):
 
     proposed_changes: list[str]
     changed_files: list[str]
+    snapshot_id: str
 
     check_command: str
     check_output: str

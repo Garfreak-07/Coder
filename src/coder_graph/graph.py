@@ -7,6 +7,7 @@ from .nodes import (
     check_node,
     execute_node,
     intake_node,
+    module_map_node,
     plan_node,
     review_node,
     route_after_approval,
@@ -21,6 +22,7 @@ def build_graph():
 
     graph.add_node("intake", intake_node)
     graph.add_node("scan_repo", scan_repo_node)
+    graph.add_node("module_map", module_map_node)
     graph.add_node("plan", plan_node)
     graph.add_node("approval", approval_node)
     graph.add_node("execute", execute_node)
@@ -30,7 +32,8 @@ def build_graph():
 
     graph.add_edge(START, "intake")
     graph.add_edge("intake", "scan_repo")
-    graph.add_edge("scan_repo", "plan")
+    graph.add_edge("scan_repo", "module_map")
+    graph.add_edge("module_map", "plan")
     graph.add_edge("plan", "approval")
 
     graph.add_conditional_edges(

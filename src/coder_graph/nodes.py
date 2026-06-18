@@ -4,6 +4,7 @@ from pathlib import Path
 
 from .config import load_runtime_config
 from .llm import create_chat_model
+from .module_map import build_module_map
 from .state import CodingState
 from .tools.commands import run_check
 from .tools.filesystem import normalize_allowed_paths, resolve_existing_dir, summarize_project
@@ -46,6 +47,13 @@ def scan_repo_node(state: CodingState) -> CodingState:
         **state,
         "repo_files": summarize_project(repo_root, target_scope, max_files=400),
         "reference_files": reference_files,
+    }
+
+
+def module_map_node(state: CodingState) -> CodingState:
+    return {
+        **state,
+        "modules": build_module_map(state.get("repo_files", [])),
     }
 
 
@@ -186,6 +194,9 @@ Allowed paths:
 Target repo files:
 {repo_files}
 
+Detected modules:
+{_module_lines(state)}
+
 Reference projects:
 {chr(10).join(references) if references else 'None'}
 
@@ -201,3 +212,13 @@ Include:
 
 def _split_plan_lines(plan: str) -> list[str]:
     return [line.strip() for line in plan.splitlines() if line.strip()]
+
+
+def _module_lines(state: CodingState) -> str:
+    modules = state.get("modules", [])
+    if not modules:
+        return "None"
+    return "\n".join(
+        f"- {module['path']} (importance={module['importance']}, risk={module['risk']}, files={module['file_count']})"
+        for module in modules[:80]
+    )

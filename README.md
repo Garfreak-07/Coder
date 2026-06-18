@@ -102,6 +102,21 @@ Windows 交互式入口：
 
 第一次运行时，如果没有 `.venv`，脚本会询问是否创建虚拟环境并安装依赖。
 
+生成可点击的项目模块地图：
+
+```powershell
+langgraph-coder --repo "D:\projects\some-app" --map-only
+```
+
+默认会生成：
+
+```text
+outputs/module-map.json
+outputs/module-map.html
+```
+
+打开 `module-map.html` 后可以点击模块，查看重要性、风险、文件数量，并复制带 `--scope` 的运行命令。
+
 分析当前项目：
 
 ```powershell
@@ -171,3 +186,15 @@ done / retry / blocked
 ```
 
 不要把 API key 提交到仓库。`.env` 已被 `.gitignore` 忽略，`.env.example` 可以提交。
+
+## 回滚策略
+
+后续启用真实 patch 执行后，Coder 会在每次应用修改前创建本地快照。默认最多保留 20 个快照。
+
+这个数量是刻意保守的：
+
+- 对普通项目足够覆盖一段连续修改历史；
+- 不会像无限历史那样占用太多空间；
+- 真正长期版本管理仍然应该交给 git。
+
+未来 GUI 里的“上一步 / 下一步”按钮会基于这些快照和 patch 记录实现。

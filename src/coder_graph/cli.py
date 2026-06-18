@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 from pprint import pprint
 
 from dotenv import load_dotenv
 
 from .graph import build_graph
+from .module_map import build_module_map, write_module_map
 from .state import CodingState
+from .tools.filesystem import resolve_existing_dir, summarize_project
 
 
 def main() -> None:
@@ -24,6 +27,8 @@ def main() -> None:
     parser.add_argument("--provider", help="Override CODER_PROVIDER for this run.")
     parser.add_argument("--model", help="Override CODER_MODEL for this run.")
     parser.add_argument("--base-url", help="Override CODER_BASE_URL for this run.")
+    parser.add_argument("--map-only", action="store_true", help="Generate a clickable module map and exit.")
+    parser.add_argument("--output-dir", default="outputs", help="Output directory for generated artifacts.")
     args = parser.parse_args()
 
     if args.provider:
@@ -32,6 +37,15 @@ def main() -> None:
         os.environ["CODER_MODEL"] = args.model
     if args.base_url:
         os.environ["CODER_BASE_URL"] = args.base_url
+
+    if args.map_only:
+        repo_root = resolve_existing_dir(args.repo)
+        files = summarize_project(repo_root, args.scope, max_files=800)
+        modules = build_module_map(files)
+        json_path, html_path = write_module_map(Path(args.output_dir), modules)
+        print(f"Module map JSON: {json_path}")
+        print(f"Module map HTML: {html_path}")
+        return
 
     initial_state: CodingState = {
         "user_request": args.request,
