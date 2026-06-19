@@ -362,6 +362,11 @@ Implemented:
   - select blocked live runs for approval after loading their persisted events
 - gate-specific approval resume so separate human gates can be approved
   independently
+- frontend i18n foundation for ordinary-user Chinese labels while keeping JSON,
+  API, node types, tool names, and internal schema fields in English
+- template-first frontend entry with default coding workflow and blank advanced
+  workflow cards before the saved workflow library
+- readable Chinese canvas node labels with internal node IDs still visible
 - CLI execution:
 
 ```powershell
@@ -379,28 +384,23 @@ python -m coder_workbench.cli --repo . --workflow examples\workflows\coding-work
 
 ## Near-term roadmap
 
-1. Add frontend i18n foundation and template-first entry:
-   - minimal Chinese UI dictionary;
-   - Chinese labels for ordinary user surfaces;
-   - keep workflow JSON/API/internal schema fields in English;
-   - present the default coding workflow as a template card before raw JSON.
-2. Add ContextPacket data model and event display:
+1. Add ContextPacket data model and event display:
    - emit agent context packets as inspectable run events;
    - show task, upstream artifacts, selected project context, allowed tools,
      token estimates, and output artifacts in the UI.
-3. Add provider settings UI for OpenAI/DeepSeek keys, base URL, default model,
+2. Add provider settings UI for OpenAI/DeepSeek keys, base URL, default model,
    connection testing, and mock mode. Do not store API keys in workflow JSON.
-4. Add local `.md` / `.txt` document knowledge MVP:
+3. Add local `.md` / `.txt` document knowledge MVP:
    - local storage;
    - chunking and retrieval;
    - provenance shown in context packets.
-5. Expand durable recovery from persisted blocked run snapshots to active
+4. Expand durable recovery from persisted blocked run snapshots to active
    resume after process restart.
-6. Add long-lived MCP server sessions and tool discovery/listing instead of
+5. Add long-lived MCP server sessions and tool discovery/listing instead of
    only short-lived configured stdio calls.
-7. Add provider-specific non-OpenAI-compatible executor adapters where needed,
+6. Add provider-specific non-OpenAI-compatible executor adapters where needed,
    starting with native SDKs only when the OpenAI-compatible endpoint is not
    sufficient.
-8. Add desktop packaging and stronger product polish: settings persistence,
+7. Add desktop packaging and stronger product polish: settings persistence,
    diff viewer improvements, rejection reasons in the event timeline, and
    richer rollback conflict handling.

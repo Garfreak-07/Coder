@@ -60,6 +60,11 @@ label {
   font-size: 13px;
 }
 
+.field-help {
+  color: #7b8797;
+  font-size: 12px;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 280px minmax(640px, 1fr) 320px;
@@ -196,6 +201,49 @@ label {
 .form-stack {
   display: grid;
   gap: 10px;
+}
+
+.template-list {
+  display: grid;
+  gap: 10px;
+}
+
+.template-card {
+  background: #101826;
+  border: 1px solid #263244;
+  border-radius: 12px;
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+}
+
+.template-card p {
+  color: #aeb8c7;
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.template-heading {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.template-heading span {
+  background: #172554;
+  border-radius: 999px;
+  color: #bfdbfe;
+  font-size: 11px;
+  padding: 3px 7px;
+}
+
+.template-meta {
+  color: #8fa0b3;
+  display: grid;
+  font-size: 12px;
+  gap: 5px;
 }
 
 .list-item {
