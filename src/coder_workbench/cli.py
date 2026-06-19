@@ -58,7 +58,12 @@ def main() -> None:
         workflow=workflow,
         request=args.request,
         repo_root=str(repo_root),
-        initial_data={"request": args.request, "approved": args.approve, "scopes": args.scope},
+        initial_data={
+            "request": args.request,
+            "approved": args.approve,
+            "preapprove_all": args.approve,
+            "scopes": args.scope,
+        },
     )
     print("\n=== STATUS ===")
     pprint(

@@ -15,6 +15,7 @@ EventType = Literal[
     "agent.called",
     "tool.called",
     "approval.required",
+    "approval.recorded",
     "edge.selected",
     "budget.warning",
     "run.completed",

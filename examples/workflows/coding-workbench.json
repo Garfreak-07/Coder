@@ -34,9 +34,9 @@
     {
       "id": "executor",
       "role": "Implementation Agent",
-      "goal": "Prepare a scoped patch plan without mutating files in this safety-first slice.",
-      "instructions": "Follow the approved plan. Keep output compact. Do not request broad edits.",
-      "tools": ["dry_run_patch"],
+      "goal": "Prepare a scoped patch proposal.",
+      "instructions": "Follow the approved plan. Return JSON with a changes array of {path, action, content}. Do not claim files were changed.",
+      "tools": ["propose_patch"],
       "output_key": "execution",
       "permissions": {
         "read_files": true,
@@ -120,21 +120,35 @@
       "output_key": "execution"
     },
     {
-      "id": "dry_patch",
+      "id": "propose_patch",
       "type": "tool",
-      "tool": "dry_run_patch",
+      "tool": "propose_patch",
       "input": {
         "changes": "$execution"
       },
       "output_key": "patch_preview"
     },
     {
+      "id": "patch_approval",
+      "type": "human_gate",
+      "approval_reason": "Approve before applying the proposed patch.",
+      "output_key": "patch_approval"
+    },
+    {
+      "id": "apply_patch",
+      "type": "tool",
+      "tool": "apply_patch",
+      "input": {
+        "patch": "$patch_preview"
+      },
+      "output_key": "patch_apply"
+    },
+    {
       "id": "check",
       "type": "tool",
       "tool": "run_check",
       "input": {
-        "command": "",
-        "approved": false
+        "command": ""
       },
       "output_key": "check_result"
     },
@@ -173,10 +187,19 @@
     },
     {
       "from": "execute",
-      "to": "dry_patch"
+      "to": "propose_patch"
     },
     {
-      "from": "dry_patch",
+      "from": "propose_patch",
+      "to": "patch_approval"
+    },
+    {
+      "from": "patch_approval",
+      "to": "apply_patch",
+      "when": "patch_approval.approved == True"
+    },
+    {
+      "from": "apply_patch",
       "to": "check"
     },
     {

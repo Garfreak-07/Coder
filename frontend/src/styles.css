@@ -296,6 +296,88 @@ label {
   padding: 10px;
 }
 
+.patch-panel {
+  background: #101826;
+  border: 1px solid #263244;
+  border-radius: 12px;
+  display: grid;
+  gap: 12px;
+  padding: 10px;
+}
+
+.diff-block {
+  border-top: 1px solid #263244;
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+}
+
+.patch-errors {
+  display: grid;
+  gap: 8px;
+}
+
+.patch-error {
+  background: rgba(127, 29, 29, 0.35);
+  border: 1px solid #7f1d1d;
+  border-radius: 8px;
+  color: #fecaca;
+  display: grid;
+  font-size: 12px;
+  gap: 4px;
+  padding: 8px;
+}
+
+.patch-error code {
+  color: #fca5a5;
+}
+
+.approval-card {
+  background: #101826;
+  border: 1px solid #263244;
+  border-radius: 12px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.approval-card pre {
+  background: #07111f;
+  border-radius: 8px;
+  color: #d1d5db;
+  font-size: 11px;
+  margin: 0;
+  overflow: auto;
+  padding: 8px;
+  white-space: pre-wrap;
+}
+
+.approval-record {
+  color: #cbd5e1;
+  display: grid;
+  font-size: 12px;
+  gap: 4px;
+  grid-template-columns: 1fr 1fr 1fr;
+}
+
+.approval-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.diff-block pre,
+.patch-panel pre {
+  background: #07111f;
+  border-radius: 8px;
+  color: #d1d5db;
+  font-size: 11px;
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 8px;
+  white-space: pre-wrap;
+}
+
 .summary-grid {
   color: #9ca3af;
   display: grid;

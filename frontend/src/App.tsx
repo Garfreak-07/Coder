@@ -13,12 +13,25 @@ import {
   type Node as FlowNode,
   type NodeChange
 } from "@xyflow/react";
-import { approveLiveRun, getAgent, getLibrary, getWorkflow, saveAgent, saveWorkflow, startLiveRun, subscribeRunEvents } from "./api";
+import {
+  approveLiveRun,
+  getHealth,
+  getAgent,
+  getLibrary,
+  getLiveRuns,
+  getRuns,
+  getWorkflow,
+  rollbackPatch,
+  saveAgent,
+  saveWorkflow,
+  startLiveRun,
+  subscribeRunEvents
+} from "./api";
 import { codingWorkbenchWorkflow } from "./examples";
 import { workflowTemplate } from "./template";
-import type { AgentSpec, EdgeSpec, LibraryIndex, NodeSpec, NodeType, RunEvent, WorkflowSpec } from "./types";
+import type { AgentSpec, EdgeSpec, HealthStatus, LibraryIndex, NodeSpec, NodeType, RunEvent, RunSummaryItem, WorkflowSpec } from "./types";
 
-const nodeTypes: NodeType[] = ["start", "agent", "tool", "condition", "human_gate", "end"];
+const nodeTypes: NodeType[] = ["start", "agent", "tool", "mcp_tool", "condition", "human_gate", "end"];
 
 export function App() {
   const [library, setLibrary] = useState<LibraryIndex>({ agents: [], workflows: [] });
@@ -36,6 +49,9 @@ export function App() {
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [runHistory, setRunHistory] = useState<RunSummaryItem[]>([]);
+  const [liveRuns, setLiveRuns] = useState<RunSummaryItem[]>([]);
+  const [health, setHealth] = useState<HealthStatus | null>(null);
 
   const selectedNode = useMemo(
     () => workflow.nodes.find((node) => node.id === selectedNodeId) ?? null,
@@ -53,12 +69,23 @@ export function App() {
 
   useEffect(() => {
     refreshLibrary();
+    refreshRuntimeInfo();
   }, []);
 
   function refreshLibrary() {
     getLibrary()
       .then(setLibrary)
       .catch((error) => setStatus(`Failed to load library: ${error.message}`));
+  }
+
+  function refreshRuntimeInfo() {
+    Promise.all([getRuns(), getLiveRuns(), getHealth()])
+      .then(([runs, live, nextHealth]) => {
+        setRunHistory(runs);
+        setLiveRuns(live);
+        setHealth(nextHealth);
+      })
+      .catch((error) => setStatus(`Failed to load runtime info: ${error.message}`));
   }
 
   function setCurrentWorkflow(next: WorkflowSpec) {
@@ -144,6 +171,7 @@ export function App() {
           type,
           ...(type === "agent" ? { agent_id: current.agents[0]?.id ?? "agent_id" } : {}),
           ...(type === "tool" ? { tool: "project_index" } : {}),
+          ...(type === "mcp_tool" ? { tool: "tool_name", input: { server_command: "" } } : {}),
           ...(type === "condition" ? { condition: "state.value == True" } : {})
         }
       ]
@@ -291,21 +319,25 @@ export function App() {
       setActiveRunId(run.run_id);
       setStatus(`Live run ${run.run_id}: ${run.status}`);
       subscribeToRun(run.run_id, run.events_url);
+      refreshRuntimeInfo();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
   }
 
-  async function approveAndResumeRun() {
+  async function approveAndResumeRun(approvedValue = true, reason?: string) {
     if (!activeRunId) {
       setStatus("No blocked live run selected.");
       return;
     }
-    setStatus(`Approving live run ${activeRunId}...`);
+    setStatus(`${approvedValue ? "Approving" : "Rejecting"} live run ${activeRunId}...`);
     try {
-      const run = await approveLiveRun(activeRunId);
+      const run = await approveLiveRun(activeRunId, { approved: approvedValue, reason });
       setStatus(`Live run ${run.run_id}: ${run.status}`);
-      subscribeToRun(run.run_id, run.events_url);
+      if (approvedValue) {
+        subscribeToRun(run.run_id, run.events_url);
+      }
+      refreshRuntimeInfo();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
@@ -388,6 +420,25 @@ export function App() {
             Pre-approve gates
           </label>
           <button onClick={() => runWorkflow()}>Start live run</button>
+        </section>
+
+        <section className="panel">
+          <div className="panel-title">Runtime</div>
+          <button onClick={refreshRuntimeInfo}>Refresh runtime info</button>
+          <div className="summary-grid">
+            <span>{health?.status ?? "unknown"}</span>
+            <span>{health?.tools.length ?? 0} tools</span>
+            <span>{liveRuns.length} live runs</span>
+            <span>{runHistory.length} stored runs</span>
+          </div>
+          <div className="list compact-list">
+            {liveRuns.slice(0, 5).map((run) => (
+              <button className="list-item" key={run.id} onClick={() => setActiveRunId(run.id)}>
+                <span>{run.workflow_id}</span>
+                <small>{run.status} / {run.events} events</small>
+              </button>
+            ))}
+          </div>
         </section>
       </aside>
 
@@ -498,7 +549,13 @@ export function App() {
 
         <section className="panel events-panel">
           <div className="panel-title">Run Events</div>
-          <RunSummary events={events} onApproveAndRun={approveAndResumeRun} />
+          <RunSummary events={events} onApprovalDecision={approveAndResumeRun} />
+          <PatchPanel
+            events={events}
+            repo={repo}
+            scopes={linesToList(scopesText)}
+            onStatus={setStatus}
+          />
           {events.length === 0 ? (
             <div className="muted">No events yet.</div>
           ) : (
@@ -521,12 +578,125 @@ export function App() {
   );
 }
 
-function RunSummary({ events, onApproveAndRun }: { events: RunEvent[]; onApproveAndRun: () => void }) {
+function PatchPanel({
+  events,
+  repo,
+  scopes,
+  onStatus
+}: {
+  events: RunEvent[];
+  repo: string;
+  scopes: string[];
+  onStatus: (status: string) => void;
+}) {
+  const patch = latestToolResult(events, "propose_patch") ?? latestToolResult(events, "dry_patch");
+  const apply = latestToolResult(events, "apply_patch");
+  const check = latestToolResult(events, "check");
+  const files = Array.isArray(patch?.files) ? patch.files : [];
+  const snapshotId = typeof apply?.snapshot_id === "string" ? apply.snapshot_id : null;
+  const applyErrors = Array.isArray(apply?.errors) ? apply.errors : [];
+
+  async function rollback() {
+    if (!snapshotId) return;
+    onStatus(`Rolling back snapshot ${snapshotId}...`);
+    try {
+      const result = await rollbackPatch({ repo, snapshot_id: snapshotId, scopes });
+      onStatus(String(result.rollback.message ?? `Rolled back ${snapshotId}`));
+    } catch (error) {
+      onStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  if (!patch && !apply && !check) return null;
+
+  return (
+    <div className="patch-panel">
+      {patch && (
+        <div>
+          <div className="panel-subtitle">Patch Preview</div>
+          {files.length === 0 ? (
+            <div className="muted">No file changes proposed.</div>
+          ) : (
+            files.map((file, index) => {
+              const item = file as Record<string, unknown>;
+              return (
+                <div className="diff-block" key={`${String(item.path)}-${index}`}>
+                  <div className="event-heading">
+                    <strong>{String(item.path ?? "unknown")}</strong>
+                    <code>{String(item.action ?? "update")}</code>
+                  </div>
+                  <pre>{String(item.diff ?? "")}</pre>
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+      {apply && (
+        <div>
+          <div className="panel-subtitle">Patch Apply</div>
+          <div className="summary-grid">
+            <span>{String(apply.status ?? "unknown")}</span>
+            {snapshotId && <span>snapshot {snapshotId.slice(0, 8)}</span>}
+          </div>
+          {typeof apply.message !== "undefined" && <div className="muted">{String(apply.message)}</div>}
+          {applyErrors.length > 0 && (
+            <div className="patch-errors">
+              {applyErrors.map((error, index) => {
+                const item = error as Record<string, unknown>;
+                return (
+                  <div className="patch-error" key={`${String(item.path ?? "unknown")}-${index}`}>
+                    <strong>{String(item.path ?? "unknown")}</strong>
+                    <code>{String(item.code ?? "error")}</code>
+                    <span>{String(item.message ?? "Patch apply rejected.")}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {snapshotId && <button onClick={rollback}>Rollback snapshot</button>}
+        </div>
+      )}
+      {check && (
+        <div>
+          <div className="panel-subtitle">Check Result</div>
+          <div className="summary-grid">
+            <span>{check.passed ? "passed" : "not passed"}</span>
+            {typeof check.returncode === "number" && <span>exit {check.returncode}</span>}
+          </div>
+          {typeof check.output !== "undefined" && <pre>{String(check.output)}</pre>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function latestToolResult(events: RunEvent[], nodeId: string): Record<string, unknown> | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.type !== "node.completed" || event.node_id !== nodeId) continue;
+    const result = event.payload?.result;
+    if (result && typeof result === "object" && !Array.isArray(result)) return result as Record<string, unknown>;
+  }
+  return null;
+}
+
+function RunSummary({
+  events,
+  onApprovalDecision
+}: {
+  events: RunEvent[];
+  onApprovalDecision: (approved: boolean, reason?: string) => void;
+}) {
+  const [reason, setReason] = useState("");
   const latest = events.at(-1);
   const agentCalls = events.filter((event) => event.type === "agent.called").length;
   const toolCalls = events.filter((event) => event.type === "tool.called").length;
   const selectedEdges = events.filter((event) => event.type === "edge.selected").length;
   const needsApproval = events.some((event) => event.type === "approval.required");
+  const approvalRequests = events.filter((event) => event.type === "approval.required");
+  const approvalRecords = events.filter((event) => event.type === "approval.recorded");
+  const latestApproval = approvalRequests.at(-1);
   const isBlocked = latest?.type === "run.blocked";
 
   if (events.length === 0) return null;
@@ -543,7 +713,36 @@ function RunSummary({ events, onApproveAndRun }: { events: RunEvent[]; onApprove
         <span>{selectedEdges} edges</span>
       </div>
       {needsApproval && isBlocked && (
-        <button onClick={onApproveAndRun}>Approve and resume</button>
+        <div className="approval-actions">
+          <input placeholder="Optional approval/rejection reason" value={reason} onChange={(event) => setReason(event.target.value)} />
+          <div className="button-row">
+            <button onClick={() => onApprovalDecision(true, reason || undefined)}>Approve and resume</button>
+            <button onClick={() => onApprovalDecision(false, reason || "Rejected by local user")}>Reject</button>
+          </div>
+        </div>
+      )}
+      {latestApproval && isBlocked && (
+        <div className="approval-card">
+          <div className="panel-subtitle">Pending Approval</div>
+          <div className="summary-grid">
+            <span>{String(latestApproval.payload?.approval_type ?? "human_gate")}</span>
+            <span>{latestApproval.node_id ?? "unknown node"}</span>
+          </div>
+          {typeof latestApproval.payload?.command !== "undefined" && <pre>{String(latestApproval.payload.command)}</pre>}
+          {typeof latestApproval.payload?.reason !== "undefined" && <div className="muted">{String(latestApproval.payload.reason)}</div>}
+        </div>
+      )}
+      {approvalRecords.length > 0 && (
+        <div className="approval-card">
+          <div className="panel-subtitle">Approval Audit</div>
+          {approvalRecords.map((event) => (
+            <div className="approval-record" key={event.id}>
+              <span>{String(event.payload?.approval_type ?? "approval")}</span>
+              <span>{event.payload?.approved ? "approved" : "rejected"}</span>
+              <span>{String(event.payload?.node_id ?? event.node_id ?? "unknown node")}</span>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -601,10 +800,26 @@ function NodeInspector({
           </select>
         </label>
       )}
-      {node.type === "tool" && (
+      {(node.type === "tool" || node.type === "mcp_tool") && (
         <label>
-          Tool
+          {node.type === "mcp_tool" ? "MCP tool name" : "Tool"}
           <input value={node.tool ?? ""} onChange={(event) => onChange({ tool: event.target.value })} />
+        </label>
+      )}
+      {(node.type === "tool" || node.type === "mcp_tool") && (
+        <label>
+          Input JSON
+          <textarea
+            defaultValue={formatJson(node.input ?? {})}
+            onBlur={(event) => {
+              try {
+                onChange({ input: JSON.parse(event.target.value) as Record<string, unknown> });
+              } catch {
+                event.currentTarget.value = formatJson(node.input ?? {});
+              }
+            }}
+            rows={5}
+          />
         </label>
       )}
       {node.type === "condition" && (
@@ -898,6 +1113,7 @@ function cleanNode(node: NodeSpec): NodeSpec {
     type: node.type,
     ...(node.type === "agent" ? { agent_id: node.agent_id || "agent_id" } : {}),
     ...(node.type === "tool" ? { tool: node.tool || "project_index" } : {}),
+    ...(node.type === "mcp_tool" ? { tool: node.tool || "tool_name" } : {}),
     ...(node.type === "condition" ? { condition: node.condition || "state.value == True" } : {}),
     ...(node.type === "human_gate" && node.approval_reason ? { approval_reason: node.approval_reason } : {}),
     ...(node.output_key ? { output_key: node.output_key } : {}),

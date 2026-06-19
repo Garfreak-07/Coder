@@ -1,4 +1,4 @@
-export type NodeType = "start" | "agent" | "tool" | "condition" | "human_gate" | "end";
+export type NodeType = "start" | "agent" | "tool" | "mcp_tool" | "condition" | "human_gate" | "end";
 
 export interface PermissionPolicy {
   read_files: boolean;
@@ -96,4 +96,23 @@ export interface RunEvent {
   message?: string | null;
   payload?: Record<string, unknown>;
   created_at?: string;
+}
+
+export interface RunSummaryItem {
+  id: string;
+  workflow_id: string;
+  repo_root: string;
+  request: string;
+  status: string;
+  events: number;
+  agent_calls?: number;
+  tool_calls?: number;
+  estimated_tokens_used?: number;
+  stored_run_id?: string | null;
+  error?: string | null;
+}
+
+export interface HealthStatus {
+  status: string;
+  tools: string[];
 }

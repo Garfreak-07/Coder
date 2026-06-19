@@ -38,9 +38,10 @@ export const codingWorkbenchWorkflow: WorkflowSpec = {
     {
       id: "executor",
       role: "Implementation Agent",
-      goal: "Prepare a scoped patch plan without mutating files in this first v2 slice.",
-      instructions: "Follow the approved plan. Keep output compact. Do not request broad edits.",
-      tools: ["dry_run_patch"],
+      goal: "Prepare a scoped patch proposal.",
+      instructions:
+        "Follow the approved plan. Return JSON with a changes array of {path, action, content}. Do not claim files were changed.",
+      tools: ["propose_patch"],
       output_key: "execution",
       permissions: {
         read_files: true,
@@ -100,8 +101,15 @@ export const codingWorkbenchWorkflow: WorkflowSpec = {
       output_key: "approval"
     },
     { id: "execute", type: "agent", agent_id: "executor", output_key: "execution" },
-    { id: "dry_patch", type: "tool", tool: "dry_run_patch", input: { changes: "$execution" }, output_key: "patch_preview" },
-    { id: "check", type: "tool", tool: "run_check", input: { command: "", approved: false }, output_key: "check_result" },
+    { id: "propose_patch", type: "tool", tool: "propose_patch", input: { changes: "$execution" }, output_key: "patch_preview" },
+    {
+      id: "patch_approval",
+      type: "human_gate",
+      approval_reason: "Approve before applying the proposed patch.",
+      output_key: "patch_approval"
+    },
+    { id: "apply_patch", type: "tool", tool: "apply_patch", input: { patch: "$patch_preview" }, output_key: "patch_apply" },
+    { id: "check", type: "tool", tool: "run_check", input: { command: "" }, output_key: "check_result" },
     { id: "review", type: "agent", agent_id: "reviewer", output_key: "review" },
     { id: "finish", type: "end" }
   ],
@@ -111,8 +119,10 @@ export const codingWorkbenchWorkflow: WorkflowSpec = {
     { from: "recommend_scope", to: "plan" },
     { from: "plan", to: "approval" },
     { from: "approval", to: "execute", when: "approval.approved == True" },
-    { from: "execute", to: "dry_patch" },
-    { from: "dry_patch", to: "check" },
+    { from: "execute", to: "propose_patch" },
+    { from: "propose_patch", to: "patch_approval" },
+    { from: "patch_approval", to: "apply_patch", when: "patch_approval.approved == True" },
+    { from: "apply_patch", to: "check" },
     { from: "check", to: "review" },
     { from: "review", to: "finish" }
   ],

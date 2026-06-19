@@ -48,6 +48,7 @@ Initial node types:
 - `start`
 - `agent`
 - `tool`
+- `mcp_tool`
 - `condition`
 - `human_gate`
 - `end`
@@ -58,7 +59,6 @@ Future node types:
 - `parallel`
 - `subworkflow`
 - `patch_review`
-- `mcp_tool`
 - `external_agent`
 
 ### Agent configuration
@@ -260,6 +260,22 @@ Decision: reference only.
 
 ## Current implemented slice
 
+Progress status:
+
+- Product-core completion estimate: roughly 85%.
+- The core local-first workflow loop is implemented: visual workflow editing,
+  JSON source-of-truth, live runs, event streaming, human/command/MCP approval,
+  scoped patch proposal/apply/rollback, local library storage, and file-backed
+  run records.
+- Remaining work is mostly product hardening rather than core proof-of-concept:
+  restart-resumable blocked runs, richer run-history browsing, long-lived MCP
+  sessions and tool discovery, desktop packaging, and deeper provider-specific
+  adapters where OpenAI-compatible endpoints are not sufficient.
+- Merge recommendation: merge the current `codex-patch-safety-workbench`
+  branch into `main` through the PR after review. Do not redo these changes
+  directly on `main`; this branch intentionally contains deletes and
+  replacements that are easier to review as one patch-safety/workbench PR.
+
 Implemented:
 
 - workflow/agent/node/edge schema
@@ -283,13 +299,31 @@ Implemented:
   - `POST /api/v2/live-runs/{run_id}/approve`
   - resumes the same paused run instead of starting a fresh approved run
 - approval-required resume action in the run timeline
+- command-specific approval keyed by command and working directory
+- persisted approval audit records for human gates, command approvals, and MCP
+  approvals
+- approval rejection path for live runs
 - project scope selection for runs
 - path guard enforcement for scoped tools
 - built-in tools:
   - `project_index`
   - `recommend_modules`
   - `dry_run_patch`
+  - `propose_patch`
+  - `apply_patch`
+  - `rollback_patch`
   - `run_check`
+- basic MCP stdio JSON-RPC adapter through `mcp_tool` workflow nodes
+- expanded OpenAI-compatible provider presets for Groq, OpenRouter, Together,
+  Mistral, Perplexity, xAI, Gemini-compatible, DeepSeek, Moonshot/Kimi,
+  DashScope/Qwen, and Ollama
+- patch proposal, scoped patch apply, snapshot, and rollback primitives
+- stale-base detection and binary-file rejection before patch apply
+- patch/diff, apply, check, and rollback display in the UI run panel
+- approval request and approval audit display in the UI
+- runtime summary panel with health, tool count, live runs, and stored runs
+- gate-specific approval resume so separate human gates can be approved
+  independently
 - CLI execution:
 
 ```powershell
@@ -298,6 +332,8 @@ python -m coder_workbench.cli --repo . --workflow examples\workflows\coding-work
 
 - FastAPI runtime API
 - live background runs
+- live run snapshots persisted under the local run store so blocked/completed
+  live runs can be listed after API restart
 - SSE event streaming
 - file-backed run storage
 - local workflow/agent library storage
@@ -305,9 +341,15 @@ python -m coder_workbench.cli --repo . --workflow examples\workflows\coding-work
 
 ## Near-term roadmap
 
-1. Add real patch proposal/apply/rollback tools.
-2. Add patch/diff panel and rollback UI.
-3. Add provider-specific executor adapters.
-4. Add MCP tool adapter.
-5. Expand the default coding workflow into real patch execution when safety
-   gates are complete.
+1. Add richer UI for run history: open stored run details, inspect restored
+   live runs, and reattach to blocked runs from the browser.
+2. Expand durable recovery from persisted blocked run snapshots to active
+   resume after process restart.
+3. Add long-lived MCP server sessions and tool discovery/listing instead of
+   only short-lived configured stdio calls.
+4. Add provider-specific non-OpenAI-compatible executor adapters where needed,
+   starting with native SDKs only when the OpenAI-compatible endpoint is not
+   sufficient.
+5. Add desktop packaging and stronger product polish: settings persistence,
+   diff viewer improvements, rejection reasons in the event timeline, and
+   richer rollback conflict handling.

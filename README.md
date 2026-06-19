@@ -25,7 +25,11 @@ proposal, approval, snapshot, apply, and rollback are implemented.
   - `project_index`
   - `recommend_modules`
   - `dry_run_patch`
+  - `propose_patch`
+  - `apply_patch`
+  - `rollback_patch`
   - `run_check`
+- Scoped patch preview, apply snapshots, rollback, and UI diff/check display.
 
 See [docs/requirements.md](docs/requirements.md) for the product direction and
 roadmap.

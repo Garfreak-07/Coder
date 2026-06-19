@@ -17,6 +17,8 @@ htmlcov/
 outputs/
 .coder_history/
 .coder/
+.codex/
+.coder_server*.log
 .npm-cache/
 
 dist/

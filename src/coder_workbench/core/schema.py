@@ -7,7 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-NodeType = Literal["start", "agent", "tool", "condition", "human_gate", "end"]
+NodeType = Literal["start", "agent", "tool", "mcp_tool", "condition", "human_gate", "end"]
 
 
 class ContextPolicy(BaseModel):
@@ -69,7 +69,7 @@ class NodeSpec(BaseModel):
     def validate_node_ref(self) -> "NodeSpec":
         if self.type == "agent" and not self.agent_id:
             raise ValueError(f"agent node {self.id} requires agent_id")
-        if self.type == "tool" and not self.tool:
+        if self.type in {"tool", "mcp_tool"} and not self.tool:
             raise ValueError(f"tool node {self.id} requires tool")
         if self.type == "condition" and not self.condition:
             raise ValueError(f"condition node {self.id} requires condition")

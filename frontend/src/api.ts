@@ -1,4 +1,4 @@
-import type { AgentSpec, LibraryIndex, RunEvent, WorkflowSpec } from "./types";
+import type { AgentSpec, HealthStatus, LibraryIndex, RunEvent, RunSummaryItem, WorkflowSpec } from "./types";
 
 const jsonHeaders = {
   "Content-Type": "application/json"
@@ -15,6 +15,20 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
 
 export function getLibrary(): Promise<LibraryIndex> {
   return requestJson<LibraryIndex>("/api/v2/library");
+}
+
+export function getHealth(): Promise<HealthStatus> {
+  return requestJson<HealthStatus>("/api/v2/health");
+}
+
+export async function getRuns(): Promise<RunSummaryItem[]> {
+  const payload = await requestJson<{ runs: RunSummaryItem[] }>("/api/v2/runs");
+  return payload.runs;
+}
+
+export async function getLiveRuns(): Promise<RunSummaryItem[]> {
+  const payload = await requestJson<{ runs: RunSummaryItem[] }>("/api/v2/live-runs");
+  return payload.runs;
 }
 
 export async function getWorkflow(workflowId: string): Promise<WorkflowSpec> {
@@ -59,11 +73,26 @@ export async function startLiveRun(input: {
   });
 }
 
-export async function approveLiveRun(runId: string): Promise<{ run_id: string; status: string; events_url: string; result_url: string }> {
+export async function approveLiveRun(
+  runId: string,
+  input: { approved?: boolean; reason?: string } = {}
+): Promise<{ run_id: string; status: string; events_url: string; result_url: string }> {
   return requestJson(`/api/v2/live-runs/${runId}/approve`, {
     method: "POST",
     headers: jsonHeaders,
-    body: JSON.stringify({ approved: true })
+    body: JSON.stringify({ approved: input.approved ?? true, reason: input.reason ?? null })
+  });
+}
+
+export async function rollbackPatch(input: {
+  repo: string;
+  snapshot_id: string;
+  scopes: string[];
+}): Promise<{ rollback: Record<string, unknown> }> {
+  return requestJson("/api/v2/patches/rollback", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify(input)
   });
 }
 
@@ -80,6 +109,7 @@ export function subscribeRunEvents(url: string, onEvent: (event: RunEvent) => vo
     "tool.called",
     "agent.called",
     "approval.required",
+    "approval.recorded",
     "edge.selected",
     "budget.warning",
     "run.completed",

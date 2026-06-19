@@ -22,11 +22,7 @@ class DefaultAgentExecutor:
     """
 
     def run(self, agent: AgentSpec, context: dict[str, Any]) -> dict[str, Any]:
-        config = load_runtime_config()
-        if agent.provider:
-            # Keep provider overrides explicit for future adapters. The current
-            # The current runtime uses the project's global OpenAI-compatible adapter.
-            pass
+        config = load_runtime_config(agent.provider, agent.model)
         if not config.has_llm_credentials:
             return self._mock(agent, context)
 
@@ -51,6 +47,8 @@ class DefaultAgentExecutor:
                 "Instructions:",
                 agent.instructions or "Return concise structured JSON.",
                 "Token policy: use the supplied summaries first. Ask for only the minimum extra context needed.",
+                "If asked to modify files, return JSON containing a `changes` array with objects shaped as "
+                "{path, action, content}. Never claim that files were modified directly.",
                 "Context JSON:",
                 json.dumps(context, ensure_ascii=False, indent=2),
                 "Return JSON only.",

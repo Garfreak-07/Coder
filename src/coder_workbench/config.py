@@ -18,11 +18,11 @@ class RuntimeConfig:
         return bool(self.api_key)
 
 
-def load_runtime_config() -> RuntimeConfig:
-    provider = os.getenv("CODER_PROVIDER", "openai").strip().lower()
+def load_runtime_config(provider_override: str | None = None, model_override: str | None = None) -> RuntimeConfig:
+    provider = (provider_override or os.getenv("CODER_PROVIDER", "openai")).strip().lower()
     return RuntimeConfig(
         provider=provider,
-        model=os.getenv("CODER_MODEL", "gpt-4.1-mini"),
+        model=model_override or os.getenv("CODER_MODEL", "gpt-4.1-mini"),
         api_key=_api_key_for_provider(provider),
         base_url=_base_url_for_provider(provider),
     )
@@ -37,6 +37,13 @@ def _api_key_for_provider(provider: str) -> str | None:
         "kimi": "MOONSHOT_API_KEY",
         "qwen": "DASHSCOPE_API_KEY",
         "dashscope": "DASHSCOPE_API_KEY",
+        "groq": "GROQ_API_KEY",
+        "openrouter": "OPENROUTER_API_KEY",
+        "together": "TOGETHER_API_KEY",
+        "mistral": "MISTRAL_API_KEY",
+        "perplexity": "PERPLEXITY_API_KEY",
+        "xai": "XAI_API_KEY",
+        "gemini": "GEMINI_API_KEY",
         "ollama": "OLLAMA_API_KEY",
     }
     return os.getenv(env_names.get(provider, "CODER_API_KEY")) or os.getenv("CODER_API_KEY")
@@ -52,6 +59,13 @@ def _base_url_for_provider(provider: str) -> str | None:
         "kimi": "https://api.moonshot.cn/v1",
         "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "dashscope": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "groq": "https://api.groq.com/openai/v1",
+        "openrouter": "https://openrouter.ai/api/v1",
+        "together": "https://api.together.xyz/v1",
+        "mistral": "https://api.mistral.ai/v1",
+        "perplexity": "https://api.perplexity.ai",
+        "xai": "https://api.x.ai/v1",
+        "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
         "ollama": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
     }
     return defaults.get(provider)
