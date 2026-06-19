@@ -58,6 +58,14 @@ export async function startLiveRun(input: {
   });
 }
 
+export async function approveLiveRun(runId: string): Promise<{ run_id: string; status: string; events_url: string; result_url: string }> {
+  return requestJson(`/api/v2/live-runs/${runId}/approve`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ approved: true })
+  });
+}
+
 export function subscribeRunEvents(url: string, onEvent: (event: RunEvent) => void, onError: (error: Event) => void) {
   const source = new EventSource(url);
   source.onmessage = (message) => {

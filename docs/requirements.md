@@ -134,6 +134,7 @@ GET  /api/v2/runs/{run_id}/events
 GET  /api/v2/live-runs
 POST /api/v2/live-runs
 GET  /api/v2/live-runs/{run_id}
+POST /api/v2/live-runs/{run_id}/approve
 GET  /api/v2/live-runs/{run_id}/events
 ```
 
@@ -289,7 +290,10 @@ Implemented:
 - agent list, basic agent editor, local agent save, and library agent import
 - live run launcher from the UI
 - SSE run event timeline with event payload details and compact run summary
-- approval-required rerun shortcut in the run timeline
+- first-class live run approval resume API:
+  - `POST /api/v2/live-runs/{run_id}/approve`
+  - resumes the same paused run instead of starting a fresh approved run
+- approval-required resume action in the run timeline
 - built-in tools:
   - `project_index`
   - `recommend_modules`
@@ -310,12 +314,10 @@ python -m coder_graph.cli --repo . --v2-workflow examples\workflows_v2\coding-wo
 
 ## Near-term roadmap
 
-1. Add first-class approval resume endpoints so a paused live run can continue
-   without starting a fresh approved run.
-2. Add project scope selection and path guard enforcement in v2 tools.
-3. Add real patch proposal/apply/rollback tools.
-4. Add patch/diff panel and rollback UI.
-5. Add provider-specific executor adapters.
-6. Add MCP tool adapter.
-7. Migrate the default coding workflow fully to v2.
-8. Retire the old fixed LangGraph path when v2 reaches parity.
+1. Add project scope selection and path guard enforcement in v2 tools.
+2. Add real patch proposal/apply/rollback tools.
+3. Add patch/diff panel and rollback UI.
+4. Add provider-specific executor adapters.
+5. Add MCP tool adapter.
+6. Migrate the default coding workflow fully to v2.
+7. Retire the old fixed LangGraph path when v2 reaches parity.

@@ -13,7 +13,7 @@ import {
   type Node as FlowNode,
   type NodeChange
 } from "@xyflow/react";
-import { getAgent, getLibrary, getWorkflow, saveAgent, saveWorkflow, startLiveRun, subscribeRunEvents } from "./api";
+import { approveLiveRun, getAgent, getLibrary, getWorkflow, saveAgent, saveWorkflow, startLiveRun, subscribeRunEvents } from "./api";
 import { codingWorkbenchWorkflow } from "./examples";
 import { workflowTemplate } from "./template";
 import type { AgentSpec, EdgeSpec, LibraryIndex, NodeSpec, NodeType, RunEvent, WorkflowSpec } from "./types";
@@ -32,6 +32,7 @@ export function App() {
   const [request, setRequest] = useState("Inspect this project and propose the next safe step.");
   const [approved, setApproved] = useState(false);
   const [events, setEvents] = useState<RunEvent[]>([]);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
 
@@ -275,27 +276,51 @@ export function App() {
 
   async function runWorkflow(approvedOverride = approved) {
     setEvents([]);
+    setActiveRunId(null);
     setStatus(approvedOverride ? "Starting approved live run..." : "Starting live run...");
     try {
       const parsed = JSON.parse(jsonText) as WorkflowSpec;
       const run = await startLiveRun({ repo, request, workflow: parsed, approved: approvedOverride });
+      setActiveRunId(run.run_id);
       setStatus(`Live run ${run.run_id}: ${run.status}`);
-      const source = subscribeRunEvents(
-        run.events_url,
-        (event) => {
-          setEvents((current) => [...current, event]);
-          if (event.type === "run.completed" || event.type === "run.failed" || event.type === "run.blocked") {
-            source.close();
-          }
-        },
-        () => {
-          setStatus(`Event stream closed for ${run.run_id}`);
-          source.close();
-        }
-      );
+      subscribeToRun(run.run_id, run.events_url);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
+  }
+
+  async function approveAndResumeRun() {
+    if (!activeRunId) {
+      setStatus("No blocked live run selected.");
+      return;
+    }
+    setStatus(`Approving live run ${activeRunId}...`);
+    try {
+      const run = await approveLiveRun(activeRunId);
+      setStatus(`Live run ${run.run_id}: ${run.status}`);
+      subscribeToRun(run.run_id, run.events_url);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function subscribeToRun(runId: string, eventsUrl: string) {
+    const source = subscribeRunEvents(
+      eventsUrl,
+      (event) => {
+        setEvents((current) => {
+          const isDuplicate = Boolean(event.id && current.some((existing) => existing.id === event.id));
+          if (!isDuplicate && isTerminalRunEvent(event.type)) {
+            source.close();
+          }
+          return upsertEvent(current, event);
+        });
+      },
+      () => {
+        setStatus(`Event stream closed for ${runId}`);
+        source.close();
+      }
+    );
   }
 
   return (
@@ -457,7 +482,7 @@ export function App() {
 
         <section className="panel events-panel">
           <div className="panel-title">Run Events</div>
-          <RunSummary events={events} onApproveAndRun={() => runWorkflow(true)} />
+          <RunSummary events={events} onApproveAndRun={approveAndResumeRun} />
           {events.length === 0 ? (
             <div className="muted">No events yet.</div>
           ) : (
@@ -502,10 +527,19 @@ function RunSummary({ events, onApproveAndRun }: { events: RunEvent[]; onApprove
         <span>{selectedEdges} edges</span>
       </div>
       {needsApproval && isBlocked && (
-        <button onClick={onApproveAndRun}>Approve and rerun</button>
+        <button onClick={onApproveAndRun}>Approve and resume</button>
       )}
     </div>
   );
+}
+
+function upsertEvent(events: RunEvent[], next: RunEvent): RunEvent[] {
+  if (!next.id) return [...events, next];
+  return events.some((event) => event.id === next.id) ? events : [...events, next];
+}
+
+function isTerminalRunEvent(type: string): boolean {
+  return type === "run.completed" || type === "run.failed" || type === "run.blocked";
 }
 
 function statusClass(type: string | undefined): string {

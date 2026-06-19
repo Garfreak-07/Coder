@@ -6,7 +6,7 @@ from coder_graph_v2.core import WorkflowSpec
 from coder_graph_v2.executors import AgentExecutor, DefaultAgentExecutor
 from coder_graph_v2.runtime.conditions import evaluate_condition
 from coder_graph_v2.runtime.context import build_agent_context, estimate_tokens
-from coder_graph_v2.runtime.state import RunResult, RunState
+from coder_graph_v2.runtime.state import RunEvent, RunResult, RunState
 from coder_graph_v2.tools import ToolRegistry, default_tool_registry
 
 
@@ -31,19 +31,42 @@ class WorkflowRunner:
         self.tools = tools or default_tool_registry()
         self.event_sink = event_sink
 
-    def run(self, request: str, repo_root: str, initial_data: dict[str, Any] | None = None) -> RunResult:
+    def run(
+        self,
+        request: str,
+        repo_root: str,
+        initial_data: dict[str, Any] | None = None,
+        resume_checkpoint: dict[str, Any] | None = None,
+        prior_events: list[RunEvent] | None = None,
+        resume_after_node: str | None = None,
+    ) -> RunResult:
         state = RunState(
             workflow_id=self.workflow.id,
             request=request,
             repo_root=repo_root,
-            data=initial_data or {},
+            data=dict(initial_data or {}),
             token_budget=self.workflow.token_budget,
         )
+        if resume_checkpoint:
+            state.data.update(resume_checkpoint.get("data", {}))
+            state.summaries.update(resume_checkpoint.get("summaries", {}))
+            state.visited_nodes.update(resume_checkpoint.get("visited_nodes", {}))
+            state.traversed_edges.update(resume_checkpoint.get("traversed_edges", {}))
+            state.estimated_tokens_used = int(resume_checkpoint.get("estimated_tokens_used", 0))
+            state.agent_calls = int(resume_checkpoint.get("agent_calls", 0))
+            state.tool_calls = int(resume_checkpoint.get("tool_calls", 0))
+            state.current_node = resume_checkpoint.get("current_node")
+        if prior_events:
+            state.events.extend(prior_events)
         if self.event_sink:
             state.set_event_sink(self.event_sink)
-        state.emit("run.started", f"Workflow {self.workflow.id} started")
+        state.emit("run.started", f"Workflow {self.workflow.id} {'resumed' if resume_after_node else 'started'}")
 
-        queue = [node.id for node in self.workflow.nodes if node.type == "start"]
+        queue = (
+            self._next_nodes(state, resume_after_node)
+            if resume_after_node
+            else [node.id for node in self.workflow.nodes if node.type == "start"]
+        )
         try:
             while queue and state.status == "running":
                 if sum(state.visited_nodes.values()) >= self.workflow.max_steps:
@@ -94,6 +117,8 @@ class WorkflowRunner:
             estimated_tokens_used=state.estimated_tokens_used,
             agent_calls=state.agent_calls,
             tool_calls=state.tool_calls,
+            blocked_node_id=state.current_node if state.status == "blocked" else None,
+            resume_checkpoint=self._checkpoint(state) if state.status == "blocked" else None,
         )
 
     def _run_agent_node(self, state: RunState, node_id: str) -> dict[str, Any]:
@@ -186,6 +211,18 @@ class WorkflowRunner:
         state.status = "blocked"
         state.emit("run.blocked", reason, node_id=state.current_node)
 
+    def _checkpoint(self, state: RunState) -> dict[str, Any]:
+        return {
+            "data": state.data,
+            "summaries": state.summaries,
+            "visited_nodes": state.visited_nodes,
+            "traversed_edges": state.traversed_edges,
+            "estimated_tokens_used": state.estimated_tokens_used,
+            "agent_calls": state.agent_calls,
+            "tool_calls": state.tool_calls,
+            "current_node": state.current_node,
+        }
+
 
 def run_workflow(
     workflow: WorkflowSpec,
@@ -193,5 +230,15 @@ def run_workflow(
     repo_root: str,
     initial_data: dict[str, Any] | None = None,
     event_sink: Any | None = None,
+    resume_checkpoint: dict[str, Any] | None = None,
+    prior_events: list[RunEvent] | None = None,
+    resume_after_node: str | None = None,
 ) -> RunResult:
-    return WorkflowRunner(workflow, event_sink=event_sink).run(request=request, repo_root=repo_root, initial_data=initial_data)
+    return WorkflowRunner(workflow, event_sink=event_sink).run(
+        request=request,
+        repo_root=repo_root,
+        initial_data=initial_data,
+        resume_checkpoint=resume_checkpoint,
+        prior_events=prior_events,
+        resume_after_node=resume_after_node,
+    )

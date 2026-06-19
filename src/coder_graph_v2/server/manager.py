@@ -49,6 +49,33 @@ class RunManager:
         thread.start()
         return live
 
+    def approve(self, run_id: str, approved: bool = True, data: dict[str, Any] | None = None) -> LiveRun:
+        run = self.get(run_id)
+        if run.status != "blocked" or not run.result or not run.result.resume_checkpoint or not run.result.blocked_node_id:
+            raise ValueError("run is not waiting for approval")
+
+        checkpoint = dict(run.result.resume_checkpoint)
+        checkpoint_data = dict(checkpoint.get("data", {}))
+        checkpoint_data["approved"] = approved
+        checkpoint_data.update(data or {})
+
+        blocked_node = run.workflow.node_by_id().get(run.result.blocked_node_id)
+        if blocked_node and blocked_node.type == "human_gate":
+            approval_key = blocked_node.output_key or blocked_node.id
+            approval_value = dict(checkpoint_data.get(approval_key, {}))
+            approval_value["approved"] = approved
+            checkpoint_data[approval_key] = approval_value
+
+        checkpoint["data"] = checkpoint_data
+
+        run.initial_data = checkpoint_data
+        run.status = "queued"
+        run.error = None
+        run.queue = Queue()
+        thread = Thread(target=self._execute, args=(run, checkpoint, run.result.blocked_node_id, list(run.events)), daemon=True)
+        thread.start()
+        return run
+
     def get(self, run_id: str) -> LiveRun:
         with self._lock:
             if run_id not in self._runs:
@@ -88,7 +115,13 @@ class RunManager:
                 break
             yield event
 
-    def _execute(self, run: LiveRun) -> None:
+    def _execute(
+        self,
+        run: LiveRun,
+        resume_checkpoint: dict[str, Any] | None = None,
+        resume_after_node: str | None = None,
+        prior_events: list[RunEvent] | None = None,
+    ) -> None:
         run.status = "running"
 
         def sink(event: RunEvent) -> None:
@@ -102,6 +135,9 @@ class RunManager:
                 repo_root=run.repo_root,
                 initial_data=run.initial_data,
                 event_sink=sink,
+                resume_checkpoint=resume_checkpoint,
+                prior_events=prior_events,
+                resume_after_node=resume_after_node,
             )
             run.result = result
             run.status = result.status

@@ -79,6 +79,8 @@ class RunResult(BaseModel):
     estimated_tokens_used: int
     agent_calls: int
     tool_calls: int
+    blocked_node_id: str | None = None
+    resume_checkpoint: dict[str, Any] | None = None
 
 
 def summarize_value(value: Any, max_chars: int = 800) -> str:

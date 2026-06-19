@@ -29,6 +29,13 @@ class RunRequest(BaseModel):
     initial_data: dict[str, Any] = Field(default_factory=dict)
 
 
+class ApprovalRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approved: bool = True
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
 def create_app(store_root: str | Path = ".coder_v2", frontend_dist: str | Path | None = None) -> FastAPI:
     app = FastAPI(title="Coder v2 Runtime API", version="0.1.0")
     store = RunStore(store_root)
@@ -118,6 +125,21 @@ def create_app(store_root: str | Path = ".coder_v2", frontend_dist: str | Path |
             request=body.request,
             initial_data=initial_data,
         )
+        return {
+            "run_id": live.id,
+            "status": live.status,
+            "events_url": f"/api/v2/live-runs/{live.id}/events",
+            "result_url": f"/api/v2/live-runs/{live.id}",
+        }
+
+    @app.post("/api/v2/live-runs/{run_id}/approve")
+    def approve_live_run(run_id: str, body: ApprovalRequest) -> dict[str, Any]:
+        try:
+            live = manager.approve(run_id, approved=body.approved, data=body.data)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="live run not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {
             "run_id": live.id,
             "status": live.status,
