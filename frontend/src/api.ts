@@ -10,6 +10,7 @@ import type {
   RunEventsPage,
   RunSummaryItem,
   StoredRunDetail,
+  ToolResultDetail,
   WorkflowSpec
 } from "./types";
 
@@ -58,6 +59,10 @@ export function getContextPacket(runId: string, packetId: string): Promise<Conte
 
 export function getArtifact(runId: string, artifactId: string): Promise<ArtifactDetail> {
   return requestJson<ArtifactDetail>(`/api/v2/runs/${runId}/artifacts/${artifactId}`);
+}
+
+export function getToolResult(runId: string, toolResultId: string): Promise<ToolResultDetail> {
+  return requestJson<ToolResultDetail>(`/api/v2/runs/${runId}/tool-results/${toolResultId}`);
 }
 
 export function getBlob(runId: string, blobId: string): Promise<BlobDetail> {
@@ -150,6 +155,7 @@ export function subscribeRunEvents(url: string, onEvent: (event: RunEvent) => vo
     "loop.blocked",
     "agent.context_packet",
     "tool.called",
+    "tool.result",
     "agent.called",
     "artifact.produced",
     "artifact.validation_failed",

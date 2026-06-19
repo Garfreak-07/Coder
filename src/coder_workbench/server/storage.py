@@ -64,6 +64,7 @@ class RunStore:
             run_dir.mkdir(parents=True, exist_ok=True)
             (run_dir / "contexts").mkdir(parents=True, exist_ok=True)
             (run_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+            (run_dir / "tool-results").mkdir(parents=True, exist_ok=True)
             metadata = StoredRunMetadata(
                 id=stored.id,
                 workflow_id=workflow_id,
@@ -81,6 +82,7 @@ class RunStore:
             result_payload["artifacts"] = self._write_artifacts(run_dir, result.artifacts)
             (run_dir / "result.json").write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
             events = self._externalize_context_packets(run_dir, result.events)
+            events = self._externalize_tool_results(run_dir, events)
             self._write_events(run_dir / "events.jsonl", events)
         return stored
 
@@ -195,6 +197,29 @@ class RunStore:
         if isinstance(artifact, dict):
             return artifact
         raise KeyError(artifact_id)
+
+    def get_tool_result(self, run_id: str, tool_result_id: str) -> dict[str, Any]:
+        safe_tool_result_id = self._safe_object_id(tool_result_id)
+        run_dir = self._run_dir(run_id)
+        if run_dir.exists():
+            path = run_dir / "tool-results" / f"{safe_tool_result_id}.json"
+            if path.exists():
+                return json.loads(path.read_text(encoding="utf-8"))
+            for event in self._read_events(run_dir / "events.jsonl"):
+                result = self._embedded_tool_result(event, safe_tool_result_id)
+                if result is not None:
+                    return result
+            raise KeyError(tool_result_id)
+
+        path = self._legacy_path(run_id)
+        if not path.exists():
+            raise KeyError(run_id)
+        stored = StoredRun.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        for event in stored.result.events:
+            result = self._embedded_tool_result(event, safe_tool_result_id)
+            if result is not None:
+                return result
+        raise KeyError(tool_result_id)
 
     def get_blob(self, blob_id: str) -> dict[str, Any]:
         path = self._blob_path(blob_id)
@@ -335,6 +360,38 @@ class RunStore:
             compact_events.append(event.model_copy(update={"payload": compact_payload}))
         return compact_events
 
+    def _externalize_tool_results(self, run_dir: Path, events: list[RunEvent]) -> list[RunEvent]:
+        tool_result_dir = run_dir / "tool-results"
+        tool_result_dir.mkdir(parents=True, exist_ok=True)
+        compact_events: list[RunEvent] = []
+        for event in events:
+            if event.type != "tool.result":
+                compact_events.append(event)
+                continue
+
+            result = event.payload.get("result")
+            if result is None:
+                compact_events.append(event)
+                continue
+
+            raw_tool_result_id = str(event.payload.get("tool_result_id") or event.id)
+            try:
+                tool_result_id = self._safe_object_id(raw_tool_result_id)
+            except KeyError:
+                tool_result_id = self._safe_object_id(event.id)
+            result_json = json.dumps(result, ensure_ascii=False, indent=2)
+            (tool_result_dir / f"{tool_result_id}.json").write_text(result_json, encoding="utf-8")
+            compact_payload = {
+                "tool_result_id": tool_result_id,
+                "tool": event.payload.get("tool"),
+                "result_summary": event.payload.get("result_summary"),
+                "result_status": event.payload.get("result_status"),
+                "result_keys": event.payload.get("result_keys"),
+                "result_size_chars": len(json.dumps(result, ensure_ascii=False)),
+            }
+            compact_events.append(event.model_copy(update={"payload": compact_payload}))
+        return compact_events
+
     def _read_events(self, path: Path) -> list[RunEvent]:
         if not path.exists():
             return []
@@ -352,6 +409,14 @@ class RunStore:
             return None
         packet = event.payload.get("packet")
         return packet if isinstance(packet, dict) else None
+
+    def _embedded_tool_result(self, event: RunEvent, tool_result_id: str) -> dict[str, Any] | None:
+        if event.type != "tool.result":
+            return None
+        if str(event.payload.get("tool_result_id") or event.id) != tool_result_id:
+            return None
+        result = event.payload.get("result")
+        return result if isinstance(result, dict) else None
 
     def _context_packet_summary(self, packet: Any) -> dict[str, Any]:
         if not isinstance(packet, dict):

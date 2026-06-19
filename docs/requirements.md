@@ -469,6 +469,7 @@ GET  /api/v2/runs/{run_id}
 GET  /api/v2/runs/{run_id}/events?cursor=...&limit=...
 GET  /api/v2/runs/{run_id}/context-packets/{packet_id}
 GET  /api/v2/runs/{run_id}/artifacts/{artifact_id}
+GET  /api/v2/runs/{run_id}/tool-results/{tool_result_id}
 GET  /api/v2/runs/{run_id}/blobs/{blob_id}
 POST /api/v2/workflows/validate
 ```
@@ -780,6 +781,8 @@ Implemented:
   compact result references;
 - content-addressed Blob storage for large artifact values;
 - on-demand stored Artifact and Blob API endpoints;
+- tool result events with compact persisted references and on-demand stored
+  tool result loading for patch preview, apply, and check output;
 - Artifact cards in the run event panel;
 - lightweight `POST /api/v2/workflows/validate` preflight API;
 - lazy loading for additional stored run events in the UI;
@@ -801,8 +804,9 @@ Near-term work should prioritize the `Coder v0.3 - Trust Runtime` foundation:
    - enforce artifact schema failures in live recovery paths as clearly as
      synchronous runs.
 2. Storage separation:
-   - move large patch previews, check logs, snapshots, and raw tool output into
-     Blob storage, not only large artifact fields;
+   - continue moving large patch previews, check logs, snapshots, and raw tool
+     output into Blob storage and object references, building on stored tool
+     result references;
    - add a lightweight run index so listing runs does not require scanning run
      directories;
    - add orphan blob cleanup when deleting historical runs.

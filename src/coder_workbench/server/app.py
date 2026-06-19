@@ -245,6 +245,17 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
             "artifact": artifact,
         }
 
+    @app.get("/api/v2/runs/{run_id}/tool-results/{tool_result_id}")
+    def get_tool_result(run_id: str, tool_result_id: str) -> dict[str, Any]:
+        try:
+            result = store.get_tool_result(run_id, tool_result_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="tool result not found") from exc
+        return {
+            "tool_result_id": tool_result_id,
+            "result": result,
+        }
+
     @app.get("/api/v2/runs/{run_id}/blobs/{blob_id}")
     def get_blob(run_id: str, blob_id: str) -> dict[str, Any]:
         try:

@@ -22,6 +22,7 @@ EventType = Literal[
     "artifact.produced",
     "artifact.validation_failed",
     "tool.called",
+    "tool.result",
     "approval.required",
     "approval.recorded",
     "edge.selected",

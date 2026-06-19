@@ -159,6 +159,11 @@ export interface ArtifactDetail {
   artifact: Record<string, unknown>;
 }
 
+export interface ToolResultDetail {
+  tool_result_id: string;
+  result: Record<string, unknown>;
+}
+
 export interface BlobDetail {
   blob_id: string;
   size_bytes: number;

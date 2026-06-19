@@ -101,6 +101,59 @@ class ArtifactStorageTests(unittest.TestCase):
             blob = store.get_blob(diff_ref["blob_id"])
             self.assertEqual(blob["content"], large_diff)
 
+    def test_tool_results_are_split_from_stored_event_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            target = repo / "sample.txt"
+            target.write_text("before\n", encoding="utf-8")
+            workflow = WorkflowSpec.model_validate(
+                {
+                    "id": "tool-result-test",
+                    "name": "Tool result test",
+                    "nodes": [
+                        {"id": "start", "type": "start"},
+                        {
+                            "id": "propose_patch",
+                            "type": "tool",
+                            "tool": "propose_patch",
+                            "output_key": "patch_preview",
+                            "input": {
+                                "files": [
+                                    {
+                                        "path": "sample.txt",
+                                        "action": "update",
+                                        "content": "after\n",
+                                    }
+                                ]
+                            },
+                        },
+                        {"id": "end", "type": "end"},
+                    ],
+                    "edges": [
+                        {"from": "start", "to": "propose_patch"},
+                        {"from": "propose_patch", "to": "end"},
+                    ],
+                }
+            )
+            result = WorkflowRunner(workflow).run("preview patch", str(repo))
+            live_tool_result = next(event for event in result.events if event.type == "tool.result")
+
+            self.assertIn("result", live_tool_result.payload)
+            self.assertEqual(live_tool_result.payload["result"]["status"], "proposed")
+
+            store = RunStore(Path(tmp) / ".coder")
+            stored = store.save("workflow", str(repo), "preview patch", result)
+            event_page = store.get_events(stored.id)
+            stored_tool_result = next(event for event in event_page["events"] if event["type"] == "tool.result")
+
+            self.assertNotIn("result", stored_tool_result["payload"])
+            tool_result_id = stored_tool_result["payload"]["tool_result_id"]
+            loaded = store.get_tool_result(stored.id, tool_result_id)
+            self.assertEqual(loaded["status"], "proposed")
+            self.assertEqual(loaded["files"][0]["path"], "sample.txt")
+            self.assertIn("-before", loaded["files"][0]["diff"])
+
 
 class WorkflowPreflightTests(unittest.TestCase):
     def test_preflight_reports_unknown_tool_and_unreachable_node(self) -> None:

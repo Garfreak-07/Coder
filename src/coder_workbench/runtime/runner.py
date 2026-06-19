@@ -321,6 +321,17 @@ class WorkflowRunner:
                 "run_id": state.data.get("run_id"),
             },
         )
+        state.emit(
+            "tool.result",
+            f"Tool {node.tool} returned",
+            node_id=node_id,
+            tool=node.tool,
+            result=result,
+            result_summary=summarize_value(result),
+            result_status=result.get("status") if isinstance(result, dict) else None,
+            result_keys=sorted(result.keys()) if isinstance(result, dict) else None,
+            result_size_chars=len(str(result)),
+        )
         state.set_value(node.output_key or node.id, result)
         if result.get("blocked"):
             approval_payload = dict(result)

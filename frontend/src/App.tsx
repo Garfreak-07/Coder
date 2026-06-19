@@ -25,6 +25,7 @@ import {
   getRun,
   getRunEvents,
   getRuns,
+  getToolResult,
   getWorkflow,
   rollbackPatch,
   saveAgent,
@@ -695,6 +696,7 @@ export function App() {
           <RunSummary events={events} onApprovalDecision={approveAndResumeRun} />
           <PatchPanel
             events={events}
+            runId={selectedRunKind === "stored" ? selectedRunDetail?.id ?? null : null}
             repo={repo}
             scopes={linesToList(scopesText)}
             onStatus={setStatus}
@@ -884,21 +886,57 @@ function objectValue(value: unknown): Record<string, unknown> | null {
 
 function PatchPanel({
   events,
+  runId,
   repo,
   scopes,
   onStatus
 }: {
   events: RunEvent[];
+  runId: string | null;
   repo: string;
   scopes: string[];
   onStatus: (status: string) => void;
 }) {
-  const patch = latestToolResult(events, "propose_patch") ?? latestToolResult(events, "dry_patch");
-  const apply = latestToolResult(events, "apply_patch");
-  const check = latestToolResult(events, "check");
+  const [loadedToolResults, setLoadedToolResults] = useState<Record<string, Record<string, unknown>>>({});
+  const [toolResultErrors, setToolResultErrors] = useState<Record<string, string>>({});
+  const toolResultIds = useMemo(() => storedToolResultIds(events), [events]);
+  const toolResultKey = toolResultIds.join("|");
+
+  useEffect(() => {
+    if (!runId) {
+      setLoadedToolResults((current) => (Object.keys(current).length > 0 ? {} : current));
+      setToolResultErrors((current) => (Object.keys(current).length > 0 ? {} : current));
+      return;
+    }
+    let cancelled = false;
+    const missing = toolResultIds.filter((id) => !loadedToolResults[id] && !toolResultErrors[id]);
+    for (const id of missing) {
+      getToolResult(runId, id)
+        .then((detail) => {
+          if (cancelled) return;
+          setLoadedToolResults((current) => ({ ...current, [id]: detail.result }));
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          setToolResultErrors((current) => ({
+            ...current,
+            [id]: error instanceof Error ? error.message : String(error)
+          }));
+        });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [runId, toolResultKey, loadedToolResults, toolResultErrors, toolResultIds]);
+
+  const patch = latestToolResult(events, "propose_patch", loadedToolResults) ?? latestToolResult(events, "dry_patch", loadedToolResults);
+  const apply = latestToolResult(events, "apply_patch", loadedToolResults);
+  const check = latestToolResult(events, "check", loadedToolResults);
   const files = Array.isArray(patch?.files) ? patch.files : [];
   const snapshotId = typeof apply?.snapshot_id === "string" ? apply.snapshot_id : null;
   const applyErrors = Array.isArray(apply?.errors) ? apply.errors : [];
+  const isLoadingToolResult = runId ? toolResultIds.some((id) => !loadedToolResults[id] && !toolResultErrors[id]) : false;
+  const toolResultErrorMessages = Object.values(toolResultErrors);
 
   async function rollback() {
     if (!snapshotId) return;
@@ -918,7 +956,9 @@ function PatchPanel({
       {patch && (
         <div>
           <div className="panel-subtitle">Patch Preview</div>
-          {files.length === 0 ? (
+          {files.length === 0 && isLoadingToolResult ? (
+            <div className="muted">Loading full tool result...</div>
+          ) : files.length === 0 ? (
             <div className="muted">No file changes proposed.</div>
           ) : (
             files.map((file, index) => {
@@ -935,6 +975,9 @@ function PatchPanel({
             })
           )}
         </div>
+      )}
+      {toolResultErrorMessages.length > 0 && (
+        <div className="muted">Tool result load failed: {toolResultErrorMessages.join("; ")}</div>
       )}
       {apply && (
         <div>
@@ -1078,9 +1121,29 @@ function RunDetailCard({
   );
 }
 
-function latestToolResult(events: RunEvent[], nodeId: string): Record<string, unknown> | null {
+function latestToolResult(
+  events: RunEvent[],
+  nodeId: string,
+  loadedToolResults: Record<string, Record<string, unknown>> = {}
+): Record<string, unknown> | null {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
+    if (event.type === "tool.result" && event.node_id === nodeId) {
+      const result = event.payload?.result;
+      if (result && typeof result === "object" && !Array.isArray(result)) return result as Record<string, unknown>;
+      const toolResultId = typeof event.payload?.tool_result_id === "string" ? event.payload.tool_result_id : null;
+      if (toolResultId && loadedToolResults[toolResultId]) return loadedToolResults[toolResultId];
+      const resultStatus = event.payload?.result_status;
+      if (typeof resultStatus === "string") {
+        return {
+          status: resultStatus,
+          summary: event.payload?.result_summary,
+          keys: event.payload?.result_keys,
+          tool_result_id: toolResultId
+        };
+      }
+      continue;
+    }
     if (event.type !== "node.completed" || event.node_id !== nodeId) continue;
     const result = event.payload?.result;
     if (result && typeof result === "object" && !Array.isArray(result)) return result as Record<string, unknown>;
@@ -1094,6 +1157,16 @@ function latestToolResult(events: RunEvent[], nodeId: string): Record<string, un
     }
   }
   return null;
+}
+
+function storedToolResultIds(events: RunEvent[]): string[] {
+  const ids = new Set<string>();
+  for (const event of events) {
+    if (event.type !== "tool.result") continue;
+    const toolResultId = typeof event.payload?.tool_result_id === "string" ? event.payload.tool_result_id : null;
+    if (toolResultId && !event.payload?.result) ids.add(toolResultId);
+  }
+  return [...ids];
 }
 
 function RunSummary({
