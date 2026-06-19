@@ -112,6 +112,38 @@ export interface RunSummaryItem {
   error?: string | null;
 }
 
+export interface RunResult {
+  status: string;
+  data: Record<string, unknown>;
+  summaries: Record<string, string>;
+  events: RunEvent[];
+  estimated_tokens_used: number;
+  agent_calls: number;
+  tool_calls: number;
+  blocked_node_id?: string | null;
+  resume_checkpoint?: Record<string, unknown> | null;
+}
+
+export interface StoredRunDetail {
+  id: string;
+  workflow_id: string;
+  repo_root: string;
+  request: string;
+  result: RunResult;
+}
+
+export interface LiveRunDetail {
+  id: string;
+  workflow_id: string;
+  repo_root: string;
+  request: string;
+  status: string;
+  events: RunEvent[];
+  result?: RunResult | null;
+  stored_run_id?: string | null;
+  error?: string | null;
+}
+
 export interface HealthStatus {
   status: string;
   tools: string[];

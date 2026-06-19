@@ -1,4 +1,13 @@
-import type { AgentSpec, HealthStatus, LibraryIndex, RunEvent, RunSummaryItem, WorkflowSpec } from "./types";
+import type {
+  AgentSpec,
+  HealthStatus,
+  LibraryIndex,
+  LiveRunDetail,
+  RunEvent,
+  RunSummaryItem,
+  StoredRunDetail,
+  WorkflowSpec
+} from "./types";
 
 const jsonHeaders = {
   "Content-Type": "application/json"
@@ -29,6 +38,14 @@ export async function getRuns(): Promise<RunSummaryItem[]> {
 export async function getLiveRuns(): Promise<RunSummaryItem[]> {
   const payload = await requestJson<{ runs: RunSummaryItem[] }>("/api/v2/live-runs");
   return payload.runs;
+}
+
+export function getRun(runId: string): Promise<StoredRunDetail> {
+  return requestJson<StoredRunDetail>(`/api/v2/runs/${runId}`);
+}
+
+export function getLiveRun(runId: string): Promise<LiveRunDetail> {
+  return requestJson<LiveRunDetail>(`/api/v2/live-runs/${runId}`);
 }
 
 export async function getWorkflow(workflowId: string): Promise<WorkflowSpec> {

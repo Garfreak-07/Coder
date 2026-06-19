@@ -4,6 +4,14 @@
 
 Coder is a local-first agent workflow workbench for controlled coding tasks.
 
+The broader product direction is documented in:
+
+- [product-vision.md](product-vision.md)
+- [foundation-architecture.md](foundation-architecture.md)
+- [context-memory-rag.md](context-memory-rag.md)
+- [workflow-builder.md](workflow-builder.md)
+- [mvp-v0.2.md](mvp-v0.2.md)
+
 The core requirement is that users can create agents, draw workflow edges, save
 the workflow, and run it with visible state, approvals, token controls, and
 audit events.
@@ -322,6 +330,11 @@ Implemented:
 - patch/diff, apply, check, and rollback display in the UI run panel
 - approval request and approval audit display in the UI
 - runtime summary panel with health, tool count, live runs, and stored runs
+- run history detail loading in the UI:
+  - open stored run details and replay persisted events
+  - open live run details and inspect restored live run events
+  - reattach to queued/running live run event streams from the browser
+  - select blocked live runs for approval after loading their persisted events
 - gate-specific approval resume so separate human gates can be approved
   independently
 - CLI execution:

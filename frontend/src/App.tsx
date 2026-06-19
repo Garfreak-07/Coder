@@ -18,7 +18,9 @@ import {
   getHealth,
   getAgent,
   getLibrary,
+  getLiveRun,
   getLiveRuns,
+  getRun,
   getRuns,
   getWorkflow,
   rollbackPatch,
@@ -29,7 +31,19 @@ import {
 } from "./api";
 import { codingWorkbenchWorkflow } from "./examples";
 import { workflowTemplate } from "./template";
-import type { AgentSpec, EdgeSpec, HealthStatus, LibraryIndex, NodeSpec, NodeType, RunEvent, RunSummaryItem, WorkflowSpec } from "./types";
+import type {
+  AgentSpec,
+  EdgeSpec,
+  HealthStatus,
+  LibraryIndex,
+  LiveRunDetail,
+  NodeSpec,
+  NodeType,
+  RunEvent,
+  RunSummaryItem,
+  StoredRunDetail,
+  WorkflowSpec
+} from "./types";
 
 const nodeTypes: NodeType[] = ["start", "agent", "tool", "mcp_tool", "condition", "human_gate", "end"];
 
@@ -52,6 +66,8 @@ export function App() {
   const [runHistory, setRunHistory] = useState<RunSummaryItem[]>([]);
   const [liveRuns, setLiveRuns] = useState<RunSummaryItem[]>([]);
   const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [selectedRunDetail, setSelectedRunDetail] = useState<StoredRunDetail | LiveRunDetail | null>(null);
+  const [selectedRunKind, setSelectedRunKind] = useState<"live" | "stored" | null>(null);
 
   const selectedNode = useMemo(
     () => workflow.nodes.find((node) => node.id === selectedNodeId) ?? null,
@@ -86,6 +102,41 @@ export function App() {
         setHealth(nextHealth);
       })
       .catch((error) => setStatus(`Failed to load runtime info: ${error.message}`));
+  }
+
+  async function openStoredRun(runId: string) {
+    setStatus(`Loading stored run ${runId}...`);
+    try {
+      const detail = await getRun(runId);
+      setSelectedRunKind("stored");
+      setSelectedRunDetail(detail);
+      setActiveRunId(null);
+      setEvents(detail.result.events);
+      setRepo(detail.repo_root);
+      setRequest(detail.request);
+      setStatus(`Stored run ${runId}: ${detail.result.status}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function openLiveRun(runId: string, attach = false) {
+    setStatus(`Loading live run ${runId}...`);
+    try {
+      const detail = await getLiveRun(runId);
+      setSelectedRunKind("live");
+      setSelectedRunDetail(detail);
+      setActiveRunId(detail.id);
+      setEvents(detail.events);
+      setRepo(detail.repo_root);
+      setRequest(detail.request);
+      setStatus(`Live run ${runId}: ${detail.status}`);
+      if (attach || detail.status === "queued" || detail.status === "running") {
+        subscribeToRun(detail.id, `/api/v2/live-runs/${detail.id}/events`);
+      }
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
   }
 
   function setCurrentWorkflow(next: WorkflowSpec) {
@@ -317,6 +368,8 @@ export function App() {
         scopes: linesToList(scopesText)
       });
       setActiveRunId(run.run_id);
+      setSelectedRunKind("live");
+      setSelectedRunDetail(null);
       setStatus(`Live run ${run.run_id}: ${run.status}`);
       subscribeToRun(run.run_id, run.events_url);
       refreshRuntimeInfo();
@@ -433,11 +486,22 @@ export function App() {
           </div>
           <div className="list compact-list">
             {liveRuns.slice(0, 5).map((run) => (
-              <button className="list-item" key={run.id} onClick={() => setActiveRunId(run.id)}>
+              <button className="list-item" key={run.id} onClick={() => openLiveRun(run.id)}>
                 <span>{run.workflow_id}</span>
                 <small>{run.status} / {run.events} events</small>
               </button>
             ))}
+            {liveRuns.length === 0 && <div className="muted">No live runs.</div>}
+          </div>
+          <div className="panel-subtitle">Stored run history</div>
+          <div className="list compact-list">
+            {runHistory.slice(0, 5).map((run) => (
+              <button className="list-item" key={run.id} onClick={() => openStoredRun(run.id)}>
+                <span>{run.workflow_id}</span>
+                <small>{run.status} / {run.events} events</small>
+              </button>
+            ))}
+            {runHistory.length === 0 && <div className="muted">No stored runs.</div>}
           </div>
         </section>
       </aside>
@@ -549,6 +613,13 @@ export function App() {
 
         <section className="panel events-panel">
           <div className="panel-title">Run Events</div>
+          <RunDetailCard
+            detail={selectedRunDetail}
+            kind={selectedRunKind}
+            activeRunId={activeRunId}
+            onAttach={(runId) => openLiveRun(runId, true)}
+            onOpenStored={(runId) => openStoredRun(runId)}
+          />
           <RunSummary events={events} onApprovalDecision={approveAndResumeRun} />
           <PatchPanel
             events={events}
@@ -667,6 +738,57 @@ function PatchPanel({
           {typeof check.output !== "undefined" && <pre>{String(check.output)}</pre>}
         </div>
       )}
+    </div>
+  );
+}
+
+function RunDetailCard({
+  detail,
+  kind,
+  activeRunId,
+  onAttach,
+  onOpenStored
+}: {
+  detail: StoredRunDetail | LiveRunDetail | null;
+  kind: "live" | "stored" | null;
+  activeRunId: string | null;
+  onAttach: (runId: string) => void;
+  onOpenStored: (runId: string) => void;
+}) {
+  if (!detail || !kind) return null;
+  const result = "result" in detail ? detail.result : null;
+  const status = kind === "stored" ? result?.status : (detail as LiveRunDetail).status;
+  const events = kind === "stored" ? result?.events.length ?? 0 : (detail as LiveRunDetail).events.length;
+  const liveDetail = kind === "live" ? (detail as LiveRunDetail) : null;
+  const canAttach = liveDetail?.status === "queued" || liveDetail?.status === "running" || liveDetail?.status === "blocked";
+
+  return (
+    <div className="run-detail-card">
+      <div className="event-heading">
+        <strong>{kind === "live" ? "Live run detail" : "Stored run detail"}</strong>
+        <code>{detail.id}</code>
+      </div>
+      <div className="summary-grid">
+        <span>{status ?? "unknown"}</span>
+        <span>{events} events</span>
+        {result && <span>{result.agent_calls} agent calls</span>}
+        {result && <span>{result.tool_calls} tool calls</span>}
+        {result && <span>{result.estimated_tokens_used} est. tokens</span>}
+        {result?.blocked_node_id && <span>blocked at {result.blocked_node_id}</span>}
+      </div>
+      <div className="muted">Repo: {detail.repo_root}</div>
+      <div className="muted">Request: {detail.request}</div>
+      {liveDetail?.stored_run_id && (
+        <button onClick={() => onOpenStored(liveDetail.stored_run_id as string)}>
+          Open stored result
+        </button>
+      )}
+      {canAttach && (
+        <button disabled={activeRunId === detail.id && liveDetail?.status === "blocked"} onClick={() => onAttach(detail.id)}>
+          {liveDetail?.status === "blocked" ? "Use this blocked run for approval" : "Reattach event stream"}
+        </button>
+      )}
+      {liveDetail?.error && <div className="muted">Error: {liveDetail.error}</div>}
     </div>
   );
 }

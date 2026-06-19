@@ -365,6 +365,15 @@ label {
   gap: 8px;
 }
 
+.run-detail-card {
+  background: #0f172a;
+  border: 1px solid #263244;
+  border-radius: 12px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
 .diff-block pre,
 .patch-panel pre {
   background: #07111f;
