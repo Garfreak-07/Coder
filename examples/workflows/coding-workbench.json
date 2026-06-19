@@ -159,6 +159,14 @@
       "output_key": "review"
     },
     {
+      "id": "review_retry",
+      "type": "loop",
+      "loop_mode": "retry_until",
+      "condition": "review.status == 'completed' or review.status == 'done'",
+      "max_iterations": 3,
+      "output_key": "review_retry"
+    },
+    {
       "id": "finish",
       "type": "end"
     }
@@ -208,7 +216,18 @@
     },
     {
       "from": "review",
-      "to": "finish"
+      "to": "review_retry"
+    },
+    {
+      "from": "review_retry",
+      "to": "approval",
+      "when": "review_retry.should_continue == True",
+      "max_traversals": 3
+    },
+    {
+      "from": "review_retry",
+      "to": "finish",
+      "when": "review_retry.should_continue == False"
     }
   ],
   "stop_conditions": [

@@ -5,8 +5,8 @@ from typing import Any
 from coder_workbench.core import WorkflowSpec
 from coder_workbench.executors import AgentExecutor, DefaultAgentExecutor
 from coder_workbench.runtime.conditions import evaluate_condition
-from coder_workbench.runtime.context import build_agent_context, estimate_tokens
-from coder_workbench.runtime.state import RunEvent, RunResult, RunState
+from coder_workbench.runtime.context import build_agent_context, build_context_packet, estimate_tokens
+from coder_workbench.runtime.state import RunEvent, RunResult, RunState, summarize_value
 from coder_workbench.tools import ToolRegistry, default_tool_registry
 
 
@@ -52,6 +52,7 @@ class WorkflowRunner:
             state.summaries.update(resume_checkpoint.get("summaries", {}))
             state.visited_nodes.update(resume_checkpoint.get("visited_nodes", {}))
             state.traversed_edges.update(resume_checkpoint.get("traversed_edges", {}))
+            state.loop_states.update(resume_checkpoint.get("loop_states", {}))
             state.estimated_tokens_used = int(resume_checkpoint.get("estimated_tokens_used", 0))
             state.agent_calls = int(resume_checkpoint.get("agent_calls", 0))
             state.tool_calls = int(resume_checkpoint.get("tool_calls", 0))
@@ -92,6 +93,8 @@ class WorkflowRunner:
                 elif node.type == "condition":
                     result = {"passed": evaluate_condition(node.condition, state.data)}
                     state.set_value(node.output_key or node.id, result)
+                elif node.type == "loop":
+                    result = self._run_loop_node(state, node_id)
                 elif node.type == "human_gate":
                     result = self._run_human_gate(state, node_id)
                 else:  # pragma: no cover - pydantic prevents this
@@ -101,8 +104,10 @@ class WorkflowRunner:
                     "node.completed",
                     f"Node {node_id} completed",
                     node_id=node_id,
-                    result=result,
-                    result_summary=str(result)[:800],
+                    result_summary=summarize_value(result),
+                    result_status=result.get("status") if isinstance(result, dict) else None,
+                    result_keys=sorted(result.keys()) if isinstance(result, dict) else None,
+                    result_size_chars=len(str(result)),
                 )
 
                 if state.status != "running":
@@ -137,19 +142,95 @@ class WorkflowRunner:
         agent = self.agents[node.agent_id]
         context = build_agent_context(agent, state)
         estimated = estimate_tokens(context)
-        state.estimated_tokens_used += estimated
-        state.agent_calls += 1
-        if state.token_budget and state.estimated_tokens_used > state.token_budget:
+        projected_tokens = state.estimated_tokens_used + estimated
+        packet = build_context_packet(agent, state, node_id=node_id, context=context, estimated_tokens=estimated)
+        state.emit(
+            "agent.context_packet",
+            f"Context packet for agent {agent.id}",
+            node_id=node_id,
+            packet=packet,
+        )
+        if state.token_budget and projected_tokens > state.token_budget:
             state.emit(
                 "budget.warning",
-                "Estimated token budget exceeded",
+                "Estimated token budget exceeded; agent call blocked",
                 node_id=node_id,
                 estimated_tokens_used=state.estimated_tokens_used,
+                projected_tokens_used=projected_tokens,
+                estimated_tokens=estimated,
                 token_budget=state.token_budget,
             )
+            self._block(state, "token budget exceeded")
+            return {
+                "status": "blocked",
+                "reason": "token budget exceeded",
+                "estimated_tokens": estimated,
+                "projected_tokens_used": projected_tokens,
+                "token_budget": state.token_budget,
+            }
+        state.estimated_tokens_used = projected_tokens
+        state.agent_calls += 1
         state.emit("agent.called", f"Agent {agent.id} called", node_id=node_id, estimated_tokens=estimated)
         result = self.agent_executor.run(agent, context)
         state.set_value(node.output_key or agent.output_key or node.id, result)
+        return result
+
+    def _run_loop_node(self, state: RunState, node_id: str) -> dict[str, Any]:
+        node = self.nodes[node_id]
+        mode = node.loop_mode or "retry_until"
+        max_iterations = node.max_iterations or 3
+        loop_state = dict(state.loop_states.get(node_id, {}))
+        iteration = int(loop_state.get("iteration", 0)) + 1
+        current_item: Any | None = None
+        should_continue = True
+        break_reason: str | None = None
+
+        if iteration == 1:
+            state.emit("loop.started", f"Loop {node_id} started", node_id=node_id, mode=mode, max_iterations=max_iterations)
+
+        if iteration > max_iterations:
+            should_continue = False
+            break_reason = "max_iterations"
+            iteration = max_iterations
+        elif mode == "for_each":
+            items = state.data.get(node.items_key or "", [])
+            if not isinstance(items, list):
+                items = []
+            if iteration > len(items):
+                should_continue = False
+                break_reason = "items_exhausted"
+                iteration = max(0, iteration - 1)
+            else:
+                current_item = items[iteration - 1]
+                state.set_value(node.item_key or f"{node_id}_item", current_item)
+        elif node.condition:
+            condition_passed = evaluate_condition(node.condition, state.data)
+            if mode == "while" and not condition_passed:
+                should_continue = False
+                break_reason = "condition_false"
+                iteration = max(0, iteration - 1)
+            if mode == "retry_until" and condition_passed:
+                should_continue = False
+                break_reason = "condition_satisfied"
+                iteration = max(0, iteration - 1)
+
+        state.set_value(node.iteration_key or f"{node_id}_iteration", iteration)
+        result = {
+            "mode": mode,
+            "iteration": iteration,
+            "continue": should_continue,
+            "should_continue": should_continue,
+            "break_reason": break_reason,
+            "max_iterations": max_iterations,
+            "current_item": current_item,
+        }
+        state.loop_states[node_id] = result
+        state.set_value(node.output_key or node.id, result)
+
+        if should_continue:
+            state.emit("loop.iteration.started", f"Loop {node_id} iteration {iteration} started", node_id=node_id, **result)
+        else:
+            state.emit("loop.completed", f"Loop {node_id} completed: {break_reason}", node_id=node_id, **result)
         return result
 
     def _run_tool_node(self, state: RunState, node_id: str) -> dict[str, Any]:
@@ -223,6 +304,15 @@ class WorkflowRunner:
             if not evaluate_condition(edge.when, state.data):
                 continue
             state.traversed_edges[edge_key] = traversals + 1
+            if edge.to_node in self.nodes and self.nodes[edge.to_node].type == "loop":
+                loop_state = state.loop_states.get(edge.to_node)
+                if loop_state and loop_state.get("continue"):
+                    state.emit(
+                        "loop.iteration.completed",
+                        f"Loop {edge.to_node} iteration {loop_state.get('iteration')} completed",
+                        node_id=edge.to_node,
+                        **loop_state,
+                    )
             selected.append(edge.to_node)
             state.emit("edge.selected", f"{edge.from_node} -> {edge.to_node}", from_node=edge.from_node, to_node=edge.to_node, when=edge.when)
         return selected
@@ -246,6 +336,7 @@ class WorkflowRunner:
             "summaries": state.summaries,
             "visited_nodes": state.visited_nodes,
             "traversed_edges": state.traversed_edges,
+            "loop_states": state.loop_states,
             "estimated_tokens_used": state.estimated_tokens_used,
             "agent_calls": state.agent_calls,
             "tool_calls": state.tool_calls,

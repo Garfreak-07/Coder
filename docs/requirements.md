@@ -1,406 +1,718 @@
 # Coder Product Requirements
 
-## Current direction
+## Document status
 
-Coder is a local-first agent workflow workbench for controlled coding tasks.
+This is the canonical product and architecture requirements document for Coder.
+It replaces the older split planning documents that previously described the
+product vision, MVP v0.2, workflow builder, foundation architecture, and
+context/RAG design.
 
-The broader product direction is documented in:
+Branch-specific handoff notes should stay local and are not part of the
+published GitHub documentation.
 
-- [product-vision.md](product-vision.md)
-- [foundation-architecture.md](foundation-architecture.md)
-- [context-memory-rag.md](context-memory-rag.md)
-- [workflow-builder.md](workflow-builder.md)
-- [mvp-v0.2.md](mvp-v0.2.md)
+## Product goal
 
-The core requirement is that users can create agents, draw workflow edges, save
-the workflow, and run it with visible state, approvals, token controls, and
-audit events.
+Coder is a local-first AI coding workflow workbench for controlled project work.
 
-Product behavior is driven by workflow JSON, not by hard-coded graph changes.
+The product is not a single coding agent, not a chat app, and not a generic
+low-code automation clone. Coder owns a deterministic workflow runtime that
+lets users build, inspect, approve, replay, and recover AI-assisted coding
+workflows while keeping model context, local memory, file mutation, and audit
+records under explicit control.
 
-## Active requirement track
+The current goal has moved beyond the old MVP v0.2 checklist. The next product
+foundation is a resource-conscious runtime:
 
-The active implementation track is **MVP v0.2** from
-[mvp-v0.2.md](mvp-v0.2.md).
+- compact ContextPackets for model calls;
+- structured artifacts for agent handoff;
+- content-addressed Blob storage for large data;
+- compact RunState and EventLog records that reference stored objects;
+- lazy Run Replay loading instead of loading full historical runs at once;
+- real token and resource budgets, not best-effort warnings.
 
-That means current work should optimize for one usable local-first workflow app:
-
-- template-first ordinary user flow;
-- Chinese ordinary-user UI with stable English internal schema;
-- default coding workflow template;
-- inspectable agent context packets and structured artifacts;
-- OpenAI/DeepSeek provider settings without storing keys in workflow JSON;
-- local project summary and local `.md` / `.txt` knowledge retrieval;
-- run history and blocked-run recovery sufficient for the v0.2 acceptance
-  criteria.
-
-Older unfinished features still matter, but they should be handled as backlog
-unless one of these is true:
-
-1. the missing feature is explicitly listed in the v0.2 acceptance criteria;
-2. the missing feature blocks the default coding workflow from working safely;
-3. the missing feature is a safety or data-loss issue in the current runtime.
-
-Everything else should wait until the default v0.2 workflow is reliable. This
-keeps the project from spreading effort across old partial ideas before the
-main product path is usable.
+The product surface remains a template-first workflow app, but the technical
+priority is to make context, artifacts, history, approvals, and replay durable
+without copying the same large content into State, Events, Checkpoints, and
+RunResult multiple times.
 
 ## Target user
 
-- Individual developers who want AI coding help but need control over scope,
-  cost, and file mutation.
-- Small teams that want repeatable AI-assisted workflows with audit logs.
-- Users who want model-provider flexibility, including OpenAI-compatible APIs,
-  local models, and future external agent adapters.
+The primary user knows some code and can understand files, commands, API keys,
+diffs, and scopes, but should not need to understand workflow-engine internals.
+
+This user wants to:
+
+- use their own model provider keys, especially OpenAI-compatible and DeepSeek
+  APIs;
+- keep project files and run history local by default;
+- create repeatable project workflows from templates;
+- manually adjust workflows when needed;
+- inspect why an agent received specific context;
+- approve risky file, command, network, GitHub, or MCP actions;
+- avoid wasting tokens by sending full transcripts, full repositories, or full
+  historical runs to the model.
+
+## Product principles
+
+1. Coder owns the workflow contract.
+   External agent frameworks can be adapters, references, or capability
+   providers. They must not define the saved workflow format.
+
+2. Workflows are product data.
+   Nodes, edges, agents, policies, budgets, and templates are saved as stable
+   JSON with English internal field names.
+
+3. The UI is ordinary-user friendly.
+   User-facing labels should be Chinese where appropriate, while schemas, APIs,
+   tests, node types, tool names, and code identifiers stay English.
+
+4. Agents exchange artifacts, not transcripts.
+   Agent outputs should be structured, validated, summarized, routed, and
+   inspectable.
+
+5. Context is centrally selected.
+   The context manager builds ContextPackets from user goals, upstream
+   artifacts, project summaries, selected snippets, retrieved knowledge chunks,
+   constraints, and required output schemas.
+
+6. Large content is stored once.
+   State, Events, Checkpoints, and run summaries should store IDs and compact
+   summaries. Full content belongs in Artifact, Context, or Blob stores.
+
+7. Auditability must not inflate model context.
+   Saving complete local run records is different from sending those records to
+   the model. Replay and audit data should be loaded and transmitted on demand.
+
+8. Agents request actions. The runtime enforces actions.
+   Tool allowlists, path scopes, command approval, network approval, patch
+   preview, snapshot, rollback, and audit records are runtime responsibilities.
 
 ## Primary product flow
 
 ```text
-select project
-  -> inspect project map
-  -> choose or create agents
-  -> draw workflow nodes and edges
-  -> configure permissions and context policy
+open app
+  -> configure provider or use mock mode
+  -> select a local project
+  -> choose a workflow template
+  -> optionally edit agents, tools, nodes, edges, scopes, and budgets
   -> run workflow
-  -> watch event stream
-  -> approve risky steps
-  -> review patch/check results
-  -> retry, finish, or block
+  -> inspect ContextPackets, artifacts, events, token estimates, and approvals
+  -> approve or reject risky steps
+  -> review patch preview, apply result, check output, and rollback option
+  -> replay or resume a stored run when needed
 ```
 
-## Required capabilities
+## Core architecture
 
-### Workflow authoring
+Recommended foundation:
 
-- Users can create a workflow visually.
-- Workflows are saved as JSON.
-- Nodes and edges in JSON are the source of truth.
-- Edge conditions determine real runtime routing.
-- Workflows can be imported, exported, listed, saved, and reloaded.
+```text
+UI / App Shell
+  -> Workflow Library and Template Layer
+  -> Coder Workflow Runtime
+  -> Context Manager
+  -> Artifact Store / Context Store / Blob Store
+  -> Agent Executor Adapters
+  -> Capability Registry
+  -> Safety, Approval, Audit, Rollback
+  -> Run Store and Replay APIs
+```
 
-Initial node types:
-
-- `start`
-- `agent`
-- `tool`
-- `mcp_tool`
-- `condition`
-- `human_gate`
-- `end`
-
-Future node types:
-
-- `loop`
-- `parallel`
-- `subworkflow`
-- `patch_review`
-- `external_agent`
-
-### Agent configuration
-
-Agents are user-configurable objects, not just prompts.
-
-Each agent must support:
-
-- id, name, role, goal, instructions
-- provider/model config
-- tool list
-- permission policy
-- context policy
-- output key/schema
-
-Agents should be stored in the local library and reusable across workflows.
-
-### Efficient agent collaboration
-
-Agent collaboration must be token-conscious by design.
-
-Rules:
-
-1. Do not pass full transcripts by default.
-2. Pass structured state and selected summaries.
-3. Each agent declares `input_keys`, `summary_keys`, `max_items_per_key`,
-   and `max_chars_per_value`.
-4. Full outputs and event history are opt-in.
-5. Runtime tracks estimated token use per run.
-6. Static agent instructions should stay stable so providers can benefit from
-   prompt caching.
-7. Agents hand off compact artifacts, not entire conversations.
-
-### Runtime execution
+### Workflow runtime
 
 The runtime is a workflow interpreter:
 
 ```text
 load workflow
   -> validate graph
-  -> create run state
+  -> create or resume run state
   -> execute node
   -> write compact output
   -> evaluate outgoing edges
   -> enqueue next node
-  -> emit events
-  -> pause / finish / block / fail
+  -> emit compact events
+  -> pause, finish, block, or fail
 ```
 
-OpenAI Agents SDK, MCP tools, external agent adapters, and local tools can all
-sit below this layer. They should not define the product contract.
+OpenAI Agents SDK, AutoGen, CrewAI, LlamaIndex, MCP servers, and other systems
+can sit below this runtime as executors or capabilities. They should not become
+the source of truth for Coder workflows.
 
-### App backend
+### WorkflowSpec
 
-The app backend should expose stable APIs:
+The workflow remains the source of truth:
 
 ```text
-GET  /api/v2/health
-GET  /api/v2/library
-POST /api/v2/library/agents
-GET  /api/v2/library/agents/{agent_id}
-POST /api/v2/library/workflows
-GET  /api/v2/library/workflows/{workflow_id}
-
-GET  /api/v2/runs
-POST /api/v2/runs
-GET  /api/v2/runs/{run_id}
-GET  /api/v2/runs/{run_id}/events
-
-GET  /api/v2/live-runs
-POST /api/v2/live-runs
-GET  /api/v2/live-runs/{run_id}
-POST /api/v2/live-runs/{run_id}/approve
-GET  /api/v2/live-runs/{run_id}/events
+workflow
+  id
+  metadata
+  agents
+  nodes
+  edges
+  budgets
+  permissions
+  template metadata
 ```
 
-Use synchronous runs for CLI/debug cases. Use live runs and Server-Sent Events
-for the app.
+Current node types:
 
-Run creation accepts optional repo-relative `scopes`; tools must reject paths
-that escape the selected project or selected scopes.
+- `start`
+- `agent`
+- `tool`
+- `mcp_tool`
+- `condition`
+- `loop`
+- `human_gate`
+- `end`
 
-### Frontend
+Future node types:
 
-Recommended stack:
+- `parallel`
+- `subworkflow`
+- `rag_retrieve`
+- `memory_write`
+- `patch_review`
+- `external_agent`
+
+### AgentSpec
+
+Agents are configurable execution contracts, not just prompts:
 
 ```text
-React + TypeScript + Vite
-React Flow for the workflow canvas
-FastAPI backend
-Server-Sent Events for run logs
-future Tauri or Electron wrapper for desktop app packaging
+agent
+  id
+  display_name
+  role
+  goal
+  instructions
+  model_policy
+  input_contract
+  output_contract
+  context_policy
+  memory_policy
+  tool_policy
+  permission_policy
+  token_budget
 ```
 
-Main frontend surfaces:
+Each agent declares what it may receive, what it must produce, which tools it
+may call, and which actions require approval.
 
-- project explorer
-- workflow canvas
-- agent library
-- node/agent inspector
-- run timeline
-- message/event log
-- approval panel
-- patch/diff panel
-- settings page
+### Capability
 
-### Safety requirements
+Tools, MCP servers, skills, and future external agent packs normalize into one
+product abstraction:
 
-Agents request actions; runtime enforces actions.
+```text
+capability
+  id
+  type
+  display_name
+  description
+  input_schema
+  output_schema
+  permissions
+  install_source
+  runtime_adapter
+  risk_level
+```
+
+MCP is an integration protocol, not a trust boundary. Coder still enforces
+scopes, approval, and audit.
+
+## Context, artifact, and storage model
+
+### ContextPacket
+
+Every agent invocation receives a ContextPacket generated by Coder:
+
+```json
+{
+  "task": {
+    "user_goal": "",
+    "workflow_goal": "",
+    "current_node": "",
+    "current_agent_role": ""
+  },
+  "upstream_artifacts": [],
+  "project_context": {
+    "project_summary": "",
+    "selected_files": [],
+    "selected_snippets": []
+  },
+  "knowledge_context": {
+    "knowledge_sources": [],
+    "retrieved_chunks": []
+  },
+  "memory_context": {
+    "run_memory": [],
+    "project_memory": [],
+    "user_preferences": []
+  },
+  "constraints": {
+    "allowed_tools": [],
+    "write_scopes": [],
+    "token_budget": 0,
+    "approval_required": true
+  },
+  "required_output": {
+    "artifact_type": "",
+    "schema": {}
+  },
+  "provenance": [],
+  "token_estimate": {
+    "input_tokens": 0,
+    "budget_remaining": 0
+  }
+}
+```
+
+The UI should explain each packet in user language:
+
+- which files and snippets were included;
+- which document chunks were retrieved;
+- which upstream artifacts were included;
+- which tools and scopes were allowed;
+- which items were omitted or summarized to save tokens.
+
+### Artifacts
+
+Agents produce artifacts, not loose prose.
+
+Required coding workflow artifacts:
+
+- `plan_artifact`
+- `patch_artifact`
+- `review_artifact`
+
+Artifacts must be validatable, summarizable, routable, and inspectable.
+
+### Storage responsibilities
+
+Large data should not be copied through every runtime object.
+
+```text
+RunState
+  -> small state, current node data, object IDs, compact summaries
+
+Artifact Store
+  -> full structured artifacts
+
+Context Store
+  -> full ContextPackets
+
+Blob Store
+  -> large snippets, diffs, logs, snapshots, raw tool output
+
+Event Log
+  -> event type, timestamps, summaries, object IDs, size metadata
+
+Run Index
+  -> searchable/listable run metadata without reading full run payloads
+```
+
+Do not emit events like this:
+
+```json
+{
+  "type": "node.completed",
+  "result": {
+    "patch": "very large patch content..."
+  }
+}
+```
+
+Prefer compact event payloads:
+
+```json
+{
+  "type": "node.completed",
+  "artifact_id": "artifact_123",
+  "summary": "changed 4 files",
+  "size_bytes": 182340
+}
+```
+
+Use content hashes for duplicate-prone content:
+
+```text
+blob_id = sha256(content)
+```
+
+ContextPacket references should be able to point to a stored blob:
+
+```json
+{
+  "source": "src/runtime.py",
+  "blob_id": "sha256:...",
+  "start_line": 40,
+  "end_line": 100
+}
+```
+
+### Run Replay
+
+Replay should be lazy and paginated. Opening a run must not load every event,
+artifact, context packet, diff, check log, and snapshot at once.
+
+Recommended APIs:
+
+```text
+GET /runs/{id}
+GET /runs/{id}/events?cursor=...
+GET /runs/{id}/context-packets/{packet_id}
+GET /runs/{id}/artifacts/{artifact_id}
+GET /runs/{id}/blobs/{blob_id}
+```
+
+Recommended persisted layout:
+
+```text
+runs/index.sqlite
+runs/{run_id}/metadata.json
+runs/{run_id}/events.jsonl
+runs/{run_id}/artifacts/
+runs/{run_id}/contexts/
+blobs/
+```
+
+JSONL append-only events are preferred over constantly rewriting a growing full
+run JSON file.
+
+## Token and resource requirements
+
+Token control is a product requirement, not an optimization pass.
+
+Default context rules:
+
+1. Empty `input_keys` must not mean "include all State".
+2. Full State access requires explicit `include_all_state: true` and should be
+   treated as advanced/risky behavior.
+3. Lists must be recursively compacted. Truncating list length is not enough if
+   list items contain large strings or dicts.
+4. Full event history, full tool output, and full artifacts are opt-in.
+5. Static agent instructions should stay stable so providers can benefit from
+   prompt caching.
+6. Estimated token use should be visible before and after agent calls.
+7. Budget overflow should first compact or drop low-priority context, then block
+   the run if it still exceeds limits.
+
+Initial budget targets:
+
+```text
+Planner input budget        12K
+Planner output budget        2K
+Executor input budget       24K
+Executor output budget       4K
+Reviewer input budget       12K
+Reviewer output budget       2K
+Default run budget        60K-80K
+```
+
+Initial context and storage limits:
+
+```text
+Max characters per snippet       8K
+Max snippets per agent           12
+Max ContextPacket size           128 KB
+Max inline event payload          16 KB
+Recent hot in-memory events       200
+Default parallel agent runs       2
+Default parallel tool runs        4
+Default retained full runs        20-50
+Default history retention         30 days
+Default data directory quota      5 GB
+Max check log per run             5-10 MB
+```
+
+Token estimation should use a real tokenizer when available. If no tokenizer is
+available, keep the estimate conservative and apply a safety factor.
+
+## Required product surfaces
+
+### Template-first workflow builder
+
+The default app should show a polished coding workflow template before exposing
+raw JSON. Advanced users can open the canvas and JSON editor.
+
+The builder should support:
+
+- template cards;
+- readable node labels;
+- agent cards;
+- tool and capability toggles;
+- workflow canvas editing;
+- edge and condition editing;
+- JSON import/export;
+- workflow save/load;
+- validation before run.
+
+### Agent editor
+
+The agent editor should support:
+
+- display name;
+- role;
+- goal;
+- instructions;
+- provider/model override;
+- allowed tools;
+- input contract;
+- output artifact type;
+- context policy;
+- memory policy placeholder;
+- permission policy;
+- token budget.
+
+### Provider settings
+
+Provider settings should support:
+
+- OpenAI API key;
+- DeepSeek API key;
+- optional OpenAI-compatible base URL;
+- default model;
+- connection test action;
+- local mock mode when keys are missing.
+
+API keys must not be stored in workflow JSON.
+
+### Project summary
+
+The app should build or reuse a local project summary:
+
+- file tree;
+- ignored directories;
+- important files;
+- detected framework;
+- candidate test/build commands;
+- module summaries when available.
+
+This summary feeds the context manager. Agents should not scan the repository
+from scratch by default.
+
+### Local document knowledge
+
+The first knowledge system should be deliberately small:
+
+- local `.md` and `.txt` documents;
+- local storage;
+- stable chunk IDs;
+- retrieval through configured embeddings or local embeddings;
+- source path and chunk ID provenance in ContextPackets.
+
+PDF, Word, web sync, and large knowledge base management are later work.
+
+### Run history and recovery
+
+Users should be able to:
+
+- list stored runs without reading full payloads;
+- open completed and blocked run details;
+- replay events incrementally;
+- load full artifacts/context only when requested;
+- resume blocked approval runs after app restart when checkpoints are valid;
+- understand why a run failed, blocked, or exceeded budget.
+
+## Default coding workflow contract
+
+Default workflow:
+
+```text
+Start
+  -> Project Summary
+  -> Planner
+  -> Human Approval
+  -> Executor
+  -> Patch Preview
+  -> Patch Approval
+  -> Patch Apply
+  -> Check
+  -> Tester / Reviewer
+  -> optional retry loop
+  -> End
+```
+
+### Planner
+
+Input:
+
+- user request;
+- project summary;
+- relevant knowledge chunks;
+- available tools and scopes.
+
+Output: `plan_artifact`
+
+Required fields:
+
+- summary;
+- target files;
+- required snippets;
+- implementation steps;
+- risks;
+- recommended checks;
+- executor instructions.
+
+### Executor
+
+Input:
+
+- `plan_artifact`;
+- selected snippets;
+- constraints;
+- patch schema.
+
+Output: `patch_artifact`
+
+Required fields:
+
+- changes;
+- changed files;
+- implementation summary;
+- risks;
+- suggested check command.
+
+### Tester / Reviewer
+
+Input:
+
+- `patch_artifact`;
+- check output;
+- changed file summary.
+
+Output: `review_artifact`
+
+Required fields:
+
+- status;
+- evidence;
+- issues;
+- next action.
+
+## Safety requirements
+
+Default behavior must be conservative. Real file mutation should require patch
+preview, approval, snapshot, and rollback support.
 
 Required gates:
 
-- tool allowlist
-- path scope guard
-- command approval
-- network approval
-- human gate before mutation
-- patch preview before write
-- snapshot before apply
-- rollback support
-- max step count
-- max agent call count
-- max tool call count
-- token budget
-- event audit log
+- tool allowlist;
+- path scope guard;
+- command approval;
+- network approval;
+- human gate before mutation;
+- patch preview before write;
+- snapshot before apply;
+- rollback support;
+- max step count;
+- max agent call count;
+- max tool call count;
+- token budget;
+- event audit log;
+- stale-base detection before patch apply;
+- binary-file rejection before patch apply.
 
-Default behavior must be conservative. Real file mutation should arrive only
-after patch preview, approval, and rollback support are implemented.
+Run creation accepts optional repo-relative `scopes`. Tools must reject paths
+that escape the selected project or selected scopes.
 
-## Framework references
-
-### Flowise Agentflow
-
-Status: best reference product for visual workflow behavior.
-
-Flowise is close to the desired visual model: nodes, edges, conditions, loops,
-human input, state, streaming, and MCP-style integrations. It is useful as a
-design reference. Directly adopting it as the core is risky because Coder needs
-a local-first coding-specific safety model and app identity.
-
-Decision: borrow concepts, do not make it the core dependency.
-
-### OpenAI Agents SDK
-
-Status: strong candidate for an agent executor adapter.
-
-Useful for agent execution, handoffs, guardrails, tracing, MCP integration,
-sessions, and future sandbox-style execution. It is not a visual workflow
-engine. It should sit below Coder's own WorkflowRunner.
-
-Decision: add later as `AgentExecutor`.
-
-### AutoGen
-
-Status: candidate adapter for multi-agent team conversations.
-
-AutoGen is strong for agent teams, group chat, selection, and handoff. It is
-less suitable as the strict workflow canvas runtime because Coder needs edges,
-conditions, approvals, and patch gates to be deterministic product behavior.
-
-Decision: add later for conversation/team nodes.
-
-### CrewAI Flows
-
-Status: useful reference, possible adapter.
-
-CrewAI Flows are event-driven and support state, branching, and loops, but they
-are still primarily code-defined. They are not the source-of-truth canvas model.
-
-Decision: optional adapter/reference, not core.
-
-### LlamaIndex Workflows
-
-Status: useful for RAG/data pipelines.
-
-Good fit for retrieval, document processing, and knowledge workflows. Not the
-main coding workflow engine.
-
-Decision: use later for retrieval/RAG tools if needed.
-
-### Temporal
-
-Status: future production reliability option.
-
-Temporal is strong for durable execution, queues, retries, and recovery. It is
-too heavy for the current local-first prototype but may be valuable if long
-background runs become important.
-
-Decision: defer.
-
-### n8n / general low-code automation
-
-Status: reference only.
-
-n8n is mature for automation but not specialized for safe local coding agents,
-patch review, file scope controls, or model context budgeting.
-
-Decision: reference only.
-
-## Current implemented slice
-
-Progress status:
-
-- Product-core completion estimate: roughly 85%.
-- The core local-first workflow loop is implemented: visual workflow editing,
-  JSON source-of-truth, live runs, event streaming, human/command/MCP approval,
-  scoped patch proposal/apply/rollback, local library storage, and file-backed
-  run records.
-- Remaining work is mostly product hardening rather than core proof-of-concept:
-  restart-resumable blocked runs, richer run-history browsing, long-lived MCP
-  sessions and tool discovery, desktop packaging, and deeper provider-specific
-  adapters where OpenAI-compatible endpoints are not sufficient.
-- Current baseline: PR #1 and PR #2 have been merged into `main`. New unrelated
-  work should start from updated `main` on a new branch.
+## Current implemented state
 
 Implemented:
 
-- workflow/agent/node/edge schema
-- JSON-driven runner
-- real edge condition routing
-- human approval gate
-- compact agent context policy
-- estimated token tracking
-- mock agent executor when credentials are missing
-- React + TypeScript + Vite frontend scaffold
-- React Flow workflow canvas with node/edge rendering
-- workflow node creation and node inspector editing
-- edge inspector editing for `from`, `to`, `when`, `priority`, and
-  `max_traversals`
-- workflow JSON editor, import, export, save, and reload path
-- workflow library list/load/save UI
-- agent list, basic agent editor, local agent save, and library agent import
-- live run launcher from the UI
-- SSE run event timeline with event payload details and compact run summary
-- first-class live run approval resume API:
-  - `POST /api/v2/live-runs/{run_id}/approve`
-  - resumes the same paused run instead of starting a fresh approved run
-- approval-required resume action in the run timeline
-- command-specific approval keyed by command and working directory
-- persisted approval audit records for human gates, command approvals, and MCP
-  approvals
-- approval rejection path for live runs
-- project scope selection for runs
-- path guard enforcement for scoped tools
-- built-in tools:
-  - `project_index`
-  - `recommend_modules`
-  - `dry_run_patch`
-  - `propose_patch`
-  - `apply_patch`
-  - `rollback_patch`
-  - `run_check`
-- basic MCP stdio JSON-RPC adapter through `mcp_tool` workflow nodes
-- expanded OpenAI-compatible provider presets for Groq, OpenRouter, Together,
-  Mistral, Perplexity, xAI, Gemini-compatible, DeepSeek, Moonshot/Kimi,
-  DashScope/Qwen, and Ollama
-- patch proposal, scoped patch apply, snapshot, and rollback primitives
-- stale-base detection and binary-file rejection before patch apply
-- patch/diff, apply, check, and rollback display in the UI run panel
-- approval request and approval audit display in the UI
-- runtime summary panel with health, tool count, live runs, and stored runs
-- run history detail loading in the UI:
-  - open stored run details and replay persisted events
-  - open live run details and inspect restored live run events
-  - reattach to queued/running live run event streams from the browser
-  - select blocked live runs for approval after loading their persisted events
-- gate-specific approval resume so separate human gates can be approved
-  independently
-- frontend i18n foundation for ordinary-user Chinese labels while keeping JSON,
-  API, node types, tool names, and internal schema fields in English
-- template-first frontend entry with default coding workflow and blank advanced
-  workflow cards before the saved workflow library
-- readable Chinese canvas node labels with internal node IDs still visible
-- CLI execution:
+- workflow/agent/node/edge schema;
+- JSON-driven runner;
+- real edge condition routing;
+- first-class `loop` node type in backend and frontend;
+- loop runtime state and loop events;
+- workflow step/tool/agent/token limits for loop safety;
+- human approval gate;
+- compact agent context policy;
+- inspectable `agent.context_packet` events before agent calls;
+- estimated token tracking;
+- mock agent executor when credentials are missing;
+- React + TypeScript + Vite frontend scaffold;
+- React Flow workflow canvas with node/edge rendering;
+- workflow node creation and node inspector editing;
+- edge inspector editing;
+- workflow JSON editor, import, export, save, and reload path;
+- workflow library list/load/save UI;
+- agent list, basic agent editor, local agent save, and library agent import;
+- live run launcher from the UI;
+- SSE run event timeline with event payload details and compact run summary;
+- approval-required resume action in the run timeline;
+- command-specific approval keyed by command and working directory;
+- persisted approval audit records for human, command, and MCP approvals;
+- approval rejection path for live runs;
+- project scope selection for runs;
+- path guard enforcement for scoped tools;
+- built-in project, patch, apply, rollback, check, and MCP tools;
+- expanded OpenAI-compatible provider presets;
+- patch proposal, scoped patch apply, snapshot, and rollback primitives;
+- stale-base detection and binary-file rejection before patch apply;
+- patch/diff, apply, check, and rollback display in the UI run panel;
+- runtime summary panel with health, tool count, live runs, and stored runs;
+- run history detail loading for stored and live runs;
+- split stored run metadata, compact result, and JSONL event log files;
+- paginated stored run event replay API;
+- reattach to queued/running live run event streams from the browser;
+- gate-specific approval resume;
+- frontend i18n foundation for Chinese labels with English internal schema;
+- template-first frontend entry;
+- readable Chinese canvas node labels;
+- loop node creation, loop inspector fields, and ContextPacket cards;
+- stored ContextPackets externalized from event logs with compact summaries;
+- on-demand stored ContextPacket loading in the run event panel;
+- lazy loading for additional stored run events in the UI;
+- FastAPI runtime API;
+- live background runs;
+- live run snapshots persisted under the local run store;
+- file-backed run storage;
+- local workflow/agent library storage;
+- optional serving of built `frontend/dist` from the API.
 
-```powershell
-python -m coder_workbench.cli --repo . --workflow examples\workflows\coding-workbench.json --request "refactor runtime"
-```
+## Active roadmap
 
-- FastAPI runtime API
-- live background runs
-- live run snapshots persisted under the local run store so blocked/completed
-  live runs can be listed after API restart
-- SSE event streaming
-- file-backed run storage
-- local workflow/agent library storage
-- optional serving of built `frontend/dist` from the API
+Near-term work should prioritize the foundation hardening that supports the new
+goal:
 
-## Near-term roadmap
+1. Change empty `input_keys` so it no longer includes all State by default.
+2. Recursively compact list contents in context policy handling.
+3. Turn token budget overflow from a warning into a blocking runtime condition
+   after compaction has failed.
+4. Stop embedding full node results in events.
+5. Continue splitting Artifact, Blob, and RunState storage; ContextPacket and
+   EventLog separation has started for stored runs.
+6. Add content hash deduplication for large repeated snippets, diffs, logs, and
+   snapshots.
+7. Broaden lazy Run Replay loading to artifacts, blobs, diffs, check logs, and
+   snapshots.
+8. Add a lightweight run index so listing runs does not require reading every
+   full run file.
+9. Add default coding workflow artifact schemas.
+10. Add provider settings UI for OpenAI, DeepSeek, OpenAI-compatible base URL,
+    default model, connection test, and mock mode.
+11. Add local `.md` / `.txt` knowledge storage, chunking, retrieval, and
+    provenance in ContextPackets.
+12. Harden loop UX and semantics with iteration grouping, `collect_key`,
+    `summary_key`, and clearer loop-back edges.
+13. Expand durable recovery from persisted blocked run snapshots to active
+    resume after process restart.
+14. Add long-lived MCP server sessions and tool discovery/listing.
 
-1. Add ContextPacket data model and event display:
-   - emit agent context packets as inspectable run events;
-   - show task, upstream artifacts, selected project context, allowed tools,
-     token estimates, and output artifacts in the UI.
-2. Add provider settings UI for OpenAI/DeepSeek keys, base URL, default model,
-   connection testing, and mock mode. Do not store API keys in workflow JSON.
-3. Add local `.md` / `.txt` document knowledge MVP:
-   - local storage;
-   - chunking and retrieval;
-   - provenance shown in context packets.
-4. Expand durable recovery from persisted blocked run snapshots to active
-   resume after process restart.
-5. Add long-lived MCP server sessions and tool discovery/listing instead of
-   only short-lived configured stdio calls.
-6. Add provider-specific non-OpenAI-compatible executor adapters where needed,
-   starting with native SDKs only when the OpenAI-compatible endpoint is not
-   sufficient.
-7. Add desktop packaging and stronger product polish: settings persistence,
-   diff viewer improvements, rejection reasons in the event timeline, and
-   richer rollback conflict handling.
+## Non-goals for the next phase
+
+Do not spend near-term effort on:
+
+- public marketplace;
+- arbitrary GitHub agent pack installation;
+- complex free-form multi-agent chat teams;
+- production desktop packaging;
+- cloud sync;
+- multi-user team permissions;
+- PDF/Word knowledge ingestion;
+- general automation across all websites;
+- adopting any external framework as the core workflow runtime.
+
+These can be revisited after the context, artifact, replay, and resource-budget
+foundation is stable.

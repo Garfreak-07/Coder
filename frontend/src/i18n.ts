@@ -85,6 +85,13 @@ export const zhCN = {
     inputJson: "输入 JSON",
     condition: "条件",
     approvalReason: "审批原因",
+    loopMode: "循环模式",
+    maxIterations: "最大迭代次数",
+    itemsKey: "列表输入键",
+    itemKey: "当前条目键",
+    iterationKey: "迭代次数键",
+    collectKey: "收集输出键",
+    summaryKey: "循环摘要键",
     outputKey: "输出键",
     from: "从",
     to: "到",
@@ -114,6 +121,7 @@ export const nodeTypeLabels: Record<NodeType, string> = {
   tool: "工具",
   mcp_tool: "MCP 工具",
   condition: "条件",
+  loop: "循环",
   human_gate: "人工审批",
   end: "结束"
 };
@@ -124,6 +132,7 @@ export const nodeTypeDescriptions: Record<NodeType, string> = {
   tool: "调用内置本地工具",
   mcp_tool: "调用 MCP stdio 工具",
   condition: "按状态表达式分支",
+  loop: "显式循环控制节点，输出 continue、iteration 和 break_reason 供连线条件使用",
   human_gate: "等待用户批准或拒绝",
   end: "工作流结束"
 };

@@ -220,7 +220,6 @@ class RunManager:
                 resume_after_node=resume_after_node,
             )
             run.result = result
-            run.status = result.status
             stored = self.store.save(
                 workflow_id=run.workflow.id,
                 repo_root=run.repo_root,
@@ -228,6 +227,7 @@ class RunManager:
                 result=result,
             )
             run.stored_run_id = stored.id
+            run.status = result.status
         except Exception as exc:  # pragma: no cover - background boundary
             run.status = "failed"
             run.error = str(exc)

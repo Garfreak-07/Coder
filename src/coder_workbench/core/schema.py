@@ -7,7 +7,8 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-NodeType = Literal["start", "agent", "tool", "mcp_tool", "condition", "human_gate", "end"]
+NodeType = Literal["start", "agent", "tool", "mcp_tool", "condition", "loop", "human_gate", "end"]
+LoopMode = Literal["while", "for_each", "retry_until"]
 
 
 class ContextPolicy(BaseModel):
@@ -23,6 +24,7 @@ class ContextPolicy(BaseModel):
     summary_keys: list[str] = Field(default_factory=list)
     max_items_per_key: int = Field(default=20, ge=1, le=200)
     max_chars_per_value: int = Field(default=4000, ge=500, le=50000)
+    include_all_state: bool = False
     include_event_history: bool = False
     include_full_outputs: bool = False
 
@@ -64,6 +66,13 @@ class NodeSpec(BaseModel):
     output_key: str | None = None
     condition: str | None = None
     approval_reason: str | None = None
+    loop_mode: LoopMode | None = None
+    items_key: str | None = None
+    item_key: str | None = None
+    iteration_key: str | None = None
+    max_iterations: int | None = Field(default=None, ge=1, le=50)
+    collect_key: str | None = None
+    summary_key: str | None = None
 
     @model_validator(mode="after")
     def validate_node_ref(self) -> "NodeSpec":
@@ -73,6 +82,13 @@ class NodeSpec(BaseModel):
             raise ValueError(f"tool node {self.id} requires tool")
         if self.type == "condition" and not self.condition:
             raise ValueError(f"condition node {self.id} requires condition")
+        if self.type == "loop":
+            if not self.loop_mode:
+                self.loop_mode = "retry_until"
+            if self.max_iterations is None:
+                self.max_iterations = 3
+            if self.loop_mode == "for_each" and not self.items_key:
+                raise ValueError(f"loop node {self.id} in for_each mode requires items_key")
         return self
 
 

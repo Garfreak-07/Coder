@@ -1,9 +1,11 @@
 import type {
   AgentSpec,
+  ContextPacketDetail,
   HealthStatus,
   LibraryIndex,
   LiveRunDetail,
   RunEvent,
+  RunEventsPage,
   RunSummaryItem,
   StoredRunDetail,
   WorkflowSpec
@@ -40,8 +42,16 @@ export async function getLiveRuns(): Promise<RunSummaryItem[]> {
   return payload.runs;
 }
 
-export function getRun(runId: string): Promise<StoredRunDetail> {
-  return requestJson<StoredRunDetail>(`/api/v2/runs/${runId}`);
+export function getRun(runId: string, includeEvents = true): Promise<StoredRunDetail> {
+  return requestJson<StoredRunDetail>(`/api/v2/runs/${runId}?include_events=${includeEvents ? "true" : "false"}`);
+}
+
+export function getRunEvents(runId: string, cursor = 0, limit = 200): Promise<RunEventsPage> {
+  return requestJson<RunEventsPage>(`/api/v2/runs/${runId}/events?cursor=${cursor}&limit=${limit}`);
+}
+
+export function getContextPacket(runId: string, packetId: string): Promise<ContextPacketDetail> {
+  return requestJson<ContextPacketDetail>(`/api/v2/runs/${runId}/context-packets/${packetId}`);
 }
 
 export function getLiveRun(runId: string): Promise<LiveRunDetail> {
@@ -123,6 +133,12 @@ export function subscribeRunEvents(url: string, onEvent: (event: RunEvent) => vo
     "node.started",
     "node.completed",
     "node.skipped",
+    "loop.started",
+    "loop.iteration.started",
+    "loop.iteration.completed",
+    "loop.completed",
+    "loop.blocked",
+    "agent.context_packet",
     "tool.called",
     "agent.called",
     "approval.required",

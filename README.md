@@ -11,15 +11,12 @@ event logs, and scoped project indexing.
 
 ## Current product target
 
-The active product target is MVP v0.2: a local-first workflow builder for users
-who know some code. The app should make the default flow template-first for
-ordinary use, while keeping the workflow JSON, API fields, and internal schema
-stable in English for advanced editing.
+The active product target is a local-first workflow workbench with controlled
+context, artifacts, approvals, replay, rollback, and resource budgets. The app
+should stay template-first for ordinary use while keeping workflow JSON, API
+fields, and internal schema stable in English for advanced editing.
 
-Current implementation work should follow [docs/mvp-v0.2.md](docs/mvp-v0.2.md)
-and the active priority notes in [docs/requirements.md](docs/requirements.md).
-Older unfinished ideas should be treated as backlog unless they directly block
-the v0.2 acceptance criteria.
+Current implementation work should follow [docs/requirements.md](docs/requirements.md).
 
 ## Current capabilities
 

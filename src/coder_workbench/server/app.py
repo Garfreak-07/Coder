@@ -170,9 +170,9 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
         return {"rollback": result}
 
     @app.get("/api/v2/runs/{run_id}")
-    def get_run(run_id: str) -> dict[str, Any]:
+    def get_run(run_id: str, include_events: bool = True) -> dict[str, Any]:
         try:
-            stored = store.get(run_id)
+            stored = store.get(run_id, include_events=include_events)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="run not found") from exc
         return stored.model_dump(mode="json")
@@ -196,19 +196,42 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
         }
 
     @app.get("/api/v2/runs/{run_id}/events")
-    def stream_events(run_id: str) -> StreamingResponse:
+    def stream_events(
+        run_id: str,
+        cursor: int | None = None,
+        limit: int = 100,
+    ) -> Any:
+        if cursor is not None:
+            try:
+                return store.get_events(run_id, cursor=cursor, limit=limit)
+            except KeyError as exc:
+                raise HTTPException(status_code=404, detail="run not found") from exc
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
         try:
-            stored = store.get(run_id)
+            events = store.get_events(run_id)["events"]
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="run not found") from exc
 
         def event_stream():
-            for event in stored.result.events:
-                payload = json.dumps(event.model_dump(mode="json"), ensure_ascii=False)
-                yield f"event: {event.type}\n"
+            for event in events:
+                payload = json.dumps(event, ensure_ascii=False)
+                yield f"event: {event['type']}\n"
                 yield f"data: {payload}\n\n"
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    @app.get("/api/v2/runs/{run_id}/context-packets/{packet_id}")
+    def get_context_packet(run_id: str, packet_id: str) -> dict[str, Any]:
+        try:
+            packet = store.get_context_packet(run_id, packet_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="context packet not found") from exc
+        return {
+            "packet_id": packet_id,
+            "packet": packet,
+        }
 
     @app.get("/api/v2/live-runs/{run_id}/events")
     def stream_live_events(run_id: str) -> StreamingResponse:

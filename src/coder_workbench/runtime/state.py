@@ -12,6 +12,12 @@ EventType = Literal[
     "node.started",
     "node.completed",
     "node.skipped",
+    "loop.started",
+    "loop.iteration.started",
+    "loop.iteration.completed",
+    "loop.completed",
+    "loop.blocked",
+    "agent.context_packet",
     "agent.called",
     "tool.called",
     "approval.required",
@@ -47,6 +53,7 @@ class RunState(BaseModel):
     events: list[RunEvent] = Field(default_factory=list)
     visited_nodes: dict[str, int] = Field(default_factory=dict)
     traversed_edges: dict[str, int] = Field(default_factory=dict)
+    loop_states: dict[str, dict[str, Any]] = Field(default_factory=dict)
     token_budget: int | None = None
     estimated_tokens_used: int = 0
     agent_calls: int = 0

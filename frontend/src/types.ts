@@ -1,4 +1,5 @@
-export type NodeType = "start" | "agent" | "tool" | "mcp_tool" | "condition" | "human_gate" | "end";
+export type NodeType = "start" | "agent" | "tool" | "mcp_tool" | "condition" | "loop" | "human_gate" | "end";
+export type LoopMode = "while" | "for_each" | "retry_until";
 
 export interface PermissionPolicy {
   read_files: boolean;
@@ -13,6 +14,7 @@ export interface ContextPolicy {
   summary_keys: string[];
   max_items_per_key: number;
   max_chars_per_value: number;
+  include_all_state: boolean;
   include_event_history: boolean;
   include_full_outputs: boolean;
 }
@@ -40,6 +42,13 @@ export interface NodeSpec {
   output_key?: string | null;
   condition?: string | null;
   approval_reason?: string | null;
+  loop_mode?: LoopMode | null;
+  items_key?: string | null;
+  item_key?: string | null;
+  iteration_key?: string | null;
+  max_iterations?: number | null;
+  collect_key?: string | null;
+  summary_key?: string | null;
 }
 
 export interface EdgeSpec {
@@ -130,6 +139,18 @@ export interface StoredRunDetail {
   repo_root: string;
   request: string;
   result: RunResult;
+}
+
+export interface RunEventsPage {
+  events: RunEvent[];
+  cursor: number;
+  next_cursor: number;
+  has_more: boolean;
+}
+
+export interface ContextPacketDetail {
+  packet_id: string;
+  packet: Record<string, unknown>;
 }
 
 export interface LiveRunDetail {

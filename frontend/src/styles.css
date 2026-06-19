@@ -422,6 +422,33 @@ label {
   padding: 10px;
 }
 
+.context-packet-card {
+  background: #0b1220;
+  border: 1px solid #1e3a5f;
+  border-radius: 12px;
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.context-packet-card summary {
+  color: #93c5fd;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.context-packet-card pre {
+  background: #07111f;
+  border-radius: 8px;
+  color: #d1d5db;
+  font-size: 11px;
+  margin: 8px 0 0;
+  max-height: 260px;
+  overflow: auto;
+  padding: 8px;
+  white-space: pre-wrap;
+}
+
 .diff-block pre,
 .patch-panel pre {
   background: #07111f;
