@@ -30,7 +30,8 @@ import {
   subscribeRunEvents
 } from "./api";
 import { codingWorkbenchWorkflow } from "./examples";
-import { workflowTemplate } from "./template";
+import { nodeTypeDescriptions, nodeTypeLabels, zhCN } from "./i18n";
+import { instantiateWorkflowTemplate, workflowTemplate, workflowTemplateCards, type WorkflowTemplateCard } from "./template";
 import type {
   AgentSpec,
   EdgeSpec,
@@ -46,6 +47,7 @@ import type {
 } from "./types";
 
 const nodeTypes: NodeType[] = ["start", "agent", "tool", "mcp_tool", "condition", "human_gate", "end"];
+const t = zhCN;
 
 export function App() {
   const [library, setLibrary] = useState<LibraryIndex>({ agents: [], workflows: [] });
@@ -54,7 +56,7 @@ export function App() {
   const [nodes, setNodes] = useState<FlowNode[]>(() => toFlowNodes(workflowTemplate));
   const [edges, setEdges] = useState<FlowEdge[]>(() => toFlowEdges(workflowTemplate));
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>("start");
-  const [status, setStatus] = useState("Ready");
+  const [status, setStatus] = useState(t.app.defaultStatus);
   const [repo, setRepo] = useState(".");
   const [scopesText, setScopesText] = useState("");
   const [request, setRequest] = useState("Inspect this project and propose the next safe step.");
@@ -147,6 +149,12 @@ export function App() {
     setSelectedNodeId(next.nodes[0]?.id ?? null);
     setSelectedEdgeId(null);
     setSelectedAgentId(next.agents[0]?.id ?? null);
+  }
+
+  function useTemplateCard(template: WorkflowTemplateCard) {
+    const next = instantiateWorkflowTemplate(template);
+    setCurrentWorkflow(next);
+    setStatus(`已从模板创建：${next.name}`);
   }
 
   async function loadWorkflow(workflowId: string) {
@@ -419,30 +427,34 @@ export function App() {
     <div className="app-shell">
       <header className="topbar">
         <div>
-          <div className="eyebrow">Coder v2</div>
-          <h1>Workflow Workbench</h1>
+          <div className="eyebrow">{t.app.eyebrow}</div>
+          <h1>{t.app.title}</h1>
         </div>
         <div className="status">{status}</div>
       </header>
 
       <aside className="sidebar">
         <section className="panel">
-          <div className="panel-title">Workflow Library</div>
-          <button onClick={() => setCurrentWorkflow({ ...workflowTemplate, id: `workflow-${Date.now()}` })}>
-            New from template
-          </button>
-          <button onClick={() => setCurrentWorkflow(codingWorkbenchWorkflow)}>Load coding workbench example</button>
-          <button onClick={refreshLibrary}>Refresh</button>
+          <div className="panel-title">{t.templates.title}</div>
+          <div className="template-list">
+            {workflowTemplateCards.map((template) => (
+              <TemplateCard key={template.id} template={template} onUse={useTemplateCard} />
+            ))}
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-title">{t.library.title}</div>
+          <button onClick={() => setCurrentWorkflow(codingWorkbenchWorkflow)}>{t.library.loadExample}</button>
+          <button onClick={refreshLibrary}>{t.library.refresh}</button>
           <div className="list">
             {library.workflows.length === 0 ? (
-              <div className="muted">No saved workflows yet.</div>
+              <div className="muted">{t.library.empty}</div>
             ) : (
               library.workflows.map((item) => (
                 <button className="list-item" key={item.id} onClick={() => loadWorkflow(item.id)}>
                   <span>{item.name ?? item.id}</span>
-                  <small>
-                    {item.nodes} nodes / {item.edges} edges
-                  </small>
+                  <small>{t.library.nodeEdgeCount(item.nodes, item.edges)}</small>
                 </button>
               ))
             )}
@@ -450,39 +462,39 @@ export function App() {
         </section>
 
         <section className="panel">
-          <div className="panel-title">Run</div>
+          <div className="panel-title">{t.run.title}</div>
           <label>
-            Repo
+            {t.run.repo}
             <input value={repo} onChange={(event) => setRepo(event.target.value)} />
           </label>
           <label>
-            Scopes
+            {t.run.scopes}
             <textarea
-              placeholder="Optional repo-relative paths, one per line"
+              placeholder={t.run.scopesPlaceholder}
               value={scopesText}
               onChange={(event) => setScopesText(event.target.value)}
               rows={3}
             />
           </label>
           <label>
-            Request
+            {t.run.request}
             <textarea value={request} onChange={(event) => setRequest(event.target.value)} rows={4} />
           </label>
           <label className="checkbox-row">
             <input type="checkbox" checked={approved} onChange={(event) => setApproved(event.target.checked)} />
-            Pre-approve gates
+            {t.run.preApprove}
           </label>
-          <button onClick={() => runWorkflow()}>Start live run</button>
+          <button onClick={() => runWorkflow()}>{t.run.start}</button>
         </section>
 
         <section className="panel">
-          <div className="panel-title">Runtime</div>
-          <button onClick={refreshRuntimeInfo}>Refresh runtime info</button>
+          <div className="panel-title">{t.runtime.title}</div>
+          <button onClick={refreshRuntimeInfo}>{t.runtime.refresh}</button>
           <div className="summary-grid">
-            <span>{health?.status ?? "unknown"}</span>
-            <span>{health?.tools.length ?? 0} tools</span>
-            <span>{liveRuns.length} live runs</span>
-            <span>{runHistory.length} stored runs</span>
+            <span>{health?.status ?? t.runtime.unknown}</span>
+            <span>{t.runtime.tools(health?.tools.length ?? 0)}</span>
+            <span>{t.runtime.liveRuns(liveRuns.length)}</span>
+            <span>{t.runtime.storedRuns(runHistory.length)}</span>
           </div>
           <div className="list compact-list">
             {liveRuns.slice(0, 5).map((run) => (
@@ -491,9 +503,9 @@ export function App() {
                 <small>{run.status} / {run.events} events</small>
               </button>
             ))}
-            {liveRuns.length === 0 && <div className="muted">No live runs.</div>}
+            {liveRuns.length === 0 && <div className="muted">{t.runtime.noLiveRuns}</div>}
           </div>
-          <div className="panel-subtitle">Stored run history</div>
+          <div className="panel-subtitle">{t.runtime.storedHistory}</div>
           <div className="list compact-list">
             {runHistory.slice(0, 5).map((run) => (
               <button className="list-item" key={run.id} onClick={() => openStoredRun(run.id)}>
@@ -501,7 +513,7 @@ export function App() {
                 <small>{run.status} / {run.events} events</small>
               </button>
             ))}
-            {runHistory.length === 0 && <div className="muted">No stored runs.</div>}
+            {runHistory.length === 0 && <div className="muted">{t.runtime.noStoredRuns}</div>}
           </div>
         </section>
       </aside>
@@ -516,7 +528,7 @@ export function App() {
             <div className="button-row">
               {nodeTypes.map((type) => (
                 <button key={type} onClick={() => addWorkflowNode(type)}>
-                  + {type}
+                  {t.canvas.addNode(type)}
                 </button>
               ))}
             </div>
@@ -544,13 +556,13 @@ export function App() {
         </section>
 
         <section className="editor-panel">
-          <div className="panel-title">Workflow JSON</div>
+          <div className="panel-title">{t.json.title}</div>
           <div className="button-row">
-            <button onClick={applyJson}>Apply JSON</button>
-            <button onClick={persistWorkflow}>Save</button>
-            <button onClick={exportWorkflow}>Export</button>
+            <button onClick={applyJson}>{t.json.apply}</button>
+            <button onClick={persistWorkflow}>{t.json.save}</button>
+            <button onClick={exportWorkflow}>{t.json.export}</button>
             <label className="file-button">
-              Import
+              {t.json.import}
               <input
                 type="file"
                 accept="application/json,.json"
@@ -564,22 +576,22 @@ export function App() {
 
       <aside className="inspector">
         <section className="panel">
-          <div className="panel-title">Inspector</div>
+          <div className="panel-title">{t.inspector.title}</div>
           {selectedNode ? (
             <NodeInspector node={selectedNode} workflow={workflow} onChange={updateSelectedNode} />
           ) : selectedEdge ? (
             <EdgeInspector edge={selectedEdge} nodes={workflow.nodes} onChange={updateSelectedEdge} />
           ) : (
-            <div className="muted">Select a node or edge.</div>
+            <div className="muted">{t.inspector.empty}</div>
           )}
         </section>
 
         <section className="panel">
-          <div className="panel-title">Agents</div>
+          <div className="panel-title">{t.inspector.agents}</div>
           <div className="button-row">
-            <button onClick={addAgent}>+ agent</button>
+            <button onClick={addAgent}>{t.inspector.addAgent}</button>
             <button disabled={!selectedAgent} onClick={persistSelectedAgent}>
-              Save agent
+              {t.inspector.saveAgent}
             </button>
           </div>
           <div className="list compact-list">
@@ -593,11 +605,11 @@ export function App() {
                 <small>{agent.role}</small>
               </button>
             ))}
-            {workflow.agents.length === 0 && <div className="muted">No agents in this workflow.</div>}
+            {workflow.agents.length === 0 && <div className="muted">{t.inspector.noAgents}</div>}
           </div>
           {library.agents.length > 0 && (
             <>
-              <div className="panel-subtitle">Library agents</div>
+              <div className="panel-subtitle">{t.inspector.libraryAgents}</div>
               <div className="list compact-list">
                 {library.agents.map((agent) => (
                   <button className="list-item" key={agent.id} onClick={() => loadAgentIntoWorkflow(agent.id)}>
@@ -612,7 +624,7 @@ export function App() {
         </section>
 
         <section className="panel events-panel">
-          <div className="panel-title">Run Events</div>
+          <div className="panel-title">{t.events.title}</div>
           <RunDetailCard
             detail={selectedRunDetail}
             kind={selectedRunKind}
@@ -628,7 +640,7 @@ export function App() {
             onStatus={setStatus}
           />
           {events.length === 0 ? (
-            <div className="muted">No events yet.</div>
+            <div className="muted">{t.events.empty}</div>
           ) : (
             events.map((event, index) => (
               <div className="event-row" key={`${event.type}-${index}`}>
@@ -739,6 +751,58 @@ function PatchPanel({
         </div>
       )}
     </div>
+  );
+}
+
+function TemplateCard({
+  template,
+  onUse
+}: {
+  template: WorkflowTemplateCard;
+  onUse: (template: WorkflowTemplateCard) => void;
+}) {
+  const isDefaultCoding = template.id === "default-coding";
+  const name = isDefaultCoding ? t.templates.defaultCodingName : t.templates.blankName;
+  const purpose = isDefaultCoding ? t.templates.defaultCodingPurpose : t.templates.blankPurpose;
+  const approvals =
+    template.approvals === "requiredApprovals" ? t.templates.requiredApprovals : "无强制审批";
+  const modelRequirement =
+    template.modelRequirement === "optionalModel" ? t.templates.optionalModel : template.modelRequirement;
+  const knowledgeRequirement =
+    template.knowledgeRequirement === "projectKnowledge"
+      ? t.templates.projectKnowledge
+      : template.knowledgeRequirement;
+  const risk = template.risk === "mediumRisk" ? t.templates.mediumRisk : t.templates.lowRisk;
+
+  return (
+    <article className="template-card">
+      <div className="template-heading">
+        <strong>{name}</strong>
+        <span>{template.workflow.version}</span>
+      </div>
+      <p>{purpose}</p>
+      <div className="template-meta">
+        <span>
+          {t.templates.agents}: {template.agentCount}
+        </span>
+        <span>
+          {t.templates.tools}: {template.tools.length > 0 ? template.tools.join(", ") : "无"}
+        </span>
+        <span>
+          {t.templates.approvals}: {approvals}
+        </span>
+        <span>
+          {t.templates.model}: {modelRequirement}
+        </span>
+        <span>
+          {t.templates.knowledge}: {knowledgeRequirement}
+        </span>
+        <span>
+          {t.templates.risk}: {risk}
+        </span>
+      </div>
+      <button onClick={() => onUse(template)}>{t.templates.useTemplate}</button>
+    </article>
   );
 }
 
@@ -898,22 +962,25 @@ function NodeInspector({
   return (
     <div className="form-stack">
       <label>
-        ID
+        {t.forms.id}
         <input value={node.id} onChange={(event) => onChange({ id: event.target.value })} />
       </label>
       <label>
-        Type
+        {t.forms.type}
         <select value={node.type} onChange={(event) => onChange({ type: event.target.value as NodeType })}>
           {nodeTypes.map((type) => (
-            <option key={type}>{type}</option>
+            <option key={type} value={type}>
+              {nodeTypeLabels[type]} ({type})
+            </option>
           ))}
         </select>
+        <span className="field-help">{nodeTypeDescriptions[node.type]}</span>
       </label>
       {node.type === "agent" && (
         <label>
-          Agent
+          {t.forms.agent}
           <select value={node.agent_id ?? ""} onChange={(event) => onChange({ agent_id: event.target.value })}>
-            <option value="">Select agent</option>
+            <option value="">{t.forms.selectAgent}</option>
             {workflow.agents.map((agent) => (
               <option key={agent.id} value={agent.id}>
                 {agent.name ?? agent.id}
@@ -924,13 +991,13 @@ function NodeInspector({
       )}
       {(node.type === "tool" || node.type === "mcp_tool") && (
         <label>
-          {node.type === "mcp_tool" ? "MCP tool name" : "Tool"}
+          {node.type === "mcp_tool" ? t.forms.mcpToolName : t.forms.tool}
           <input value={node.tool ?? ""} onChange={(event) => onChange({ tool: event.target.value })} />
         </label>
       )}
       {(node.type === "tool" || node.type === "mcp_tool") && (
         <label>
-          Input JSON
+          {t.forms.inputJson}
           <textarea
             defaultValue={formatJson(node.input ?? {})}
             onBlur={(event) => {
@@ -946,13 +1013,13 @@ function NodeInspector({
       )}
       {node.type === "condition" && (
         <label>
-          Condition
+          {t.forms.condition}
           <input value={node.condition ?? ""} onChange={(event) => onChange({ condition: event.target.value })} />
         </label>
       )}
       {node.type === "human_gate" && (
         <label>
-          Approval reason
+          {t.forms.approvalReason}
           <textarea
             value={node.approval_reason ?? ""}
             onChange={(event) => onChange({ approval_reason: event.target.value })}
@@ -961,7 +1028,7 @@ function NodeInspector({
         </label>
       )}
       <label>
-        Output key
+        {t.forms.outputKey}
         <input value={node.output_key ?? ""} onChange={(event) => onChange({ output_key: event.target.value })} />
       </label>
     </div>
@@ -980,7 +1047,7 @@ function EdgeInspector({
   return (
     <div className="form-stack">
       <label>
-        From
+        {t.forms.from}
         <select value={edge.from} onChange={(event) => onChange({ from: event.target.value })}>
           {nodes.map((node) => (
             <option key={node.id} value={node.id}>
@@ -990,7 +1057,7 @@ function EdgeInspector({
         </select>
       </label>
       <label>
-        To
+        {t.forms.to}
         <select value={edge.to} onChange={(event) => onChange({ to: event.target.value })}>
           {nodes.map((node) => (
             <option key={node.id} value={node.id}>
@@ -1000,15 +1067,15 @@ function EdgeInspector({
         </select>
       </label>
       <label>
-        Condition
+        {t.forms.condition}
         <input
-          placeholder="Optional, e.g. approval.approved == True"
+          placeholder="可选，例如 approval.approved == True"
           value={edge.when ?? ""}
           onChange={(event) => onChange({ when: event.target.value })}
         />
       </label>
       <label>
-        Priority
+        {t.forms.priority}
         <input
           type="number"
           value={edge.priority ?? 0}
@@ -1016,7 +1083,7 @@ function EdgeInspector({
         />
       </label>
       <label>
-        Max traversals
+        {t.forms.maxTraversals}
         <input
           type="number"
           min={1}
@@ -1040,23 +1107,23 @@ function AgentInspector({
   return (
     <div className="form-stack agent-editor">
       <label>
-        ID
+        {t.forms.id}
         <input value={agent.id} onChange={(event) => onChange({ id: event.target.value })} />
       </label>
       <label>
-        Name
+        {t.forms.name}
         <input value={agent.name ?? ""} onChange={(event) => onChange({ name: event.target.value })} />
       </label>
       <label>
-        Role
+        {t.forms.role}
         <input value={agent.role} onChange={(event) => onChange({ role: event.target.value })} />
       </label>
       <label>
-        Goal
+        {t.forms.goal}
         <textarea value={agent.goal} onChange={(event) => onChange({ goal: event.target.value })} rows={3} />
       </label>
       <label>
-        Instructions
+        {t.forms.instructions}
         <textarea
           value={agent.instructions}
           onChange={(event) => onChange({ instructions: event.target.value })}
@@ -1064,29 +1131,29 @@ function AgentInspector({
         />
       </label>
       <label>
-        Provider
+        {t.forms.provider}
         <input value={agent.provider ?? ""} onChange={(event) => onChange({ provider: event.target.value })} />
       </label>
       <label>
-        Model
+        {t.forms.model}
         <input value={agent.model ?? ""} onChange={(event) => onChange({ model: event.target.value })} />
       </label>
       <label>
-        Tools
+        {t.forms.tool}
         <input value={agent.tools.join(", ")} onChange={(event) => onChange({ tools: csvToList(event.target.value) })} />
       </label>
       <label>
-        Output key
+        {t.forms.outputKey}
         <input value={agent.output_key ?? ""} onChange={(event) => onChange({ output_key: event.target.value })} />
       </label>
-      <div className="panel-subtitle">Permissions</div>
+      <div className="panel-subtitle">{t.forms.permissions}</div>
       <label className="checkbox-row">
         <input
           type="checkbox"
           checked={agent.permissions.read_files}
           onChange={(event) => onChange({ permissions: { ...agent.permissions, read_files: event.target.checked } })}
         />
-        Read files
+        {t.forms.readFiles}
       </label>
       <label className="checkbox-row">
         <input
@@ -1094,7 +1161,7 @@ function AgentInspector({
           checked={agent.permissions.edit_files}
           onChange={(event) => onChange({ permissions: { ...agent.permissions, edit_files: event.target.checked } })}
         />
-        Edit files
+        {t.forms.editFiles}
       </label>
       <label className="checkbox-row">
         <input
@@ -1102,7 +1169,7 @@ function AgentInspector({
           checked={agent.permissions.run_commands}
           onChange={(event) => onChange({ permissions: { ...agent.permissions, run_commands: event.target.checked } })}
         />
-        Run commands
+        {t.forms.runCommands}
       </label>
       <label className="checkbox-row">
         <input
@@ -1110,7 +1177,7 @@ function AgentInspector({
           checked={agent.permissions.use_network}
           onChange={(event) => onChange({ permissions: { ...agent.permissions, use_network: event.target.checked } })}
         />
-        Use network
+        {t.forms.useNetwork}
       </label>
       <label className="checkbox-row">
         <input
@@ -1120,18 +1187,18 @@ function AgentInspector({
             onChange({ permissions: { ...agent.permissions, requires_approval: event.target.checked } })
           }
         />
-        Requires approval
+        {t.forms.requiresApproval}
       </label>
-      <div className="panel-subtitle">Context policy</div>
+      <div className="panel-subtitle">{t.forms.contextPolicy}</div>
       <label>
-        Input keys
+        {t.forms.inputKeys}
         <input
           value={agent.context.input_keys.join(", ")}
           onChange={(event) => onChange({ context: { ...agent.context, input_keys: csvToList(event.target.value) } })}
         />
       </label>
       <label>
-        Summary keys
+        {t.forms.summaryKeys}
         <input
           value={agent.context.summary_keys.join(", ")}
           onChange={(event) => onChange({ context: { ...agent.context, summary_keys: csvToList(event.target.value) } })}
@@ -1147,10 +1214,22 @@ function toFlowNodes(workflow: WorkflowSpec): FlowNode[] {
     type: "default",
     position: { x: (index % 3) * 260, y: Math.floor(index / 3) * 150 },
     data: {
-      label: `${node.id}\n${node.type}`
+      label: nodeDisplayLabel(node, workflow)
     },
     className: `workflow-node node-${node.type}`
   }));
+}
+
+function nodeDisplayLabel(node: NodeSpec, workflow: WorkflowSpec): string {
+  const typeLabel = nodeTypeLabels[node.type];
+  if (node.type === "agent") {
+    const agent = workflow.agents.find((candidate) => candidate.id === node.agent_id);
+    return `${typeLabel}: ${agent?.name ?? node.agent_id ?? "未选择"}\n${node.id}`;
+  }
+  if (node.type === "tool" || node.type === "mcp_tool") {
+    return `${typeLabel}: ${node.tool ?? "未配置"}\n${node.id}`;
+  }
+  return `${typeLabel}\n${node.id}`;
 }
 
 function toFlowEdges(workflow: WorkflowSpec): FlowEdge[] {
