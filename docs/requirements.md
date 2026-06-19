@@ -85,12 +85,12 @@ Initial node types:
 - `tool`
 - `mcp_tool`
 - `condition`
+- `loop`
 - `human_gate`
 - `end`
 
 Future node types:
 
-- `loop`
 - `parallel`
 - `subworkflow`
 - `patch_review`
@@ -142,6 +142,11 @@ load workflow
   -> emit events
   -> pause / finish / block / fail
 ```
+
+Loop support is required as a first-class workflow capability. Conditional
+back-edges with `max_traversals` are acceptable as an interim implementation,
+but the product contract should expose a `loop` node with explicit
+`max_iterations`, iteration state, break reason, and loop-aware ContextPackets.
 
 OpenAI Agents SDK, MCP tools, external agent adapters, and local tools can all
 sit below this layer. They should not define the product contract.
@@ -314,6 +319,8 @@ Implemented:
 - workflow/agent/node/edge schema
 - JSON-driven runner
 - real edge condition routing
+- interim loop support through conditional back-edges plus edge traversal and
+  workflow step/tool/agent/token limits
 - human approval gate
 - compact agent context policy
 - estimated token tracking
@@ -384,23 +391,30 @@ python -m coder_workbench.cli --repo . --workflow examples\workflows\coding-work
 
 ## Near-term roadmap
 
-1. Add ContextPacket data model and event display:
+1. Add first-class loop node architecture:
+   - backend/frontend `NodeType` includes `loop`;
+   - loop config includes mode, condition/items, required `max_iterations`,
+     output collection, and summary keys;
+   - runtime emits loop iteration events and break reasons;
+   - ContextPacket includes current loop iteration and compact prior iteration
+     summaries.
+2. Add ContextPacket data model and event display:
    - emit agent context packets as inspectable run events;
    - show task, upstream artifacts, selected project context, allowed tools,
      token estimates, and output artifacts in the UI.
-2. Add provider settings UI for OpenAI/DeepSeek keys, base URL, default model,
+3. Add provider settings UI for OpenAI/DeepSeek keys, base URL, default model,
    connection testing, and mock mode. Do not store API keys in workflow JSON.
-3. Add local `.md` / `.txt` document knowledge MVP:
+4. Add local `.md` / `.txt` document knowledge MVP:
    - local storage;
    - chunking and retrieval;
    - provenance shown in context packets.
-4. Expand durable recovery from persisted blocked run snapshots to active
+5. Expand durable recovery from persisted blocked run snapshots to active
    resume after process restart.
-5. Add long-lived MCP server sessions and tool discovery/listing instead of
+6. Add long-lived MCP server sessions and tool discovery/listing instead of
    only short-lived configured stdio calls.
-6. Add provider-specific non-OpenAI-compatible executor adapters where needed,
+7. Add provider-specific non-OpenAI-compatible executor adapters where needed,
    starting with native SDKs only when the OpenAI-compatible endpoint is not
    sufficient.
-7. Add desktop packaging and stronger product polish: settings persistence,
+8. Add desktop packaging and stronger product polish: settings persistence,
    diff viewer improvements, rejection reasons in the event timeline, and
    richer rollback conflict handling.

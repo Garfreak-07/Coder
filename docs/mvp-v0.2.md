@@ -76,6 +76,40 @@ The existing canvas should become a product surface:
 - keep JSON editor as advanced mode;
 - preserve manual edge editing.
 
+### Loop support
+
+v0.2 should include loop in the workflow architecture because iterative coding
+is a core user expectation:
+
+```text
+Tester / Reviewer
+  -> needs changes?
+  -> Executor
+  -> Patch Preview
+  -> Patch Approval
+  -> Patch Apply
+  -> Check
+  -> Tester / Reviewer
+```
+
+The current runtime can emulate a limited loop with conditional back edges,
+`max_traversals`, and workflow-level step/tool/agent/token budgets. That is not
+enough as the final product contract.
+
+Required loop design:
+
+- add a first-class `loop` node type;
+- require `max_iterations`;
+- support `while`, `for_each`, and `retry_until` modes over time;
+- expose iteration count, current item, collected outputs, and break reason in
+  run events;
+- make ContextPacket loop-aware so each agent sees current iteration context and
+  compact prior iteration summaries;
+- show loop nodes and iteration history clearly in the UI.
+
+Initial implementation may ship a narrow `retry_until` loop for the default
+coding workflow before general `for_each` data loops.
+
 ### Agent editor
 
 The agent editor should support:
@@ -217,7 +251,7 @@ v0.2 should not implement:
 - arbitrary GitHub agent pack installation;
 - complex multi-agent free-chat teams;
 - production desktop packaging;
-- parallel/loop/subworkflow nodes unless required for the default workflow;
+- parallel/subworkflow nodes unless required for the default workflow;
 - PDF/Word knowledge ingestion;
 - cloud sync;
 - multi-user team permissions.
