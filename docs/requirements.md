@@ -18,6 +18,33 @@ audit events.
 
 Product behavior is driven by workflow JSON, not by hard-coded graph changes.
 
+## Active requirement track
+
+The active implementation track is **MVP v0.2** from
+[mvp-v0.2.md](mvp-v0.2.md).
+
+That means current work should optimize for one usable local-first workflow app:
+
+- template-first ordinary user flow;
+- Chinese ordinary-user UI with stable English internal schema;
+- default coding workflow template;
+- inspectable agent context packets and structured artifacts;
+- OpenAI/DeepSeek provider settings without storing keys in workflow JSON;
+- local project summary and local `.md` / `.txt` knowledge retrieval;
+- run history and blocked-run recovery sufficient for the v0.2 acceptance
+  criteria.
+
+Older unfinished features still matter, but they should be handled as backlog
+unless one of these is true:
+
+1. the missing feature is explicitly listed in the v0.2 acceptance criteria;
+2. the missing feature blocks the default coding workflow from working safely;
+3. the missing feature is a safety or data-loss issue in the current runtime.
+
+Everything else should wait until the default v0.2 workflow is reliable. This
+keeps the project from spreading effort across old partial ideas before the
+main product path is usable.
+
 ## Target user
 
 - Individual developers who want AI coding help but need control over scope,
@@ -279,10 +306,8 @@ Progress status:
   restart-resumable blocked runs, richer run-history browsing, long-lived MCP
   sessions and tool discovery, desktop packaging, and deeper provider-specific
   adapters where OpenAI-compatible endpoints are not sufficient.
-- Merge recommendation: merge the current `codex-patch-safety-workbench`
-  branch into `main` through the PR after review. Do not redo these changes
-  directly on `main`; this branch intentionally contains deletes and
-  replacements that are easier to review as one patch-safety/workbench PR.
+- Current baseline: PR #1 and PR #2 have been merged into `main`. New unrelated
+  work should start from updated `main` on a new branch.
 
 Implemented:
 
@@ -354,15 +379,28 @@ python -m coder_workbench.cli --repo . --workflow examples\workflows\coding-work
 
 ## Near-term roadmap
 
-1. Add richer UI for run history: open stored run details, inspect restored
-   live runs, and reattach to blocked runs from the browser.
-2. Expand durable recovery from persisted blocked run snapshots to active
+1. Add frontend i18n foundation and template-first entry:
+   - minimal Chinese UI dictionary;
+   - Chinese labels for ordinary user surfaces;
+   - keep workflow JSON/API/internal schema fields in English;
+   - present the default coding workflow as a template card before raw JSON.
+2. Add ContextPacket data model and event display:
+   - emit agent context packets as inspectable run events;
+   - show task, upstream artifacts, selected project context, allowed tools,
+     token estimates, and output artifacts in the UI.
+3. Add provider settings UI for OpenAI/DeepSeek keys, base URL, default model,
+   connection testing, and mock mode. Do not store API keys in workflow JSON.
+4. Add local `.md` / `.txt` document knowledge MVP:
+   - local storage;
+   - chunking and retrieval;
+   - provenance shown in context packets.
+5. Expand durable recovery from persisted blocked run snapshots to active
    resume after process restart.
-3. Add long-lived MCP server sessions and tool discovery/listing instead of
+6. Add long-lived MCP server sessions and tool discovery/listing instead of
    only short-lived configured stdio calls.
-4. Add provider-specific non-OpenAI-compatible executor adapters where needed,
+7. Add provider-specific non-OpenAI-compatible executor adapters where needed,
    starting with native SDKs only when the OpenAI-compatible endpoint is not
    sufficient.
-5. Add desktop packaging and stronger product polish: settings persistence,
+8. Add desktop packaging and stronger product polish: settings persistence,
    diff viewer improvements, rejection reasons in the event timeline, and
    richer rollback conflict handling.

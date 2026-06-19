@@ -6,9 +6,20 @@ Users define agents, nodes, edges, approvals, scopes, and context policy in a
 workflow document, then run it through a FastAPI backend and React workbench UI.
 
 Default behavior is conservative. The current runtime supports inspection,
-planning, approval gates, dry-run patch previews, checks, event logs, and scoped
-project indexing. Real file mutation is intentionally deferred until patch
-proposal, approval, snapshot, apply, and rollback are implemented.
+planning, approval gates, patch previews, scoped patch apply, rollback, checks,
+event logs, and scoped project indexing.
+
+## Current product target
+
+The active product target is MVP v0.2: a local-first workflow builder for users
+who know some code. The app should make the default flow template-first for
+ordinary use, while keeping the workflow JSON, API fields, and internal schema
+stable in English for advanced editing.
+
+Current implementation work should follow [docs/mvp-v0.2.md](docs/mvp-v0.2.md)
+and the active priority notes in [docs/requirements.md](docs/requirements.md).
+Older unfinished ideas should be treated as backlog unless they directly block
+the v0.2 acceptance criteria.
 
 ## Current capabilities
 
@@ -37,7 +48,8 @@ roadmap.
 ## Install
 
 ```powershell
-cd F:\bbb\coder
+git clone https://github.com/Garfreak-07/Coder.git
+cd Coder
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install -e .
