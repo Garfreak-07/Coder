@@ -17,10 +17,13 @@ htmlcov/
 outputs/
 .coder_history/
 .coder_v2/
+.npm-cache/
 
 dist/
 build/
 *.egg-info/
+node_modules/
+*.tsbuildinfo
 
 .DS_Store
 Thumbs.db

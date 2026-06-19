@@ -13,9 +13,14 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8876)
     parser.add_argument("--store-root", default=".coder_v2")
+    parser.add_argument(
+        "--frontend-dist",
+        default=None,
+        help="Optional built frontend directory to serve. Defaults to frontend/dist when it exists.",
+    )
     args = parser.parse_args()
 
-    app = create_app(Path(args.store_root))
+    app = create_app(Path(args.store_root), frontend_dist=args.frontend_dist)
     uvicorn.run(app, host=args.host, port=args.port)
 
 

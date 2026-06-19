@@ -279,6 +279,17 @@ Implemented:
 - compact agent context policy
 - estimated token tracking
 - mock agent executor when credentials are missing
+- React + TypeScript + Vite frontend scaffold
+- React Flow workflow canvas with node/edge rendering
+- workflow node creation and node inspector editing
+- edge inspector editing for `from`, `to`, `when`, `priority`, and
+  `max_traversals`
+- workflow JSON editor, import, export, save, and reload path
+- workflow library list/load/save UI
+- agent list, basic agent editor, local agent save, and library agent import
+- live run launcher from the UI
+- SSE run event timeline with event payload details and compact run summary
+- approval-required rerun shortcut in the run timeline
 - built-in tools:
   - `project_index`
   - `recommend_modules`
@@ -295,13 +306,15 @@ python -m coder_graph.cli --repo . --v2-workflow examples\workflows_v2\coding-wo
 - SSE event streaming
 - file-backed run storage
 - local workflow/agent library storage
+- optional serving of built `frontend/dist` from the v2 API
 
 ## Near-term roadmap
 
-1. Replace the old single-file UI with a React Flow canvas.
-2. Add first-class workflow JSON editor/import/export in the UI.
+1. Add first-class approval resume endpoints so a paused live run can continue
+   without starting a fresh approved run.
+2. Add project scope selection and path guard enforcement in v2 tools.
 3. Add real patch proposal/apply/rollback tools.
-4. Add project scope selection and path guard enforcement in v2 tools.
+4. Add patch/diff panel and rollback UI.
 5. Add provider-specific executor adapters.
 6. Add MCP tool adapter.
 7. Migrate the default coding workflow fully to v2.

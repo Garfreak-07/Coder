@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from coder_graph.tools.filesystem import resolve_existing_dir
@@ -28,7 +29,7 @@ class RunRequest(BaseModel):
     initial_data: dict[str, Any] = Field(default_factory=dict)
 
 
-def create_app(store_root: str | Path = ".coder_v2") -> FastAPI:
+def create_app(store_root: str | Path = ".coder_v2", frontend_dist: str | Path | None = None) -> FastAPI:
     app = FastAPI(title="Coder v2 Runtime API", version="0.1.0")
     store = RunStore(store_root)
     library = LibraryStore(Path(store_root) / "library")
@@ -179,6 +180,10 @@ def create_app(store_root: str | Path = ".coder_v2") -> FastAPI:
                 yield f"data: {payload}\n\n"
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    frontend_path = Path(frontend_dist) if frontend_dist else Path.cwd() / "frontend" / "dist"
+    if frontend_path.exists():
+        app.mount("/", StaticFiles(directory=frontend_path, html=True), name="frontend")
 
     return app
 
