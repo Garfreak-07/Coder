@@ -88,7 +88,8 @@ def build_context_packet(
         },
         "output_contract": {
             "key": agent.output_key,
-            "schema": "structured JSON object",
+            "artifact_type": agent.artifact_type,
+            "schema": agent.artifact_type or "structured JSON object",
         },
     }
     return packet

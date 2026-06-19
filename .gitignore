@@ -19,6 +19,7 @@ outputs/
 .coder/
 .codex/
 .coder_server*.log
+docs/handoff.md
 .npm-cache/
 
 dist/

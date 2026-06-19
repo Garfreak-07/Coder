@@ -1,5 +1,7 @@
 import type {
   AgentSpec,
+  ArtifactDetail,
+  BlobDetail,
   ContextPacketDetail,
   HealthStatus,
   LibraryIndex,
@@ -52,6 +54,14 @@ export function getRunEvents(runId: string, cursor = 0, limit = 200): Promise<Ru
 
 export function getContextPacket(runId: string, packetId: string): Promise<ContextPacketDetail> {
   return requestJson<ContextPacketDetail>(`/api/v2/runs/${runId}/context-packets/${packetId}`);
+}
+
+export function getArtifact(runId: string, artifactId: string): Promise<ArtifactDetail> {
+  return requestJson<ArtifactDetail>(`/api/v2/runs/${runId}/artifacts/${artifactId}`);
+}
+
+export function getBlob(runId: string, blobId: string): Promise<BlobDetail> {
+  return requestJson<BlobDetail>(`/api/v2/runs/${runId}/blobs/${encodeURIComponent(blobId)}`);
 }
 
 export function getLiveRun(runId: string): Promise<LiveRunDetail> {
@@ -141,6 +151,8 @@ export function subscribeRunEvents(url: string, onEvent: (event: RunEvent) => vo
     "agent.context_packet",
     "tool.called",
     "agent.called",
+    "artifact.produced",
+    "artifact.validation_failed",
     "approval.required",
     "approval.recorded",
     "edge.selected",

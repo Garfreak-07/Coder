@@ -15,6 +15,7 @@
       "instructions": "Use project_index and module recommendations. Return concise JSON with summary, target_files, risks, and next_action.",
       "tools": [],
       "output_key": "plan",
+      "artifact_type": "plan_artifact",
       "permissions": {
         "read_files": true,
         "edit_files": false,
@@ -38,6 +39,7 @@
       "instructions": "Follow the approved plan. Return JSON with a changes array of {path, action, content}. Do not claim files were changed.",
       "tools": ["propose_patch"],
       "output_key": "execution",
+      "artifact_type": "patch_artifact",
       "permissions": {
         "read_files": true,
         "edit_files": true,
@@ -61,6 +63,7 @@
       "instructions": "Use only compact execution and check summaries. Return JSON with status and reason.",
       "tools": [],
       "output_key": "review",
+      "artifact_type": "review_artifact",
       "permissions": {
         "read_files": true,
         "edit_files": false,
@@ -162,7 +165,7 @@
       "id": "review_retry",
       "type": "loop",
       "loop_mode": "retry_until",
-      "condition": "review.status == 'completed' or review.status == 'done'",
+      "condition": "review.status == 'pass' or review.status == 'completed' or review.status == 'done'",
       "max_iterations": 3,
       "output_key": "review_retry"
     },

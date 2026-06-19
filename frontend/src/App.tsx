@@ -15,6 +15,7 @@ import {
 } from "@xyflow/react";
 import {
   approveLiveRun,
+  getArtifact,
   getContextPacket,
   getHealth,
   getAgent,
@@ -714,7 +715,16 @@ export function App() {
                     runId={selectedRunKind === "stored" ? selectedRunDetail?.id ?? null : null}
                   />
                 )}
-                {event.type !== "agent.context_packet" && event.payload && Object.keys(event.payload).length > 0 && (
+                {event.type === "artifact.produced" && (
+                  <ArtifactCard
+                    event={event}
+                    runId={selectedRunKind === "stored" ? selectedRunDetail?.id ?? null : null}
+                  />
+                )}
+                {event.type !== "agent.context_packet" &&
+                  event.type !== "artifact.produced" &&
+                  event.payload &&
+                  Object.keys(event.payload).length > 0 && (
                   <pre>{JSON.stringify(event.payload, null, 2)}</pre>
                 )}
               </div>
@@ -814,6 +824,56 @@ function ContextPacketCard({ event, runId }: { event: RunEvent; runId: string | 
         <summary>查看完整上下文包</summary>
         <pre>{JSON.stringify(value, null, 2)}</pre>
       </details>
+    </div>
+  );
+}
+
+function ArtifactCard({ event, runId }: { event: RunEvent; runId: string | null }) {
+  const payload = objectValue(event.payload);
+  const artifactId = typeof payload?.artifact_id === "string" ? payload.artifact_id : null;
+  const artifactType = typeof payload?.artifact_type === "string" ? payload.artifact_type : "artifact";
+  const summary = objectValue(payload?.summary);
+  const [loadedArtifact, setLoadedArtifact] = useState<Record<string, unknown> | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function loadArtifact() {
+    if (!runId || !artifactId || loading) {
+      return;
+    }
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const detail = await getArtifact(runId, artifactId);
+      setLoadedArtifact(detail.artifact);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="artifact-card">
+      <div className="panel-subtitle">Artifact</div>
+      <div className="summary-grid">
+        <span>{artifactType}</span>
+        <span>{artifactId ?? "unknown id"}</span>
+        <span>size: {String(payload?.size_chars ?? "unknown")}</span>
+      </div>
+      {summary && <pre>{JSON.stringify(summary, null, 2)}</pre>}
+      {artifactId && runId && (
+        <button onClick={loadArtifact} disabled={loading}>
+          {loading ? "Loading..." : "Load full artifact"}
+        </button>
+      )}
+      {loadError && <div className="muted">{loadError}</div>}
+      {loadedArtifact && (
+        <details open>
+          <summary>Full artifact</summary>
+          <pre>{JSON.stringify(loadedArtifact, null, 2)}</pre>
+        </details>
+      )}
     </div>
   );
 }

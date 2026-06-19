@@ -19,6 +19,8 @@ EventType = Literal[
     "loop.blocked",
     "agent.context_packet",
     "agent.called",
+    "artifact.produced",
+    "artifact.validation_failed",
     "tool.called",
     "approval.required",
     "approval.recorded",
@@ -83,6 +85,7 @@ class RunResult(BaseModel):
     status: Literal["completed", "blocked", "failed"]
     data: dict[str, Any]
     summaries: dict[str, str]
+    artifacts: dict[str, Any] = Field(default_factory=dict)
     events: list[RunEvent]
     estimated_tokens_used: int
     agent_calls: int

@@ -35,6 +35,27 @@ priority is to make context, artifacts, history, approvals, and replay durable
 without copying the same large content into State, Events, Checkpoints, and
 RunResult multiple times.
 
+The next phase is `Coder v0.3 - Trust Runtime`. Its goal is to prove one
+default local AI coding workflow end to end:
+
+```text
+select project
+  -> configure provider or use mock mode
+  -> run workflow preflight
+  -> Planner produces PlanArtifact
+  -> user approves the plan
+  -> Executor produces PatchArtifact
+  -> user reviews patch preview
+  -> user approves patch apply
+  -> runtime applies patch and runs checks
+  -> Reviewer produces ReviewArtifact
+  -> user replays or recovers the run
+```
+
+The phase should prefer fewer capabilities with stronger runtime guarantees
+over adding more agent types, providers, marketplaces, or external framework
+surface area.
+
 ## Target user
 
 The primary user knows some code and can understand files, commands, API keys,
@@ -86,6 +107,46 @@ This user wants to:
 8. Agents request actions. The runtime enforces actions.
    Tool allowlists, path scopes, command approval, network approval, patch
    preview, snapshot, rollback, and audit records are runtime responsibilities.
+
+## Next phase scope
+
+P0 work must harden the trust runtime foundation:
+
+- Artifact Schema and validation for `plan_artifact`, `patch_artifact`, and
+  `review_artifact`;
+- ContextPacket productization and on-demand replay loading;
+- Run Replay core timeline with compact events and object references;
+- Patch Safety through preview, approval, snapshot, apply, and rollback;
+- Workflow Preflight Validation before run start;
+- Approval UX with readable reasons, affected files/commands, and rejection
+  records;
+- Durable Recovery for blocked approval runs after API restart;
+- Token Budget enforcement that blocks after compaction fails;
+- Artifact, Blob, Event, and RunState storage separation.
+
+P1 work should improve usability once P0 is stable:
+
+- Provider Settings UI for OpenAI, DeepSeek, OpenAI-compatible base URLs,
+  connection tests, and mock mode;
+- Project Summary quality and candidate check detection;
+- Run History filtering and search;
+- Retry Current Node and standardized failure reasons;
+- Loop UX with iteration grouping and clearer retry semantics.
+
+P2 work can wait until the foundation is reliable:
+
+- local `.md` / `.txt` knowledge storage;
+- MCP tool discovery and longer-lived server sessions;
+- more provider presets;
+- advanced diff viewer;
+- project-level long-term memory.
+
+The next phase explicitly does not include public marketplace, agent-pack
+marketplace, cloud sync, multi-user team permissions, desktop packaging,
+PDF/Word knowledge ingestion, arbitrary website automation, free-form
+multi-agent chat teams, parallel nodes, subworkflow nodes, GitHub automatic
+write capability, or replacing the Coder runtime with an external agent
+framework.
 
 ## Primary product flow
 
@@ -285,7 +346,52 @@ Required coding workflow artifacts:
 - `patch_artifact`
 - `review_artifact`
 
-Artifacts must be validatable, summarizable, routable, and inspectable.
+Artifacts must be validatable, summarizable, routable, and inspectable. The
+runtime assigns an `artifact_id` after validation and emits compact
+`artifact.produced` events with only ID, type, summary, and size metadata.
+Validation failure blocks the run and emits a readable
+`artifact.validation_failed` event.
+
+`plan_artifact`:
+
+```json
+{
+  "artifact_type": "plan_artifact",
+  "summary": "",
+  "target_files": [],
+  "required_context": [],
+  "implementation_steps": [],
+  "risks": [],
+  "recommended_checks": [],
+  "executor_instructions": ""
+}
+```
+
+`patch_artifact`:
+
+```json
+{
+  "artifact_type": "patch_artifact",
+  "implementation_summary": "",
+  "changed_files": [],
+  "patches": [],
+  "risks": [],
+  "suggested_check_command": ""
+}
+```
+
+`review_artifact`:
+
+```json
+{
+  "artifact_type": "review_artifact",
+  "status": "pass | needs_changes | failed | blocked",
+  "evidence": [],
+  "issues": [],
+  "risk_level": "low | medium | high",
+  "recommended_action": ""
+}
+```
 
 ### Storage responsibilities
 
@@ -358,11 +464,13 @@ artifact, context packet, diff, check log, and snapshot at once.
 Recommended APIs:
 
 ```text
-GET /runs/{id}
-GET /runs/{id}/events?cursor=...
-GET /runs/{id}/context-packets/{packet_id}
-GET /runs/{id}/artifacts/{artifact_id}
-GET /runs/{id}/blobs/{blob_id}
+GET  /api/v2/runs
+GET  /api/v2/runs/{run_id}
+GET  /api/v2/runs/{run_id}/events?cursor=...&limit=...
+GET  /api/v2/runs/{run_id}/context-packets/{packet_id}
+GET  /api/v2/runs/{run_id}/artifacts/{artifact_id}
+GET  /api/v2/runs/{run_id}/blobs/{blob_id}
+POST /api/v2/workflows/validate
 ```
 
 Recommended persisted layout:
@@ -567,9 +675,9 @@ Output: `patch_artifact`
 
 Required fields:
 
-- changes;
-- changed files;
 - implementation summary;
+- changed files;
+- structured patches;
 - risks;
 - suggested check command.
 
@@ -588,6 +696,7 @@ Required fields:
 - status;
 - evidence;
 - issues;
+- risk level;
 - next action.
 
 ## Safety requirements
@@ -629,6 +738,10 @@ Implemented:
 - human approval gate;
 - compact agent context policy;
 - inspectable `agent.context_packet` events before agent calls;
+- agent-declared `artifact_type` contracts for default coding workflow agents;
+- runtime validation for `plan_artifact`, `patch_artifact`, and
+  `review_artifact`;
+- compact `artifact.produced` and `artifact.validation_failed` runtime events;
 - estimated token tracking;
 - mock agent executor when credentials are missing;
 - React + TypeScript + Vite frontend scaffold;
@@ -663,6 +776,12 @@ Implemented:
 - loop node creation, loop inspector fields, and ContextPacket cards;
 - stored ContextPackets externalized from event logs with compact summaries;
 - on-demand stored ContextPacket loading in the run event panel;
+- stored Artifacts externalized into per-run `artifacts/` directories with
+  compact result references;
+- content-addressed Blob storage for large artifact values;
+- on-demand stored Artifact and Blob API endpoints;
+- Artifact cards in the run event panel;
+- lightweight `POST /api/v2/workflows/validate` preflight API;
 - lazy loading for additional stored run events in the UI;
 - FastAPI runtime API;
 - live background runs;
@@ -673,32 +792,38 @@ Implemented:
 
 ## Active roadmap
 
-Near-term work should prioritize the foundation hardening that supports the new
-goal:
+Near-term work should prioritize the `Coder v0.3 - Trust Runtime` foundation:
 
-1. Change empty `input_keys` so it no longer includes all State by default.
-2. Recursively compact list contents in context policy handling.
-3. Turn token budget overflow from a warning into a blocking runtime condition
-   after compaction has failed.
-4. Stop embedding full node results in events.
-5. Continue splitting Artifact, Blob, and RunState storage; ContextPacket and
-   EventLog separation has started for stored runs.
-6. Add content hash deduplication for large repeated snippets, diffs, logs, and
-   snapshots.
-7. Broaden lazy Run Replay loading to artifacts, blobs, diffs, check logs, and
-   snapshots.
-8. Add a lightweight run index so listing runs does not require reading every
-   full run file.
-9. Add default coding workflow artifact schemas.
-10. Add provider settings UI for OpenAI, DeepSeek, OpenAI-compatible base URL,
-    default model, connection test, and mock mode.
-11. Add local `.md` / `.txt` knowledge storage, chunking, retrieval, and
-    provenance in ContextPackets.
-12. Harden loop UX and semantics with iteration grouping, `collect_key`,
-    `summary_key`, and clearer loop-back edges.
-13. Expand durable recovery from persisted blocked run snapshots to active
-    resume after process restart.
-14. Add long-lived MCP server sessions and tool discovery/listing.
+1. Kernel contracts:
+   - wire workflow preflight into the UI before live run start;
+   - show preflight errors, warnings, provider status, permission summary, and
+     estimated token budget;
+   - enforce artifact schema failures in live recovery paths as clearly as
+     synchronous runs.
+2. Storage separation:
+   - move large patch previews, check logs, snapshots, and raw tool output into
+     Blob storage, not only large artifact fields;
+   - add a lightweight run index so listing runs does not require scanning run
+     directories;
+   - add orphan blob cleanup when deleting historical runs.
+3. Default workflow productization:
+   - render PlanArtifact, PatchArtifact, and ReviewArtifact with artifact-specific
+     UI sections;
+   - strengthen Patch Approval to show diff, affected files, rollback status,
+     and related artifact/context links;
+   - keep all file writes on the patch preview -> approval -> snapshot -> apply
+     path.
+4. Recovery and replay:
+   - expand persisted blocked run snapshots into active resume after API process
+     restart;
+   - add retry-current-node behavior;
+   - group loop replay by iteration and show each iteration's ContextPacket and
+     Artifact links.
+5. Experience hardening:
+   - add provider settings UI for OpenAI, DeepSeek, OpenAI-compatible base URL,
+     default model, connection test, and mock mode;
+   - improve project summaries and candidate check detection;
+   - add run history filtering/search and standardized failure reasons.
 
 ## Non-goals for the next phase
 
@@ -712,6 +837,10 @@ Do not spend near-term effort on:
 - multi-user team permissions;
 - PDF/Word knowledge ingestion;
 - general automation across all websites;
+- free-form multi-agent chat teams;
+- parallel nodes and subworkflow nodes;
+- GitHub automatic write capability;
+- large-scale provider expansion;
 - adopting any external framework as the core workflow runtime.
 
 These can be revisited after the context, artifact, replay, and resource-budget

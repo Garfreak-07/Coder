@@ -422,7 +422,8 @@ label {
   padding: 10px;
 }
 
-.context-packet-card {
+.context-packet-card,
+.artifact-card {
   background: #0b1220;
   border: 1px solid #1e3a5f;
   border-radius: 12px;
@@ -431,13 +432,15 @@ label {
   padding: 10px;
 }
 
-.context-packet-card summary {
+.context-packet-card summary,
+.artifact-card summary {
   color: #93c5fd;
   cursor: pointer;
   font-size: 12px;
 }
 
-.context-packet-card pre {
+.context-packet-card pre,
+.artifact-card pre {
   background: #07111f;
   border-radius: 8px;
   color: #d1d5db;

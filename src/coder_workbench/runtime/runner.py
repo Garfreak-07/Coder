@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 from typing import Any
+from uuid import uuid4
 
+from coder_workbench.core.artifacts import ArtifactValidationError, artifact_summary, supported_artifact_types, validate_artifact
 from coder_workbench.core import WorkflowSpec
 from coder_workbench.executors import AgentExecutor, DefaultAgentExecutor
 from coder_workbench.runtime.conditions import evaluate_condition
@@ -125,6 +128,7 @@ class WorkflowRunner:
             status=state.status,
             data=state.data,
             summaries=state.summaries,
+            artifacts=state.artifacts,
             events=state.events,
             estimated_tokens_used=state.estimated_tokens_used,
             agent_calls=state.agent_calls,
@@ -172,8 +176,67 @@ class WorkflowRunner:
         state.agent_calls += 1
         state.emit("agent.called", f"Agent {agent.id} called", node_id=node_id, estimated_tokens=estimated)
         result = self.agent_executor.run(agent, context)
+        artifact_result = self._record_agent_artifact(state, node_id, result, expected_type=agent.artifact_type)
+        if artifact_result is not None:
+            result = artifact_result
+            if state.status == "blocked":
+                return {
+                    "status": "blocked",
+                    "reason": "artifact validation failed",
+                }
         state.set_value(node.output_key or agent.output_key or node.id, result)
         return result
+
+    def _record_agent_artifact(
+        self,
+        state: RunState,
+        node_id: str,
+        result: dict[str, Any],
+        *,
+        expected_type: str | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(result, dict):
+            return None
+        candidate_type = expected_type or str(result.get("artifact_type") or "")
+        if not candidate_type:
+            return None
+        if candidate_type not in supported_artifact_types():
+            state.emit(
+                "artifact.validation_failed",
+                f"Unsupported artifact type: {candidate_type}",
+                node_id=node_id,
+                artifact_type=candidate_type,
+                errors=[{"loc": ["artifact_type"], "msg": f"unsupported artifact type: {candidate_type}"}],
+            )
+            self._block(state, "artifact validation failed")
+            return result
+
+        artifact_id = f"artifact_{uuid4().hex}"
+        try:
+            artifact = validate_artifact(result, expected_type=expected_type, artifact_id=artifact_id)
+        except ArtifactValidationError as exc:
+            state.emit(
+                "artifact.validation_failed",
+                f"{exc.artifact_type} failed schema validation",
+                node_id=node_id,
+                artifact_type=exc.artifact_type,
+                errors=exc.errors,
+            )
+            self._block(state, "artifact validation failed")
+            return result
+
+        summary = artifact_summary(artifact)
+        state.artifacts[artifact_id] = artifact
+        state.emit(
+            "artifact.produced",
+            f"Artifact {artifact_id} produced",
+            node_id=node_id,
+            artifact_id=artifact_id,
+            artifact_type=artifact["artifact_type"],
+            summary=summary,
+            size_chars=len(json.dumps(artifact, ensure_ascii=False)),
+        )
+        return artifact
 
     def _run_loop_node(self, state: RunState, node_id: str) -> dict[str, Any]:
         node = self.nodes[node_id]

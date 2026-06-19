@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from coder_workbench.core.artifacts import ArtifactType
+
 
 NodeType = Literal["start", "agent", "tool", "mcp_tool", "condition", "loop", "human_gate", "end"]
 LoopMode = Literal["while", "for_each", "retry_until"]
@@ -51,6 +53,7 @@ class AgentSpec(BaseModel):
     model: str | None = None
     tools: list[str] = Field(default_factory=list)
     output_key: str | None = None
+    artifact_type: ArtifactType | None = None
     permissions: PermissionPolicy = Field(default_factory=PermissionPolicy)
     context: ContextPolicy = Field(default_factory=ContextPolicy)
 

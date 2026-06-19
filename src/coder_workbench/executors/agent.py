@@ -49,6 +49,7 @@ class DefaultAgentExecutor:
                 "Token policy: use the supplied summaries first. Ask for only the minimum extra context needed.",
                 "If asked to modify files, return JSON containing a `changes` array with objects shaped as "
                 "{path, action, content}. Never claim that files were modified directly.",
+                f"Required artifact type: {agent.artifact_type or 'none'}.",
                 "Context JSON:",
                 json.dumps(context, ensure_ascii=False, indent=2),
                 "Return JSON only.",
@@ -58,6 +59,39 @@ class DefaultAgentExecutor:
     def _mock(self, agent: AgentSpec, context: dict[str, Any]) -> dict[str, Any]:
         request = context.get("request", "")
         summaries = context.get("state_summaries", {})
+        if agent.artifact_type == "plan_artifact":
+            return {
+                "artifact_type": "plan_artifact",
+                "summary": f"Plan a safe local coding task for: {request}",
+                "target_files": [],
+                "required_context": sorted(summaries.keys()),
+                "implementation_steps": [
+                    "Inspect the selected project summary.",
+                    "Keep the implementation scope narrow.",
+                    "Generate a patch artifact for runtime review.",
+                ],
+                "risks": [],
+                "recommended_checks": [],
+                "executor_instructions": "Prepare a patch artifact only; do not write files directly.",
+            }
+        if agent.artifact_type == "patch_artifact":
+            return {
+                "artifact_type": "patch_artifact",
+                "implementation_summary": f"Mock executor found no file changes required for: {request}",
+                "changed_files": [],
+                "patches": [],
+                "risks": [],
+                "suggested_check_command": "",
+            }
+        if agent.artifact_type == "review_artifact":
+            return {
+                "artifact_type": "review_artifact",
+                "status": "pass",
+                "evidence": sorted(summaries.keys()),
+                "issues": [],
+                "risk_level": "low",
+                "recommended_action": "Finish the workflow.",
+            }
         return {
             "status": "completed",
             "agent_id": agent.id,

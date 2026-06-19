@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from coder_workbench.core import WorkflowSpec, load_workflow
+from coder_workbench.core.preflight import validate_workflow_preflight
 from coder_workbench.runtime import run_workflow
 from coder_workbench.server.library import LibraryStore
 from coder_workbench.server.manager import RunManager
@@ -232,6 +233,43 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
             "packet_id": packet_id,
             "packet": packet,
         }
+
+    @app.get("/api/v2/runs/{run_id}/artifacts/{artifact_id}")
+    def get_artifact(run_id: str, artifact_id: str) -> dict[str, Any]:
+        try:
+            artifact = store.get_artifact(run_id, artifact_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="artifact not found") from exc
+        return {
+            "artifact_id": artifact_id,
+            "artifact": artifact,
+        }
+
+    @app.get("/api/v2/runs/{run_id}/blobs/{blob_id}")
+    def get_blob(run_id: str, blob_id: str) -> dict[str, Any]:
+        try:
+            store.get(run_id, include_events=False)
+            return store.get_blob(blob_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="blob not found") from exc
+
+    @app.post("/api/v2/workflows/validate")
+    def validate_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
+        try:
+            spec = WorkflowSpec.model_validate(workflow)
+        except Exception as exc:
+            return {
+                "status": "error",
+                "issues": [
+                    {
+                        "level": "error",
+                        "code": "schema_invalid",
+                        "message": str(exc),
+                        "target_type": "workflow",
+                    }
+                ],
+            }
+        return validate_workflow_preflight(spec, registered_tools=default_tool_registry().names())
 
     @app.get("/api/v2/live-runs/{run_id}/events")
     def stream_live_events(run_id: str) -> StreamingResponse:

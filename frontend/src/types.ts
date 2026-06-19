@@ -29,6 +29,7 @@ export interface AgentSpec {
   model?: string | null;
   tools: string[];
   output_key?: string | null;
+  artifact_type?: "plan_artifact" | "patch_artifact" | "review_artifact" | null;
   permissions: PermissionPolicy;
   context: ContextPolicy;
 }
@@ -151,6 +152,18 @@ export interface RunEventsPage {
 export interface ContextPacketDetail {
   packet_id: string;
   packet: Record<string, unknown>;
+}
+
+export interface ArtifactDetail {
+  artifact_id: string;
+  artifact: Record<string, unknown>;
+}
+
+export interface BlobDetail {
+  blob_id: string;
+  size_bytes: number;
+  media_type: string;
+  content: string;
 }
 
 export interface LiveRunDetail {

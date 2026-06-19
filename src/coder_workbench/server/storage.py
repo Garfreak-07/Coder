@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from threading import Lock
@@ -8,7 +9,11 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from coder_workbench.core.artifacts import artifact_summary
 from coder_workbench.runtime import RunEvent, RunResult
+
+
+BLOB_STRING_THRESHOLD = 8192
 
 
 class StoredRun(BaseModel):
@@ -46,8 +51,10 @@ class RunStore:
         self.root = Path(root)
         self.runs_dir = self.root / "runs"
         self.live_runs_dir = self.root / "live-runs"
+        self.blobs_dir = self.root / "blobs"
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.live_runs_dir.mkdir(parents=True, exist_ok=True)
+        self.blobs_dir.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
 
     def save(self, workflow_id: str, repo_root: str, request: str, result: RunResult) -> StoredRun:
@@ -56,6 +63,7 @@ class RunStore:
             run_dir = self._run_dir(stored.id)
             run_dir.mkdir(parents=True, exist_ok=True)
             (run_dir / "contexts").mkdir(parents=True, exist_ok=True)
+            (run_dir / "artifacts").mkdir(parents=True, exist_ok=True)
             metadata = StoredRunMetadata(
                 id=stored.id,
                 workflow_id=workflow_id,
@@ -70,6 +78,7 @@ class RunStore:
             (run_dir / "metadata.json").write_text(metadata.model_dump_json(indent=2), encoding="utf-8")
             result_payload = result.model_dump(mode="json")
             result_payload["events"] = []
+            result_payload["artifacts"] = self._write_artifacts(run_dir, result.artifacts)
             (run_dir / "result.json").write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
             events = self._externalize_context_packets(run_dir, result.events)
             self._write_events(run_dir / "events.jsonl", events)
@@ -169,6 +178,36 @@ class RunStore:
                 return packet
         raise KeyError(packet_id)
 
+    def get_artifact(self, run_id: str, artifact_id: str) -> dict[str, Any]:
+        safe_artifact_id = self._safe_object_id(artifact_id)
+        run_dir = self._run_dir(run_id)
+        if run_dir.exists():
+            path = run_dir / "artifacts" / f"{safe_artifact_id}.json"
+            if path.exists():
+                return json.loads(path.read_text(encoding="utf-8"))
+            raise KeyError(artifact_id)
+
+        path = self._legacy_path(run_id)
+        if not path.exists():
+            raise KeyError(run_id)
+        stored = StoredRun.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        artifact = stored.result.artifacts.get(safe_artifact_id)
+        if isinstance(artifact, dict):
+            return artifact
+        raise KeyError(artifact_id)
+
+    def get_blob(self, blob_id: str) -> dict[str, Any]:
+        path = self._blob_path(blob_id)
+        if not path.exists():
+            raise KeyError(blob_id)
+        content = path.read_text(encoding="utf-8")
+        return {
+            "blob_id": blob_id,
+            "size_bytes": path.stat().st_size,
+            "media_type": "text/plain; charset=utf-8",
+            "content": content,
+        }
+
     def _safe_run_id(self, run_id: str) -> str:
         safe = "".join(char for char in run_id if char.isalnum() or char in {"-", "_"})
         if not safe:
@@ -180,6 +219,15 @@ class RunStore:
         if not safe or safe != object_id:
             raise KeyError(object_id)
         return safe
+
+    def _safe_blob_id(self, blob_id: str) -> str:
+        prefix = "sha256:"
+        if not blob_id.startswith(prefix):
+            raise KeyError(blob_id)
+        digest = blob_id[len(prefix):]
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise KeyError(blob_id)
+        return digest
 
     def _run_dir(self, run_id: str) -> Path:
         return self.runs_dir / self._safe_run_id(run_id)
@@ -201,6 +249,58 @@ class RunStore:
             request=metadata.request,
             result=RunResult.model_validate(result_payload),
         )
+
+    def _write_artifacts(self, run_dir: Path, artifacts: dict[str, Any]) -> dict[str, Any]:
+        artifact_dir = run_dir / "artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        refs: dict[str, Any] = {}
+        for raw_artifact_id, artifact in artifacts.items():
+            try:
+                artifact_id = self._safe_object_id(str(raw_artifact_id))
+            except KeyError:
+                continue
+            if not isinstance(artifact, dict):
+                continue
+            stored_artifact = self._externalize_large_values(artifact)
+            artifact_json = json.dumps(stored_artifact, ensure_ascii=False, indent=2)
+            (artifact_dir / f"{artifact_id}.json").write_text(artifact_json, encoding="utf-8")
+            summary = artifact_summary(artifact)
+            refs[artifact_id] = {
+                "artifact_id": artifact_id,
+                "artifact_type": artifact.get("artifact_type"),
+                "summary": summary,
+                "size_chars": len(json.dumps(artifact, ensure_ascii=False)),
+            }
+        return refs
+
+    def _externalize_large_values(self, value: Any) -> Any:
+        if isinstance(value, str):
+            if len(value) >= BLOB_STRING_THRESHOLD:
+                blob_id = self._write_blob(value)
+                return {
+                    "blob_id": blob_id,
+                    "size_chars": len(value),
+                    "media_type": "text/plain; charset=utf-8",
+                }
+            return value
+        if isinstance(value, list):
+            return [self._externalize_large_values(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self._externalize_large_values(item) for key, item in value.items()}
+        return value
+
+    def _write_blob(self, content: str) -> str:
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        blob_id = f"sha256:{digest}"
+        path = self._blob_path(blob_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text(content, encoding="utf-8")
+        return blob_id
+
+    def _blob_path(self, blob_id: str) -> Path:
+        digest = self._safe_blob_id(blob_id)
+        return self.blobs_dir / "sha256" / digest[:2] / f"sha256-{digest}"
 
     def _write_events(self, path: Path, events: list[RunEvent]) -> None:
         lines = [json.dumps(event.model_dump(mode="json"), ensure_ascii=False) for event in events]
