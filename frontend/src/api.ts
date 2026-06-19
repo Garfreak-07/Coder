@@ -1,5 +1,6 @@
 import type {
   AgentSpec,
+  ContextPacketDetail,
   HealthStatus,
   LibraryIndex,
   LiveRunDetail,
@@ -47,6 +48,10 @@ export function getRun(runId: string, includeEvents = true): Promise<StoredRunDe
 
 export function getRunEvents(runId: string, cursor = 0, limit = 200): Promise<RunEventsPage> {
   return requestJson<RunEventsPage>(`/api/v2/runs/${runId}/events?cursor=${cursor}&limit=${limit}`);
+}
+
+export function getContextPacket(runId: string, packetId: string): Promise<ContextPacketDetail> {
+  return requestJson<ContextPacketDetail>(`/api/v2/runs/${runId}/context-packets/${packetId}`);
 }
 
 export function getLiveRun(runId: string): Promise<LiveRunDetail> {

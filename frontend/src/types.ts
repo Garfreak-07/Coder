@@ -148,6 +148,11 @@ export interface RunEventsPage {
   has_more: boolean;
 }
 
+export interface ContextPacketDetail {
+  packet_id: string;
+  packet: Record<string, unknown>;
+}
+
 export interface LiveRunDetail {
   id: string;
   workflow_id: string;

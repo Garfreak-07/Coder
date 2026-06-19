@@ -222,6 +222,17 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
+    @app.get("/api/v2/runs/{run_id}/context-packets/{packet_id}")
+    def get_context_packet(run_id: str, packet_id: str) -> dict[str, Any]:
+        try:
+            packet = store.get_context_packet(run_id, packet_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="context packet not found") from exc
+        return {
+            "packet_id": packet_id,
+            "packet": packet,
+        }
+
     @app.get("/api/v2/live-runs/{run_id}/events")
     def stream_live_events(run_id: str) -> StreamingResponse:
         try:

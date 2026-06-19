@@ -653,12 +653,17 @@ Implemented:
 - patch/diff, apply, check, and rollback display in the UI run panel;
 - runtime summary panel with health, tool count, live runs, and stored runs;
 - run history detail loading for stored and live runs;
+- split stored run metadata, compact result, and JSONL event log files;
+- paginated stored run event replay API;
 - reattach to queued/running live run event streams from the browser;
 - gate-specific approval resume;
 - frontend i18n foundation for Chinese labels with English internal schema;
 - template-first frontend entry;
 - readable Chinese canvas node labels;
 - loop node creation, loop inspector fields, and ContextPacket cards;
+- stored ContextPackets externalized from event logs with compact summaries;
+- on-demand stored ContextPacket loading in the run event panel;
+- lazy loading for additional stored run events in the UI;
 - FastAPI runtime API;
 - live background runs;
 - live run snapshots persisted under the local run store;
@@ -676,10 +681,12 @@ goal:
 3. Turn token budget overflow from a warning into a blocking runtime condition
    after compaction has failed.
 4. Stop embedding full node results in events.
-5. Split ContextPacket, Artifact, Blob, EventLog, and RunState storage.
+5. Continue splitting Artifact, Blob, and RunState storage; ContextPacket and
+   EventLog separation has started for stored runs.
 6. Add content hash deduplication for large repeated snippets, diffs, logs, and
    snapshots.
-7. Add paginated/lazy Run Replay APIs and UI loading.
+7. Broaden lazy Run Replay loading to artifacts, blobs, diffs, check logs, and
+   snapshots.
 8. Add a lightweight run index so listing runs does not require reading every
    full run file.
 9. Add default coding workflow artifact schemas.

@@ -15,6 +15,7 @@ import {
 } from "@xyflow/react";
 import {
   approveLiveRun,
+  getContextPacket,
   getHealth,
   getAgent,
   getLibrary,
@@ -65,6 +66,9 @@ export function App() {
   const [request, setRequest] = useState("Inspect this project and propose the next safe step.");
   const [approved, setApproved] = useState(false);
   const [events, setEvents] = useState<RunEvent[]>([]);
+  const [eventCursor, setEventCursor] = useState(0);
+  const [eventHasMore, setEventHasMore] = useState(false);
+  const [eventsLoadingMore, setEventsLoadingMore] = useState(false);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
@@ -125,6 +129,9 @@ export function App() {
       setSelectedRunDetail(hydrated);
       setActiveRunId(null);
       setEvents(eventPage.events);
+      setEventCursor(eventPage.next_cursor);
+      setEventHasMore(eventPage.has_more);
+      setEventsLoadingMore(false);
       setRepo(detail.repo_root);
       setRequest(detail.request);
       setStatus(
@@ -137,6 +144,36 @@ export function App() {
     }
   }
 
+  async function loadMoreStoredEvents() {
+    if (selectedRunKind !== "stored" || !selectedRunDetail || eventsLoadingMore || !eventHasMore) {
+      return;
+    }
+    const runId = selectedRunDetail.id;
+    setEventsLoadingMore(true);
+    try {
+      const eventPage = await getRunEvents(runId, eventCursor);
+      setEvents((current) => mergeEvents(current, eventPage.events));
+      setSelectedRunDetail((current) => {
+        if (!current || current.id !== runId || selectedRunKind !== "stored") return current;
+        const stored = current as StoredRunDetail;
+        return {
+          ...stored,
+          result: {
+            ...stored.result,
+            events: mergeEvents(stored.result.events, eventPage.events)
+          }
+        };
+      });
+      setEventCursor(eventPage.next_cursor);
+      setEventHasMore(eventPage.has_more);
+      setStatus(`Stored run ${runId}: loaded ${eventPage.next_cursor} events`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setEventsLoadingMore(false);
+    }
+  }
+
   async function openLiveRun(runId: string, attach = false) {
     setStatus(`Loading live run ${runId}...`);
     try {
@@ -145,6 +182,9 @@ export function App() {
       setSelectedRunDetail(detail);
       setActiveRunId(detail.id);
       setEvents(detail.events);
+      setEventCursor(0);
+      setEventHasMore(false);
+      setEventsLoadingMore(false);
       setRepo(detail.repo_root);
       setRequest(detail.request);
       setStatus(`Live run ${runId}: ${detail.status}`);
@@ -380,6 +420,9 @@ export function App() {
 
   async function runWorkflow(approvedOverride = approved) {
     setEvents([]);
+    setEventCursor(0);
+    setEventHasMore(false);
+    setEventsLoadingMore(false);
     setActiveRunId(null);
     setStatus(approvedOverride ? "Starting approved live run..." : "Starting live run...");
     try {
@@ -659,18 +702,28 @@ export function App() {
             <div className="muted">{t.events.empty}</div>
           ) : (
             events.map((event, index) => (
-              <div className="event-row" key={`${event.type}-${index}`}>
+              <div className="event-row" key={event.id ?? `${event.type}-${index}`}>
                 <div className="event-heading">
                   <strong>{event.type}</strong>
                   {event.node_id && <code>{event.node_id}</code>}
                 </div>
                 <span>{event.message ?? ""}</span>
-                {event.type === "agent.context_packet" && <ContextPacketCard packet={event.payload?.packet} />}
+                {event.type === "agent.context_packet" && (
+                  <ContextPacketCard
+                    event={event}
+                    runId={selectedRunKind === "stored" ? selectedRunDetail?.id ?? null : null}
+                  />
+                )}
                 {event.type !== "agent.context_packet" && event.payload && Object.keys(event.payload).length > 0 && (
                   <pre>{JSON.stringify(event.payload, null, 2)}</pre>
                 )}
               </div>
             ))
+          )}
+          {selectedRunKind === "stored" && eventHasMore && (
+            <button onClick={loadMoreStoredEvents} disabled={eventsLoadingMore}>
+              {eventsLoadingMore ? "Loading events..." : "Load more events"}
+            </button>
           )}
         </section>
       </aside>
@@ -678,8 +731,51 @@ export function App() {
   );
 }
 
-function ContextPacketCard({ packet }: { packet: unknown }) {
-  if (!packet || typeof packet !== "object" || Array.isArray(packet)) return null;
+function ContextPacketCard({ event, runId }: { event: RunEvent; runId: string | null }) {
+  const payload = objectValue(event.payload);
+  const inlinePacket = payload?.packet;
+  const packetId = typeof payload?.packet_id === "string" ? payload.packet_id : null;
+  const summary = objectValue(payload?.summary);
+  const [loadedPacket, setLoadedPacket] = useState<Record<string, unknown> | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function loadPacket() {
+    if (!runId || !packetId || loading) {
+      return;
+    }
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const detail = await getContextPacket(runId, packetId);
+      setLoadedPacket(detail.packet);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const packet = inlinePacket ?? loadedPacket;
+  if (!packet || typeof packet !== "object" || Array.isArray(packet)) {
+    return (
+      <div className="context-packet-card">
+        <div className="panel-subtitle">ContextPacket</div>
+        <div className="summary-grid">
+          <span>packet: {packetId ?? "inline"}</span>
+          <span>size: {String(payload?.size_chars ?? "unknown")}</span>
+        </div>
+        {summary && <pre>{JSON.stringify(summary, null, 2)}</pre>}
+        {packetId && runId && (
+          <button onClick={loadPacket} disabled={loading}>
+            {loading ? "Loading..." : "Load full packet"}
+          </button>
+        )}
+        {loadError && <div className="muted">{loadError}</div>}
+      </div>
+    );
+  }
+
   const value = packet as Record<string, unknown>;
   const agent = objectValue(value.agent);
   const token = objectValue(value.token_estimate);
@@ -1010,6 +1106,10 @@ function RunSummary({
 function upsertEvent(events: RunEvent[], next: RunEvent): RunEvent[] {
   if (!next.id) return [...events, next];
   return events.some((event) => event.id === next.id) ? events : [...events, next];
+}
+
+function mergeEvents(events: RunEvent[], incoming: RunEvent[]): RunEvent[] {
+  return incoming.reduce((current, event) => upsertEvent(current, event), events);
 }
 
 function isTerminalRunEvent(type: string): boolean {
