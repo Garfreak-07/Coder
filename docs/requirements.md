@@ -48,6 +48,7 @@ Initial node types:
 - `start`
 - `agent`
 - `tool`
+- `mcp_tool`
 - `condition`
 - `human_gate`
 - `end`
@@ -58,7 +59,6 @@ Future node types:
 - `parallel`
 - `subworkflow`
 - `patch_review`
-- `mcp_tool`
 - `external_agent`
 
 ### Agent configuration
@@ -259,6 +259,22 @@ patch review, file scope controls, or model context budgeting.
 Decision: reference only.
 
 ## Current implemented slice
+
+Progress status:
+
+- Product-core completion estimate: roughly 85%.
+- The core local-first workflow loop is implemented: visual workflow editing,
+  JSON source-of-truth, live runs, event streaming, human/command/MCP approval,
+  scoped patch proposal/apply/rollback, local library storage, and file-backed
+  run records.
+- Remaining work is mostly product hardening rather than core proof-of-concept:
+  restart-resumable blocked runs, richer run-history browsing, long-lived MCP
+  sessions and tool discovery, desktop packaging, and deeper provider-specific
+  adapters where OpenAI-compatible endpoints are not sufficient.
+- Merge recommendation: merge the current `codex-patch-safety-workbench`
+  branch into `main` through the PR after review. Do not redo these changes
+  directly on `main`; this branch intentionally contains deletes and
+  replacements that are easier to review as one patch-safety/workbench PR.
 
 Implemented:
 
