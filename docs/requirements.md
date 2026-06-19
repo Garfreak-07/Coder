@@ -270,7 +270,7 @@ Decision: reference only.
 
 Progress status:
 
-- Product-core completion estimate: roughly 85%.
+- Product-core completion estimate: roughly 87%.
 - The core local-first workflow loop is implemented: visual workflow editing,
   JSON source-of-truth, live runs, event streaming, human/command/MCP approval,
   scoped patch proposal/apply/rollback, local library storage, and file-backed
@@ -294,6 +294,10 @@ Implemented:
 - estimated token tracking
 - mock agent executor when credentials are missing
 - React + TypeScript + Vite frontend scaffold
+- minimal frontend Chinese i18n dictionary for ordinary user surfaces while
+  preserving English workflow JSON/API/internal schema fields
+- template-first workflow library entry with a default coding workflow card
+  before the advanced JSON editor path
 - React Flow workflow canvas with node/edge rendering
 - workflow node creation and node inspector editing
 - edge inspector editing for `from`, `to`, `when`, `priority`, and
@@ -354,8 +358,10 @@ python -m coder_workbench.cli --repo . --workflow examples\workflows\coding-work
 
 ## Near-term roadmap
 
-1. Add richer UI for run history: open stored run details, inspect restored
-   live runs, and reattach to blocked runs from the browser.
+1. Add ContextPacket data model and event display:
+   - emit agent context packets as inspectable run events
+   - show task, upstream artifacts, selected project context, allowed tools,
+     token estimates, and output artifacts in the UI
 2. Expand durable recovery from persisted blocked run snapshots to active
    resume after process restart.
 3. Add long-lived MCP server sessions and tool discovery/listing instead of

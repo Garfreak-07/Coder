@@ -256,6 +256,45 @@ label {
   padding-top: 10px;
 }
 
+.template-card {
+  background: linear-gradient(135deg, rgba(14, 116, 144, 0.18), rgba(30, 41, 59, 0.88));
+  border: 1px solid #155e75;
+  border-radius: 12px;
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+}
+
+.template-card p {
+  color: #cbd5e1;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.template-card dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.template-card dl div {
+  display: grid;
+  gap: 2px;
+}
+
+.template-card dt {
+  color: #67e8f9;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.template-card dd {
+  color: #94a3b8;
+  font-size: 12px;
+  margin: 0;
+}
+
 .workflow-node {
   border: 1px solid #475569;
   border-radius: 10px;

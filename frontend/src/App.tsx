@@ -30,6 +30,7 @@ import {
   subscribeRunEvents
 } from "./api";
 import { codingWorkbenchWorkflow } from "./examples";
+import { nodeTypeLabel, zh } from "./i18n";
 import { workflowTemplate } from "./template";
 import type {
   AgentSpec,
@@ -54,7 +55,7 @@ export function App() {
   const [nodes, setNodes] = useState<FlowNode[]>(() => toFlowNodes(workflowTemplate));
   const [edges, setEdges] = useState<FlowEdge[]>(() => toFlowEdges(workflowTemplate));
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>("start");
-  const [status, setStatus] = useState("Ready");
+  const [status, setStatus] = useState("就绪");
   const [repo, setRepo] = useState(".");
   const [scopesText, setScopesText] = useState("");
   const [request, setRequest] = useState("Inspect this project and propose the next safe step.");
@@ -91,7 +92,7 @@ export function App() {
   function refreshLibrary() {
     getLibrary()
       .then(setLibrary)
-      .catch((error) => setStatus(`Failed to load library: ${error.message}`));
+      .catch((error) => setStatus(`加载库失败：${error.message}`));
   }
 
   function refreshRuntimeInfo() {
@@ -101,11 +102,11 @@ export function App() {
         setLiveRuns(live);
         setHealth(nextHealth);
       })
-      .catch((error) => setStatus(`Failed to load runtime info: ${error.message}`));
+      .catch((error) => setStatus(`加载运行状态失败：${error.message}`));
   }
 
   async function openStoredRun(runId: string) {
-    setStatus(`Loading stored run ${runId}...`);
+    setStatus(`正在加载历史运行 ${runId}...`);
     try {
       const detail = await getRun(runId);
       setSelectedRunKind("stored");
@@ -114,14 +115,14 @@ export function App() {
       setEvents(detail.result.events);
       setRepo(detail.repo_root);
       setRequest(detail.request);
-      setStatus(`Stored run ${runId}: ${detail.result.status}`);
+      setStatus(`历史运行 ${runId}：${detail.result.status}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
   }
 
   async function openLiveRun(runId: string, attach = false) {
-    setStatus(`Loading live run ${runId}...`);
+    setStatus(`正在加载实时运行 ${runId}...`);
     try {
       const detail = await getLiveRun(runId);
       setSelectedRunKind("live");
@@ -130,7 +131,7 @@ export function App() {
       setEvents(detail.events);
       setRepo(detail.repo_root);
       setRequest(detail.request);
-      setStatus(`Live run ${runId}: ${detail.status}`);
+      setStatus(`实时运行 ${runId}：${detail.status}`);
       if (attach || detail.status === "queued" || detail.status === "running") {
         subscribeToRun(detail.id, `/api/v2/live-runs/${detail.id}/events`);
       }
@@ -150,10 +151,10 @@ export function App() {
   }
 
   async function loadWorkflow(workflowId: string) {
-    setStatus(`Loading ${workflowId}...`);
+    setStatus(`正在加载 ${workflowId}...`);
     try {
       setCurrentWorkflow(await getWorkflow(workflowId));
-      setStatus(`Loaded ${workflowId}`);
+      setStatus(`已加载 ${workflowId}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
@@ -163,9 +164,9 @@ export function App() {
     try {
       const parsed = JSON.parse(jsonText) as WorkflowSpec;
       setCurrentWorkflow(parsed);
-      setStatus("JSON applied locally. Save to persist it.");
+      setStatus("JSON 已在本地应用。保存后才会持久化。");
     } catch (error) {
-      setStatus(error instanceof Error ? `Invalid JSON: ${error.message}` : "Invalid JSON");
+      setStatus(error instanceof Error ? `JSON 无效：${error.message}` : "JSON 无效");
     }
   }
 
@@ -175,7 +176,7 @@ export function App() {
       const saved = await saveWorkflow(parsed);
       setCurrentWorkflow(saved);
       refreshLibrary();
-      setStatus(`Saved workflow ${saved.id}`);
+      setStatus(`已保存工作流 ${saved.id}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
@@ -185,9 +186,9 @@ export function App() {
     try {
       const parsed = JSON.parse(jsonText) as WorkflowSpec;
       downloadJson(`${parsed.id || "workflow"}.json`, parsed);
-      setStatus(`Exported ${parsed.id || "workflow"}`);
+      setStatus(`已导出 ${parsed.id || "workflow"}`);
     } catch (error) {
-      setStatus(error instanceof Error ? `Cannot export invalid JSON: ${error.message}` : "Cannot export invalid JSON");
+      setStatus(error instanceof Error ? `无法导出无效 JSON：${error.message}` : "无法导出无效 JSON");
     }
   }
 
@@ -198,9 +199,9 @@ export function App() {
       .then((text) => {
         const parsed = JSON.parse(text) as WorkflowSpec;
         setCurrentWorkflow(parsed);
-        setStatus(`Imported ${parsed.id}`);
+        setStatus(`已导入 ${parsed.id}`);
       })
-      .catch((error) => setStatus(error instanceof Error ? `Import failed: ${error.message}` : "Import failed"));
+      .catch((error) => setStatus(error instanceof Error ? `导入失败：${error.message}` : "导入失败"));
   }
 
   function updateWorkflow(mutator: (current: WorkflowSpec) => WorkflowSpec) {
@@ -283,7 +284,7 @@ export function App() {
     try {
       const saved = await saveAgent(selectedAgent);
       refreshLibrary();
-      setStatus(`Saved agent ${saved.id}`);
+      setStatus(`已保存 Agent ${saved.id}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
@@ -297,7 +298,7 @@ export function App() {
         agents: upsertAgent(current.agents, agent)
       }));
       setSelectedAgentId(agent.id);
-      setStatus(`Loaded agent ${agent.id}`);
+      setStatus(`已加载 Agent ${agent.id}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
@@ -357,7 +358,7 @@ export function App() {
   async function runWorkflow(approvedOverride = approved) {
     setEvents([]);
     setActiveRunId(null);
-    setStatus(approvedOverride ? "Starting approved live run..." : "Starting live run...");
+    setStatus(approvedOverride ? "正在启动已预审批的实时运行..." : "正在启动实时运行...");
     try {
       const parsed = JSON.parse(jsonText) as WorkflowSpec;
       const run = await startLiveRun({
@@ -370,7 +371,7 @@ export function App() {
       setActiveRunId(run.run_id);
       setSelectedRunKind("live");
       setSelectedRunDetail(null);
-      setStatus(`Live run ${run.run_id}: ${run.status}`);
+      setStatus(`实时运行 ${run.run_id}：${run.status}`);
       subscribeToRun(run.run_id, run.events_url);
       refreshRuntimeInfo();
     } catch (error) {
@@ -380,13 +381,13 @@ export function App() {
 
   async function approveAndResumeRun(approvedValue = true, reason?: string) {
     if (!activeRunId) {
-      setStatus("No blocked live run selected.");
+      setStatus("未选择被阻塞的实时运行。");
       return;
     }
-    setStatus(`${approvedValue ? "Approving" : "Rejecting"} live run ${activeRunId}...`);
+    setStatus(`${approvedValue ? "正在批准" : "正在拒绝"}实时运行 ${activeRunId}...`);
     try {
       const run = await approveLiveRun(activeRunId, { approved: approvedValue, reason });
-      setStatus(`Live run ${run.run_id}: ${run.status}`);
+      setStatus(`实时运行 ${run.run_id}：${run.status}`);
       if (approvedValue) {
         subscribeToRun(run.run_id, run.events_url);
       }
@@ -409,7 +410,7 @@ export function App() {
         });
       },
       () => {
-        setStatus(`Event stream closed for ${runId}`);
+        setStatus(`运行 ${runId} 的事件流已关闭`);
         source.close();
       }
     );
@@ -419,29 +420,29 @@ export function App() {
     <div className="app-shell">
       <header className="topbar">
         <div>
-          <div className="eyebrow">Coder v2</div>
-          <h1>Workflow Workbench</h1>
+          <div className="eyebrow">{zh.app.eyebrow}</div>
+          <h1>{zh.app.title}</h1>
         </div>
         <div className="status">{status}</div>
       </header>
 
       <aside className="sidebar">
         <section className="panel">
-          <div className="panel-title">Workflow Library</div>
+          <div className="panel-title">{zh.labels.workflowLibrary}</div>
+          <TemplateCard onUse={() => setCurrentWorkflow({ ...codingWorkbenchWorkflow, id: `coding-workflow-${Date.now()}` })} />
           <button onClick={() => setCurrentWorkflow({ ...workflowTemplate, id: `workflow-${Date.now()}` })}>
-            New from template
+            {zh.actions.newBlank}
           </button>
-          <button onClick={() => setCurrentWorkflow(codingWorkbenchWorkflow)}>Load coding workbench example</button>
-          <button onClick={refreshLibrary}>Refresh</button>
+          <button onClick={refreshLibrary}>{zh.actions.refresh}</button>
           <div className="list">
             {library.workflows.length === 0 ? (
-              <div className="muted">No saved workflows yet.</div>
+              <div className="muted">{zh.helper.noSavedWorkflows}</div>
             ) : (
               library.workflows.map((item) => (
                 <button className="list-item" key={item.id} onClick={() => loadWorkflow(item.id)}>
                   <span>{item.name ?? item.id}</span>
                   <small>
-                    {item.nodes} nodes / {item.edges} edges
+                    {item.nodes} 个节点 / {item.edges} 条连接
                   </small>
                 </button>
               ))
@@ -450,58 +451,58 @@ export function App() {
         </section>
 
         <section className="panel">
-          <div className="panel-title">Run</div>
+          <div className="panel-title">运行</div>
           <label>
-            Repo
+            {zh.labels.repo}
             <input value={repo} onChange={(event) => setRepo(event.target.value)} />
           </label>
           <label>
-            Scopes
+            {zh.labels.scopes}
             <textarea
-              placeholder="Optional repo-relative paths, one per line"
+              placeholder={zh.helper.scopesPlaceholder}
               value={scopesText}
               onChange={(event) => setScopesText(event.target.value)}
               rows={3}
             />
           </label>
           <label>
-            Request
+            {zh.labels.request}
             <textarea value={request} onChange={(event) => setRequest(event.target.value)} rows={4} />
           </label>
           <label className="checkbox-row">
             <input type="checkbox" checked={approved} onChange={(event) => setApproved(event.target.checked)} />
-            Pre-approve gates
+            预先批准审批门
           </label>
-          <button onClick={() => runWorkflow()}>Start live run</button>
+          <button onClick={() => runWorkflow()}>{zh.actions.startRun}</button>
         </section>
 
         <section className="panel">
-          <div className="panel-title">Runtime</div>
-          <button onClick={refreshRuntimeInfo}>Refresh runtime info</button>
+          <div className="panel-title">{zh.labels.runtime}</div>
+          <button onClick={refreshRuntimeInfo}>{zh.actions.refreshRuntime}</button>
           <div className="summary-grid">
             <span>{health?.status ?? "unknown"}</span>
-            <span>{health?.tools.length ?? 0} tools</span>
-            <span>{liveRuns.length} live runs</span>
-            <span>{runHistory.length} stored runs</span>
+            <span>{health?.tools.length ?? 0} 个工具</span>
+            <span>{liveRuns.length} 个实时运行</span>
+            <span>{runHistory.length} 个历史运行</span>
           </div>
           <div className="list compact-list">
             {liveRuns.slice(0, 5).map((run) => (
               <button className="list-item" key={run.id} onClick={() => openLiveRun(run.id)}>
                 <span>{run.workflow_id}</span>
-                <small>{run.status} / {run.events} events</small>
+                <small>{run.status} / {run.events} 个事件</small>
               </button>
             ))}
-            {liveRuns.length === 0 && <div className="muted">No live runs.</div>}
+            {liveRuns.length === 0 && <div className="muted">{zh.helper.noLiveRuns}</div>}
           </div>
-          <div className="panel-subtitle">Stored run history</div>
+          <div className="panel-subtitle">{zh.labels.storedRunHistory}</div>
           <div className="list compact-list">
             {runHistory.slice(0, 5).map((run) => (
               <button className="list-item" key={run.id} onClick={() => openStoredRun(run.id)}>
                 <span>{run.workflow_id}</span>
-                <small>{run.status} / {run.events} events</small>
+                <small>{run.status} / {run.events} 个事件</small>
               </button>
             ))}
-            {runHistory.length === 0 && <div className="muted">No stored runs.</div>}
+            {runHistory.length === 0 && <div className="muted">暂无历史运行。</div>}
           </div>
         </section>
       </aside>
@@ -516,7 +517,7 @@ export function App() {
             <div className="button-row">
               {nodeTypes.map((type) => (
                 <button key={type} onClick={() => addWorkflowNode(type)}>
-                  + {type}
+                  + {nodeTypeLabel(type)}
                 </button>
               ))}
             </div>
@@ -544,13 +545,14 @@ export function App() {
         </section>
 
         <section className="editor-panel">
-          <div className="panel-title">Workflow JSON</div>
+          <div className="panel-title">{zh.labels.workflowAdvanced}</div>
+          <div className="muted">{zh.helper.advancedJson}</div>
           <div className="button-row">
-            <button onClick={applyJson}>Apply JSON</button>
-            <button onClick={persistWorkflow}>Save</button>
-            <button onClick={exportWorkflow}>Export</button>
+            <button onClick={applyJson}>{zh.actions.applyJson}</button>
+            <button onClick={persistWorkflow}>{zh.actions.save}</button>
+            <button onClick={exportWorkflow}>{zh.actions.export}</button>
             <label className="file-button">
-              Import
+              {zh.actions.import}
               <input
                 type="file"
                 accept="application/json,.json"
@@ -564,22 +566,22 @@ export function App() {
 
       <aside className="inspector">
         <section className="panel">
-          <div className="panel-title">Inspector</div>
+          <div className="panel-title">{zh.labels.inspector}</div>
           {selectedNode ? (
             <NodeInspector node={selectedNode} workflow={workflow} onChange={updateSelectedNode} />
           ) : selectedEdge ? (
             <EdgeInspector edge={selectedEdge} nodes={workflow.nodes} onChange={updateSelectedEdge} />
           ) : (
-            <div className="muted">Select a node or edge.</div>
+            <div className="muted">{zh.helper.noSelection}</div>
           )}
         </section>
 
         <section className="panel">
-          <div className="panel-title">Agents</div>
+          <div className="panel-title">{zh.labels.agents}</div>
           <div className="button-row">
             <button onClick={addAgent}>+ agent</button>
             <button disabled={!selectedAgent} onClick={persistSelectedAgent}>
-              Save agent
+              {zh.actions.saveAgent}
             </button>
           </div>
           <div className="list compact-list">
@@ -593,11 +595,11 @@ export function App() {
                 <small>{agent.role}</small>
               </button>
             ))}
-            {workflow.agents.length === 0 && <div className="muted">No agents in this workflow.</div>}
+            {workflow.agents.length === 0 && <div className="muted">{zh.helper.noAgents}</div>}
           </div>
           {library.agents.length > 0 && (
             <>
-              <div className="panel-subtitle">Library agents</div>
+              <div className="panel-subtitle">{zh.labels.libraryAgents}</div>
               <div className="list compact-list">
                 {library.agents.map((agent) => (
                   <button className="list-item" key={agent.id} onClick={() => loadAgentIntoWorkflow(agent.id)}>
@@ -612,7 +614,7 @@ export function App() {
         </section>
 
         <section className="panel events-panel">
-          <div className="panel-title">Run Events</div>
+          <div className="panel-title">{zh.labels.eventLog}</div>
           <RunDetailCard
             detail={selectedRunDetail}
             kind={selectedRunKind}
@@ -628,7 +630,7 @@ export function App() {
             onStatus={setStatus}
           />
           {events.length === 0 ? (
-            <div className="muted">No events yet.</div>
+            <div className="muted">{zh.helper.noEvents}</div>
           ) : (
             events.map((event, index) => (
               <div className="event-row" key={`${event.type}-${index}`}>
@@ -645,6 +647,45 @@ export function App() {
           )}
         </section>
       </aside>
+    </div>
+  );
+}
+
+function TemplateCard({ onUse }: { onUse: () => void }) {
+  return (
+    <div className="template-card">
+      <div className="event-heading">
+        <strong>{zh.template.name}</strong>
+        <code>v0.2</code>
+      </div>
+      <p>{zh.template.purpose}</p>
+      <dl>
+        <div>
+          <dt>{zh.labels.agents}</dt>
+          <dd>{zh.template.agents}</dd>
+        </div>
+        <div>
+          <dt>{zh.labels.tools}</dt>
+          <dd>{zh.template.tools}</dd>
+        </div>
+        <div>
+          <dt>审批</dt>
+          <dd>{zh.template.approvals}</dd>
+        </div>
+        <div>
+          <dt>模型要求</dt>
+          <dd>{zh.template.model}</dd>
+        </div>
+        <div>
+          <dt>知识来源</dt>
+          <dd>{zh.template.knowledge}</dd>
+        </div>
+        <div>
+          <dt>风险级别</dt>
+          <dd>{zh.template.risk}</dd>
+        </div>
+      </dl>
+      <button onClick={onUse}>{zh.actions.loadTemplate}</button>
     </div>
   );
 }
@@ -669,7 +710,7 @@ function PatchPanel({
 
   async function rollback() {
     if (!snapshotId) return;
-    onStatus(`Rolling back snapshot ${snapshotId}...`);
+    onStatus(`正在回滚快照 ${snapshotId}...`);
     try {
       const result = await rollbackPatch({ repo, snapshot_id: snapshotId, scopes });
       onStatus(String(result.rollback.message ?? `Rolled back ${snapshotId}`));
@@ -684,9 +725,9 @@ function PatchPanel({
     <div className="patch-panel">
       {patch && (
         <div>
-          <div className="panel-subtitle">Patch Preview</div>
+          <div className="panel-subtitle">{zh.labels.patchPreview}</div>
           {files.length === 0 ? (
-            <div className="muted">No file changes proposed.</div>
+            <div className="muted">{zh.helper.noFileChanges}</div>
           ) : (
             files.map((file, index) => {
               const item = file as Record<string, unknown>;
@@ -705,7 +746,7 @@ function PatchPanel({
       )}
       {apply && (
         <div>
-          <div className="panel-subtitle">Patch Apply</div>
+          <div className="panel-subtitle">{zh.labels.patchApply}</div>
           <div className="summary-grid">
             <span>{String(apply.status ?? "unknown")}</span>
             {snapshotId && <span>snapshot {snapshotId.slice(0, 8)}</span>}
@@ -719,20 +760,20 @@ function PatchPanel({
                   <div className="patch-error" key={`${String(item.path ?? "unknown")}-${index}`}>
                     <strong>{String(item.path ?? "unknown")}</strong>
                     <code>{String(item.code ?? "error")}</code>
-                    <span>{String(item.message ?? "Patch apply rejected.")}</span>
+                    <span>{String(item.message ?? "补丁应用已拒绝。")}</span>
                   </div>
                 );
               })}
             </div>
           )}
-          {snapshotId && <button onClick={rollback}>Rollback snapshot</button>}
+          {snapshotId && <button onClick={rollback}>{zh.actions.rollback}</button>}
         </div>
       )}
       {check && (
         <div>
-          <div className="panel-subtitle">Check Result</div>
+          <div className="panel-subtitle">{zh.labels.checkResult}</div>
           <div className="summary-grid">
-            <span>{check.passed ? "passed" : "not passed"}</span>
+            <span>{check.passed ? "通过" : "未通过"}</span>
             {typeof check.returncode === "number" && <span>exit {check.returncode}</span>}
           </div>
           {typeof check.output !== "undefined" && <pre>{String(check.output)}</pre>}
@@ -765,30 +806,30 @@ function RunDetailCard({
   return (
     <div className="run-detail-card">
       <div className="event-heading">
-        <strong>{kind === "live" ? "Live run detail" : "Stored run detail"}</strong>
+        <strong>{kind === "live" ? zh.labels.liveRunDetail : zh.labels.storedRunDetail}</strong>
         <code>{detail.id}</code>
       </div>
       <div className="summary-grid">
         <span>{status ?? "unknown"}</span>
-        <span>{events} events</span>
-        {result && <span>{result.agent_calls} agent calls</span>}
-        {result && <span>{result.tool_calls} tool calls</span>}
-        {result && <span>{result.estimated_tokens_used} est. tokens</span>}
-        {result?.blocked_node_id && <span>blocked at {result.blocked_node_id}</span>}
+        <span>{events} 个事件</span>
+        {result && <span>{result.agent_calls} 次 Agent 调用</span>}
+        {result && <span>{result.tool_calls} 次工具调用</span>}
+        {result && <span>{result.estimated_tokens_used} 估算 token</span>}
+        {result?.blocked_node_id && <span>阻塞于 {result.blocked_node_id}</span>}
       </div>
-      <div className="muted">Repo: {detail.repo_root}</div>
-      <div className="muted">Request: {detail.request}</div>
+      <div className="muted">{zh.labels.repo}: {detail.repo_root}</div>
+      <div className="muted">{zh.labels.request}: {detail.request}</div>
       {liveDetail?.stored_run_id && (
         <button onClick={() => onOpenStored(liveDetail.stored_run_id as string)}>
-          Open stored result
+          打开历史结果
         </button>
       )}
       {canAttach && (
         <button disabled={activeRunId === detail.id && liveDetail?.status === "blocked"} onClick={() => onAttach(detail.id)}>
-          {liveDetail?.status === "blocked" ? "Use this blocked run for approval" : "Reattach event stream"}
+          {liveDetail?.status === "blocked" ? "选择此阻塞运行进行审批" : "重新连接事件流"}
         </button>
       )}
-      {liveDetail?.error && <div className="muted">Error: {liveDetail.error}</div>}
+      {liveDetail?.error && <div className="muted">错误：{liveDetail.error}</div>}
     </div>
   );
 }
@@ -829,23 +870,23 @@ function RunSummary({
         <span className={`status-pill ${statusClass(latest?.type)}`}>{latest?.type ?? "running"}</span>
       </div>
       <div className="summary-grid">
-        <span>{events.length} events</span>
-        <span>{agentCalls} agent calls</span>
-        <span>{toolCalls} tool calls</span>
-        <span>{selectedEdges} edges</span>
+        <span>{events.length} 个事件</span>
+        <span>{agentCalls} 次 Agent 调用</span>
+        <span>{toolCalls} 次工具调用</span>
+        <span>{selectedEdges} 条连接</span>
       </div>
       {needsApproval && isBlocked && (
         <div className="approval-actions">
-          <input placeholder="Optional approval/rejection reason" value={reason} onChange={(event) => setReason(event.target.value)} />
+          <input placeholder={zh.helper.optionalApprovalReason} value={reason} onChange={(event) => setReason(event.target.value)} />
           <div className="button-row">
-            <button onClick={() => onApprovalDecision(true, reason || undefined)}>Approve and resume</button>
-            <button onClick={() => onApprovalDecision(false, reason || "Rejected by local user")}>Reject</button>
+            <button onClick={() => onApprovalDecision(true, reason || undefined)}>{zh.actions.approve}</button>
+            <button onClick={() => onApprovalDecision(false, reason || "Rejected by local user")}>{zh.actions.reject}</button>
           </div>
         </div>
       )}
       {latestApproval && isBlocked && (
         <div className="approval-card">
-          <div className="panel-subtitle">Pending Approval</div>
+          <div className="panel-subtitle">{zh.labels.pendingApproval}</div>
           <div className="summary-grid">
             <span>{String(latestApproval.payload?.approval_type ?? "human_gate")}</span>
             <span>{latestApproval.node_id ?? "unknown node"}</span>
@@ -856,11 +897,11 @@ function RunSummary({
       )}
       {approvalRecords.length > 0 && (
         <div className="approval-card">
-          <div className="panel-subtitle">Approval Audit</div>
+          <div className="panel-subtitle">{zh.labels.approvalAudit}</div>
           {approvalRecords.map((event) => (
             <div className="approval-record" key={event.id}>
               <span>{String(event.payload?.approval_type ?? "approval")}</span>
-              <span>{event.payload?.approved ? "approved" : "rejected"}</span>
+              <span>{event.payload?.approved ? "已批准" : "已拒绝"}</span>
               <span>{String(event.payload?.node_id ?? event.node_id ?? "unknown node")}</span>
             </div>
           ))}
@@ -898,22 +939,22 @@ function NodeInspector({
   return (
     <div className="form-stack">
       <label>
-        ID
+        {zh.labels.id}
         <input value={node.id} onChange={(event) => onChange({ id: event.target.value })} />
       </label>
       <label>
-        Type
+        {zh.labels.nodeType}
         <select value={node.type} onChange={(event) => onChange({ type: event.target.value as NodeType })}>
           {nodeTypes.map((type) => (
-            <option key={type}>{type}</option>
+            <option key={type} value={type}>{nodeTypeLabel(type)}</option>
           ))}
         </select>
       </label>
       {node.type === "agent" && (
         <label>
-          Agent
+          {zh.labels.agent}
           <select value={node.agent_id ?? ""} onChange={(event) => onChange({ agent_id: event.target.value })}>
-            <option value="">Select agent</option>
+            <option value="">{zh.helper.selectAgent}</option>
             {workflow.agents.map((agent) => (
               <option key={agent.id} value={agent.id}>
                 {agent.name ?? agent.id}
@@ -924,13 +965,13 @@ function NodeInspector({
       )}
       {(node.type === "tool" || node.type === "mcp_tool") && (
         <label>
-          {node.type === "mcp_tool" ? "MCP tool name" : "Tool"}
+          {node.type === "mcp_tool" ? "MCP 工具名" : zh.labels.tools}
           <input value={node.tool ?? ""} onChange={(event) => onChange({ tool: event.target.value })} />
         </label>
       )}
       {(node.type === "tool" || node.type === "mcp_tool") && (
         <label>
-          Input JSON
+          输入 JSON
           <textarea
             defaultValue={formatJson(node.input ?? {})}
             onBlur={(event) => {
@@ -946,13 +987,13 @@ function NodeInspector({
       )}
       {node.type === "condition" && (
         <label>
-          Condition
+          {zh.labels.condition}
           <input value={node.condition ?? ""} onChange={(event) => onChange({ condition: event.target.value })} />
         </label>
       )}
       {node.type === "human_gate" && (
         <label>
-          Approval reason
+          {zh.labels.approvalReason}
           <textarea
             value={node.approval_reason ?? ""}
             onChange={(event) => onChange({ approval_reason: event.target.value })}
@@ -961,7 +1002,7 @@ function NodeInspector({
         </label>
       )}
       <label>
-        Output key
+        {zh.labels.outputKey}
         <input value={node.output_key ?? ""} onChange={(event) => onChange({ output_key: event.target.value })} />
       </label>
     </div>
@@ -980,7 +1021,7 @@ function EdgeInspector({
   return (
     <div className="form-stack">
       <label>
-        From
+        来源
         <select value={edge.from} onChange={(event) => onChange({ from: event.target.value })}>
           {nodes.map((node) => (
             <option key={node.id} value={node.id}>
@@ -990,7 +1031,7 @@ function EdgeInspector({
         </select>
       </label>
       <label>
-        To
+        目标
         <select value={edge.to} onChange={(event) => onChange({ to: event.target.value })}>
           {nodes.map((node) => (
             <option key={node.id} value={node.id}>
@@ -1000,15 +1041,15 @@ function EdgeInspector({
         </select>
       </label>
       <label>
-        Condition
+        {zh.labels.condition}
         <input
-          placeholder="Optional, e.g. approval.approved == True"
+          placeholder="可选，例如 approval.approved == True"
           value={edge.when ?? ""}
           onChange={(event) => onChange({ when: event.target.value })}
         />
       </label>
       <label>
-        Priority
+        {zh.labels.priority}
         <input
           type="number"
           value={edge.priority ?? 0}
@@ -1016,7 +1057,7 @@ function EdgeInspector({
         />
       </label>
       <label>
-        Max traversals
+        {zh.labels.maxTraversals}
         <input
           type="number"
           min={1}
@@ -1040,23 +1081,23 @@ function AgentInspector({
   return (
     <div className="form-stack agent-editor">
       <label>
-        ID
+        {zh.labels.id}
         <input value={agent.id} onChange={(event) => onChange({ id: event.target.value })} />
       </label>
       <label>
-        Name
+        {zh.labels.name}
         <input value={agent.name ?? ""} onChange={(event) => onChange({ name: event.target.value })} />
       </label>
       <label>
-        Role
+        角色
         <input value={agent.role} onChange={(event) => onChange({ role: event.target.value })} />
       </label>
       <label>
-        Goal
+        {zh.labels.goal}
         <textarea value={agent.goal} onChange={(event) => onChange({ goal: event.target.value })} rows={3} />
       </label>
       <label>
-        Instructions
+        {zh.labels.instructions}
         <textarea
           value={agent.instructions}
           onChange={(event) => onChange({ instructions: event.target.value })}
@@ -1064,29 +1105,29 @@ function AgentInspector({
         />
       </label>
       <label>
-        Provider
+        {zh.labels.provider}
         <input value={agent.provider ?? ""} onChange={(event) => onChange({ provider: event.target.value })} />
       </label>
       <label>
-        Model
+        {zh.labels.model}
         <input value={agent.model ?? ""} onChange={(event) => onChange({ model: event.target.value })} />
       </label>
       <label>
-        Tools
+        {zh.labels.tools}
         <input value={agent.tools.join(", ")} onChange={(event) => onChange({ tools: csvToList(event.target.value) })} />
       </label>
       <label>
-        Output key
+        {zh.labels.outputKey}
         <input value={agent.output_key ?? ""} onChange={(event) => onChange({ output_key: event.target.value })} />
       </label>
-      <div className="panel-subtitle">Permissions</div>
+      <div className="panel-subtitle">{zh.labels.permissions}</div>
       <label className="checkbox-row">
         <input
           type="checkbox"
           checked={agent.permissions.read_files}
           onChange={(event) => onChange({ permissions: { ...agent.permissions, read_files: event.target.checked } })}
         />
-        Read files
+        {zh.permissions.readFiles}
       </label>
       <label className="checkbox-row">
         <input
@@ -1094,7 +1135,7 @@ function AgentInspector({
           checked={agent.permissions.edit_files}
           onChange={(event) => onChange({ permissions: { ...agent.permissions, edit_files: event.target.checked } })}
         />
-        Edit files
+        {zh.permissions.editFiles}
       </label>
       <label className="checkbox-row">
         <input
@@ -1102,7 +1143,7 @@ function AgentInspector({
           checked={agent.permissions.run_commands}
           onChange={(event) => onChange({ permissions: { ...agent.permissions, run_commands: event.target.checked } })}
         />
-        Run commands
+        {zh.permissions.runCommands}
       </label>
       <label className="checkbox-row">
         <input
@@ -1110,7 +1151,7 @@ function AgentInspector({
           checked={agent.permissions.use_network}
           onChange={(event) => onChange({ permissions: { ...agent.permissions, use_network: event.target.checked } })}
         />
-        Use network
+        {zh.permissions.useNetwork}
       </label>
       <label className="checkbox-row">
         <input
@@ -1120,18 +1161,18 @@ function AgentInspector({
             onChange({ permissions: { ...agent.permissions, requires_approval: event.target.checked } })
           }
         />
-        Requires approval
+        {zh.permissions.requiresApproval}
       </label>
-      <div className="panel-subtitle">Context policy</div>
+      <div className="panel-subtitle">{zh.labels.contextPolicy}</div>
       <label>
-        Input keys
+        输入键
         <input
           value={agent.context.input_keys.join(", ")}
           onChange={(event) => onChange({ context: { ...agent.context, input_keys: csvToList(event.target.value) } })}
         />
       </label>
       <label>
-        Summary keys
+        摘要键
         <input
           value={agent.context.summary_keys.join(", ")}
           onChange={(event) => onChange({ context: { ...agent.context, summary_keys: csvToList(event.target.value) } })}
@@ -1147,7 +1188,7 @@ function toFlowNodes(workflow: WorkflowSpec): FlowNode[] {
     type: "default",
     position: { x: (index % 3) * 260, y: Math.floor(index / 3) * 150 },
     data: {
-      label: `${node.id}\n${node.type}`
+      label: `${node.id}\n${nodeTypeLabel(node.type)}`
     },
     className: `workflow-node node-${node.type}`
   }));
