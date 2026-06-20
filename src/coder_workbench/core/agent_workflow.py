@@ -458,6 +458,27 @@ def validate_agent_workflow(spec: AgentWorkflowSpec) -> AgentWorkflowValidationR
                 )
             )
 
+    test_agents = [agent for agent in spec.agents if "test_result" in produces_by_agent.get(agent.id, set())]
+    if len(test_agents) > 1 and not any("aggregate_tests" in agent.capabilities for agent in test_agents):
+        issues.append(
+            _issue(
+                "missing_final_tester",
+                "Workflows with multiple testing Agents must include a user-added final tester with aggregate_tests.",
+                "workflow",
+            )
+        )
+
+    worker_cycle = _non_planner_cycle(spec)
+    if worker_cycle:
+        issues.append(
+            _issue(
+                "agent_cycle_without_planner",
+                "Worker/tester subgraphs cannot form cycles that bypass the primary Planner.",
+                "workflow",
+                "->".join(worker_cycle),
+            )
+        )
+
     upstream_by_agent = _upstream_agents(spec)
     for agent in spec.agents:
         if agent.id not in agent_by_id:
@@ -868,6 +889,44 @@ def _upstream_agents(spec: AgentWorkflowSpec) -> dict[str, set[str]]:
     return upstream
 
 
+def _non_planner_cycle(spec: AgentWorkflowSpec) -> list[str]:
+    graph: dict[str, list[str]] = {}
+    for edge in spec.edges:
+        if edge.loop or spec.primary_planner_id in {edge.from_agent, edge.to_agent}:
+            continue
+        graph.setdefault(edge.from_agent, []).append(edge.to_agent)
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+    stack: list[str] = []
+
+    def visit(agent_id: str) -> list[str]:
+        if agent_id in visiting:
+            try:
+                start = stack.index(agent_id)
+            except ValueError:
+                start = 0
+            return stack[start:] + [agent_id]
+        if agent_id in visited:
+            return []
+        visiting.add(agent_id)
+        stack.append(agent_id)
+        for next_id in graph.get(agent_id, []):
+            cycle = visit(next_id)
+            if cycle:
+                return cycle
+        stack.pop()
+        visiting.remove(agent_id)
+        visited.add(agent_id)
+        return []
+
+    for agent in spec.agents:
+        cycle = visit(agent.id)
+        if cycle:
+            return cycle
+    return []
+
+
 def _infer_edge_handoff(from_outputs: set[str], to_requires: set[str]) -> str | None:
     candidates = from_outputs.intersection(to_requires)
     for artifact in ARTIFACT_PRIORITY:
@@ -1079,6 +1138,14 @@ _CAPABILITIES = [
         produces=["test_result"],
         permissions=CapabilityPermissions(read_files=True, run_commands=True),
         runtime_effects=["check_command"],
+    ),
+    CapabilitySpec(
+        id="aggregate_tests",
+        label="Aggregate tests",
+        description="Combine multiple ordered test results into one final TestResult for Planner.",
+        allowed_roles=["tester", "reviewer"],
+        requires=["test_result"],
+        produces=["test_result"],
     ),
     CapabilitySpec(
         id="return_test_result",

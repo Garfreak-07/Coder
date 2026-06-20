@@ -7,6 +7,7 @@ from coder_workbench.agent_graph.context import upstream_refs_for_item
 from coder_workbench.agent_graph.merge import build_planner_input_bundle, build_round_summary
 from coder_workbench.agent_graph.scheduler import AgentGraphScheduler
 from coder_workbench.agent_graph.schema import ExecutionRecord, PlannerOrder, TestRecord
+from coder_workbench.agent_graph.validation import assert_valid_planner_order
 from coder_workbench.core import AgentWorkflowAgent, AgentWorkflowSpec, assert_valid_agent_workflow
 from coder_workbench.runtime.state import RunEvent, RunResult, summarize_value
 
@@ -73,6 +74,7 @@ class AgentGraphRunner:
 
             cache = GraphRunCache(round=1)
             planner_order = self._planner_order_from_initial_data(data) or self._mock_planner_order(request)
+            assert_valid_planner_order(self.agent_workflow, planner_order)
             planner_order_ref = "memory:planner_order:round-1"
             data["planner_order"] = planner_order.model_dump(mode="json", exclude_none=True)
             emit(

@@ -100,12 +100,12 @@ class AgentWorkflowCompilerTests(unittest.TestCase):
                 "role": "reviewer",
                 "model_tier": "standard",
                 "can_talk_to_human": False,
-                "capabilities": ["model_review", "return_test_result"],
+                "capabilities": ["model_review", "aggregate_tests", "return_test_result"],
             }
         )
         payload["edges"].extend(
             [
-                {"from": "executor", "to": "reviewer"},
+                {"from": "tester", "to": "reviewer"},
                 {"from": "reviewer", "to": "planner", "loop": True},
             ]
         )
