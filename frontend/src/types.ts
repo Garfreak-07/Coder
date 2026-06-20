@@ -218,6 +218,14 @@ export interface ProviderStatus {
   providers: ProviderStatusItem[];
 }
 
+export interface ProviderFormState {
+  default_provider: string;
+  default_model: string;
+  base_url: string;
+  api_key: string;
+  mock_mode: boolean;
+}
+
 export interface WorkflowSummary {
   id: string;
   version?: string;

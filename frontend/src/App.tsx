@@ -46,6 +46,10 @@ import {
   validateWorkflow
 } from "./api";
 import { codingWorkbenchWorkflow, defaultPlannerLedAgentWorkflow } from "./examples";
+import { ProviderSettingsPanel } from "./components/ProviderSettingsPanel";
+import { AgentWorkflowAgentInspector } from "./features/agent-workflow/AgentWorkflowAgentInspector";
+import { AgentWorkflowEdgeInspector } from "./features/agent-workflow/AgentWorkflowEdgeInspector";
+import { AgentWorkflowValidationPanel } from "./features/agent-workflow/AgentWorkflowValidationPanel";
 import { enUS, nodeTypeDescriptions, nodeTypeLabels } from "./i18n";
 import { EventReplayList, hydrateBlobRefs, objectList, objectValue, stringList } from "./runEvents";
 import { agentWorkflowTemplateCards, instantiateAgentWorkflowTemplate, type AgentWorkflowTemplateCard } from "./template";
@@ -74,9 +78,7 @@ import {
   upsertAgent
 } from "./workflowGraph";
 import type {
-  AgentModelTier,
   AgentSpec,
-  AgentWorkflowRole,
   AgentWorkflowAgent,
   AgentWorkflowEdge,
   AgentWorkflowValidationResult,
@@ -90,6 +92,7 @@ import type {
   NodeSpec,
   NodeType,
   PreflightResult,
+  ProviderFormState,
   ProviderSettings,
   ProviderStatus,
   ProviderStatusItem,
@@ -103,18 +106,6 @@ const primaryNodeTypes: NodeType[] = ["agent", "loop"];
 const advancedNodeTypes: NodeType[] = ["start", "tool", "mcp_tool", "condition", "human_gate", "end"];
 const nodeTypes: NodeType[] = [...primaryNodeTypes, ...advancedNodeTypes];
 const loopModes: LoopMode[] = ["retry_until", "while", "for_each"];
-const agentModelTiers: AgentModelTier[] = ["best", "standard", "economy"];
-const agentWorkflowRoles: AgentWorkflowRole[] = [
-  "planner",
-  "executor",
-  "worker",
-  "tester",
-  "reviewer",
-  "writer",
-  "researcher",
-  "summarizer",
-  "custom"
-];
 const t = enUS;
 const initialAgentWorkflow = cloneAgentWorkflow(defaultPlannerLedAgentWorkflow);
 const initialRuntimeWorkflow = codingWorkbenchWorkflow;
@@ -134,14 +125,6 @@ interface PreflightToolFact {
   risk: string;
   permissions: string[];
   requiresApproval: boolean;
-}
-
-interface ProviderFormState {
-  default_provider: string;
-  default_model: string;
-  base_url: string;
-  api_key: string;
-  mock_mode: boolean;
 }
 
 export function App() {
@@ -1995,87 +1978,6 @@ function TemplateCard({
   );
 }
 
-function ProviderSettingsPanel({
-  form,
-  settings,
-  status,
-  onChange,
-  onSave,
-  onRefresh,
-  onTest
-}: {
-  form: ProviderFormState;
-  settings: ProviderSettings | null;
-  status: ProviderStatus | null;
-  onChange: (patch: Partial<ProviderFormState>) => void;
-  onSave: () => void;
-  onRefresh: () => void;
-  onTest: () => void;
-}) {
-  const provider = form.default_provider.trim().toLowerCase() || "openai";
-  const currentStatus =
-    status?.providers.find((item) => item.provider === provider) ??
-    (status?.default_status.provider === provider ? status.default_status : null);
-  const keyState = settings?.api_keys[provider];
-
-  return (
-    <div className="form-stack">
-      <label>
-        Provider
-        <select value={form.default_provider} onChange={(event) => onChange({ default_provider: event.target.value })}>
-          {["openai", "deepseek", "openai-compatible", "qwen", "moonshot", "ollama"].map((providerName) => (
-            <option key={providerName} value={providerName}>
-              {providerName}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        Model
-        <input value={form.default_model} onChange={(event) => onChange({ default_model: event.target.value })} />
-      </label>
-      <label>
-        Base URL
-        <input
-          placeholder="Provider default"
-          value={form.base_url}
-          onChange={(event) => onChange({ base_url: event.target.value })}
-        />
-      </label>
-      <label>
-        API Key
-        <input
-          type="password"
-          placeholder={keyState?.configured ? `${keyState.source}: configured` : "Leave blank to keep current value"}
-          value={form.api_key}
-          onChange={(event) => onChange({ api_key: event.target.value })}
-        />
-      </label>
-      <label className="checkbox-row">
-        <input
-          type="checkbox"
-          checked={form.mock_mode}
-          onChange={(event) => onChange({ mock_mode: event.target.checked })}
-        />
-        Use mock output when credentials are missing
-      </label>
-      {currentStatus && (
-        <div className="summary-grid provider-summary">
-          <span>{currentStatus.mode}</span>
-          <span>{currentStatus.credential_source}</span>
-          <span>{currentStatus.configured ? "configured" : "missing"}</span>
-          <span>{currentStatus.base_url ?? "default URL"}</span>
-        </div>
-      )}
-      <div className="button-row">
-        <button onClick={onSave}>Save</button>
-        <button onClick={onTest}>Test</button>
-        <button onClick={onRefresh}>Refresh</button>
-      </div>
-    </div>
-  );
-}
-
 function relatedPatchObjects(events: RunEvent[]) {
   const artifacts = events
     .filter((event) => event.type === "artifact.produced")
@@ -2350,176 +2252,6 @@ function statusClass(type: string | undefined): string {
   return "";
 }
 
-function AgentWorkflowValidationPanel({ result }: { result: AgentWorkflowValidationResult | null }) {
-  if (!result) return null;
-  const statusTone = result.status === "pass" ? "good" : result.status === "warning" ? "warn" : "bad";
-  return (
-    <div className="validation-panel">
-      <div className="event-heading">
-        <span className={`status-pill ${statusTone}`}>{result.status}</span>
-        <strong>Agent workflow validation</strong>
-      </div>
-      <div className="summary-grid">
-        <span>{String(result.summary.agents ?? 0)} agents</span>
-        <span>{String(result.summary.edges ?? 0)} edges</span>
-        <span>Primary Planner: {String(result.summary.primary_planner_id ?? "none")}</span>
-        <span>Max rounds: {String(result.summary.max_auto_rounds ?? "unset")}</span>
-      </div>
-      {result.issues.length === 0 ? (
-        <div className="muted">No validation issues.</div>
-      ) : (
-        <div className="preflight-issues">
-          {result.issues.map((issue, index) => (
-            <div className={`preflight-issue ${issue.level}`} key={`${issue.code}-${issue.target_id ?? "workflow"}-${index}`}>
-              <strong>{issue.message}</strong>
-              <small>
-                {issue.level.toUpperCase()} · {issue.code} · {issue.target_type}
-                {issue.target_id ? `:${issue.target_id}` : ""}
-              </small>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function capabilityPermissionSummary(capability: CapabilitySpec): string {
-  const permissions = [
-    capability.permissions.read_files ? "read files" : null,
-    capability.permissions.edit_files ? "edit files" : null,
-    capability.permissions.run_commands ? "run commands" : null,
-    capability.permissions.use_network ? "network" : null
-  ].filter(Boolean);
-  return permissions.length > 0 ? permissions.join(", ") : "no elevated permissions";
-}
-
-function AgentWorkflowAgentInspector({
-  agent,
-  capabilities,
-  onChange
-}: {
-  agent: AgentWorkflowAgent;
-  capabilities: CapabilitySpec[];
-  onChange: (patch: Partial<AgentWorkflowAgent>) => void;
-}) {
-  const selectedCapabilities = new Set(agent.capabilities);
-  const visibleCapabilities = capabilities.filter(
-    (capability) => capability.allowed_roles.includes(agent.role) || selectedCapabilities.has(capability.id)
-  );
-
-  function toggleCapability(capabilityId: string, checked: boolean) {
-    const nextCapabilities = checked
-      ? Array.from(new Set([...agent.capabilities, capabilityId]))
-      : agent.capabilities.filter((candidate) => candidate !== capabilityId);
-    onChange({ capabilities: nextCapabilities });
-  }
-
-  return (
-    <div className="form-stack agent-editor">
-      <div className="summary-grid">
-        <span>{agent.role}</span>
-        <span>{agent.can_talk_to_human ? "Can ask user" : "Does not ask user"}</span>
-      </div>
-      <label>
-        Name
-        <input value={agent.name} onChange={(event) => onChange({ name: event.target.value })} />
-      </label>
-      <label>
-        Role
-        <select value={agent.role} onChange={(event) => onChange({ role: event.target.value as AgentWorkflowRole })}>
-          {agentWorkflowRoles.map((role) => (
-            <option key={role} value={role}>
-              {role}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        Model Tier
-        <select value={agent.model_tier} onChange={(event) => onChange({ model_tier: event.target.value as AgentModelTier })}>
-          {agentModelTiers.map((tier) => (
-            <option key={tier} value={tier}>
-              {tier}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="checkbox-row">
-        <input
-          type="checkbox"
-          checked={agent.can_talk_to_human}
-          disabled={agent.role !== "planner"}
-          onChange={(event) => onChange({ can_talk_to_human: event.target.checked })}
-        />
-        Allow asking the user (Planner only)
-      </label>
-      <div className="panel-subtitle">Capabilities</div>
-      {capabilities.length === 0 ? (
-        <div className="muted">Capability catalog is unavailable.</div>
-      ) : (
-        <div className="capability-list">
-          {visibleCapabilities.map((capability) => {
-            const selected = selectedCapabilities.has(capability.id);
-            const roleAllowed = capability.allowed_roles.includes(agent.role);
-            return (
-              <label className={`capability-option ${selected ? "selected" : ""}`} key={capability.id}>
-                <input
-                  type="checkbox"
-                  checked={selected}
-                  disabled={!roleAllowed && !selected}
-                  onChange={(event) => toggleCapability(capability.id, event.target.checked)}
-                />
-                <span>
-                  <strong>{capability.label}</strong>
-                  <small>{capability.description}</small>
-                  <small>
-                    Produces: {capability.produces.join(", ") || "none"} · Requires: {capability.requires.join(", ") || "none"}
-                  </small>
-                  <small>
-                    Permissions: {capabilityPermissionSummary(capability)}
-                    {capability.runtime_effects.length > 0 ? ` · Effects: ${capability.runtime_effects.join(", ")}` : ""}
-                  </small>
-                  {!roleAllowed && selected && <small className="warning-text">Not allowed for role {agent.role}</small>}
-                </span>
-              </label>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function AgentWorkflowEdgeInspector({
-  edge,
-  agents,
-  onChange
-}: {
-  edge: AgentWorkflowEdge;
-  agents: AgentWorkflowAgent[];
-  onChange: (patch: Partial<AgentWorkflowEdge>) => void;
-}) {
-  const from = agents.find((agent) => agent.id === edge.from);
-  const to = agents.find((agent) => agent.id === edge.to);
-  return (
-    <div className="form-stack">
-      <div className="summary-grid">
-        <span>{from?.name ?? edge.from}</span>
-        <span>{to?.name ?? edge.to}</span>
-      </div>
-      <label>
-        Label
-        <input value={edge.label ?? ""} onChange={(event) => onChange({ label: event.target.value || null })} />
-      </label>
-      <label className="checkbox-row">
-        <input type="checkbox" checked={Boolean(edge.loop)} onChange={(event) => onChange({ loop: event.target.checked })} />
-        This edge loops back to the Planner
-      </label>
-      <div className="muted">Handoff is inferred from selected capabilities during validation and compile.</div>
-    </div>
-  );
-}
 function NodeInspector({
   node,
   workflow,
