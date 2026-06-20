@@ -7,11 +7,20 @@ from coder_workbench.agent_graph.artifacts import AgentGraphArtifactRecorder, gr
 from coder_workbench.agent_graph.cache import GraphRunCache
 from coder_workbench.agent_graph.context import upstream_refs_for_item
 from coder_workbench.agent_graph.effects import apply_hidden_effects
+from coder_workbench.agent_graph.executor import (
+    AgentGraphExecutor,
+    AgentGraphExecutorError,
+    AgentGraphExecutorProtocol,
+)
 from coder_workbench.agent_graph.merge import build_planner_input_bundle, build_round_summary
 from coder_workbench.agent_graph.scheduler import AgentGraphScheduler, ReadyWave
 from coder_workbench.agent_graph.schema import ExecutionRecord, PlannerOrder, TestRecord, WorkItemOutcome
 from coder_workbench.agent_graph.validation import assert_valid_planner_order
-from coder_workbench.core import AgentWorkflowAgent, AgentWorkflowSpec, assert_valid_agent_workflow
+from coder_workbench.core import (
+    AgentWorkflowSpec,
+    AgentWorkflowValidationError,
+    assert_valid_agent_workflow,
+)
 from coder_workbench.runtime.state import RunEvent, RunResult, summarize_value
 
 
@@ -29,10 +38,15 @@ class AgentGraphRunner:
         *,
         event_sink: Any | None = None,
         runtime_settings: Any | None = None,
+        executor: AgentGraphExecutorProtocol | None = None,
     ) -> None:
         self.agent_workflow = agent_workflow
         self.event_sink = event_sink
         self.runtime_settings = runtime_settings
+        self.executor = executor or AgentGraphExecutor(
+            agent_workflow,
+            runtime_settings=runtime_settings,
+        )
 
     def run(
         self,
@@ -81,8 +95,17 @@ class AgentGraphRunner:
             )
 
             cache = GraphRunCache(round=1)
-            planner_order = self._planner_order_from_initial_data(data) or self._mock_planner_order(request)
-            assert_valid_planner_order(self.agent_workflow, planner_order)
+            planner_order = self._planner_order_from_initial_data(data) or self.executor.create_planner_order(
+                request,
+                emit=emit,
+            )
+            try:
+                assert_valid_planner_order(self.agent_workflow, planner_order)
+            except AgentWorkflowValidationError as exc:
+                raise AgentGraphExecutorError(
+                    f"PlannerOrder graph validation failed: {exc}",
+                    status_code="planner_order_validation_failed",
+                ) from exc
             planner_order_ref = graph_artifact_id("planner_order", "round", 1)
             data["planner_order"] = planner_order.model_dump(mode="json", exclude_none=True)
             emit(
@@ -163,6 +186,7 @@ class AgentGraphRunner:
                     work_item_ids=[item.work_item_id for item in wave.items],
                     deferred_ready_work_item_ids=wave.deferred_ready_work_item_ids,
                 )
+                task_contexts = []
                 for item in wave.items:
                     scheduler.mark_running(item.work_item_id)
                     if item.depends_on:
@@ -173,8 +197,9 @@ class AgentGraphRunner:
                             work_item_id=item.work_item_id,
                             depends_on=item.depends_on,
                         )
-                    self._start_work_item(cache, item, planner_order_ref, emit)
-                outcomes = self._run_wave(wave)
+                    envelope = self._start_work_item(cache, item, planner_order_ref, emit)
+                    task_contexts.append({"item": item, "envelope": envelope})
+                outcomes = self._run_wave(wave, task_contexts)
                 for outcome in outcomes:
                     execution = cache.record_execution(outcome.execution)
                     self._record_execution_artifact(recorder, cache.round, execution)
@@ -279,13 +304,13 @@ class AgentGraphRunner:
                 plan_status=round_summary.plan_status,
             )
 
-            planner_decision = self._planner_decision_from_initial_data(data) or {
-                "artifact_type": "planner_decision",
-                "round": 1,
-                "task_done": True,
-                "next_action": "finish",
-                "reason": "Phase 6 AgentGraphRunner mock-mode completed dependency scheduling.",
-            }
+            planner_decision = self._planner_decision_from_initial_data(data) or self.executor.create_planner_decision(
+                bundle=planner_input_bundle,
+                planner_human_response=data.get("planner_human_response")
+                if isinstance(data.get("planner_human_response"), dict)
+                else None,
+                emit=emit,
+            )
             planner_decision_ref = graph_artifact_id("planner_decision", "round", 1)
             data["planner_decision"] = recorder.record(
                 planner_decision_ref,
@@ -328,7 +353,7 @@ class AgentGraphRunner:
         except Exception as exc:  # pragma: no cover - boundary safety
             status = "failed"
             status_reason = str(exc)
-            status_code = "agent_graph_runtime_exception"
+            status_code = exc.status_code if isinstance(exc, AgentGraphExecutorError) else "agent_graph_runtime_exception"
             emit("agent_graph.run.failed", f"Agent graph failed: {exc}", error=str(exc))
 
         return RunResult(
@@ -352,7 +377,7 @@ class AgentGraphRunner:
         item: Any,
         planner_order_ref: str,
         emit: Any,
-    ) -> None:
+    ) -> Any:
         upstream_refs = upstream_refs_for_item(cache, item)
         envelope = cache.create_agent_task(
             item,
@@ -374,15 +399,16 @@ class AgentGraphRunner:
             work_item_id=item.work_item_id,
             envelope=envelope.model_dump(mode="json"),
         )
+        return envelope
 
-    def _run_wave(self, wave: ReadyWave) -> list[WorkItemOutcome]:
+    def _run_wave(self, wave: ReadyWave, task_contexts: list[dict[str, Any]]) -> list[WorkItemOutcome]:
         outcomes: list[WorkItemOutcome] = []
         if not wave.items:
             return outcomes
         with ThreadPoolExecutor(max_workers=max(1, len(wave.items))) as pool:
-            futures = {pool.submit(self._build_work_item_outcome, item): item for item in wave.items}
+            futures = {pool.submit(self._build_work_item_outcome, context): context for context in task_contexts}
             for future in as_completed(futures):
-                item = futures[future]
+                item = futures[future]["item"]
                 try:
                     outcomes.append(future.result())
                 except Exception as exc:  # pragma: no cover - defensive boundary
@@ -403,29 +429,35 @@ class AgentGraphRunner:
                     )
         return outcomes
 
-    def _build_work_item_outcome(self, item: Any) -> WorkItemOutcome:
+    def _build_work_item_outcome(self, context: dict[str, Any]) -> WorkItemOutcome:
+        item = context["item"]
+        envelope = context["envelope"]
+        execution = self.executor.create_execution_result(item=item, envelope=envelope)
+        tests = []
+        if execution.status == "completed":
+            execution_artifact = {
+                "artifact_type": "execution_result",
+                "artifact_id": execution.execution_result_ref,
+                "round": envelope.round,
+                "work_item_id": execution.work_item_id,
+                "merge_index": execution.merge_index,
+                "agent_id": execution.agent_id,
+                "status": execution.status,
+                "summary": execution.execution_summary,
+            }
+            tests = [
+                self.executor.create_test_result(
+                    item=item,
+                    execution_artifact=execution_artifact,
+                    tester_agent_id=tester_agent_id,
+                )
+                for tester_agent_id in item.tester_agent_ids
+            ]
         return WorkItemOutcome(
             work_item_id=item.work_item_id,
             merge_index=item.merge_index,
-            execution=ExecutionRecord(
-                work_item_id=item.work_item_id,
-                merge_index=item.merge_index,
-                agent_id=item.assignee_agent_id,
-                status="completed",
-                execution_summary="Phase 3 mock execution completed from an AgentTaskEnvelope.",
-                execution_result_ref=graph_artifact_id("execution_result", item.work_item_id),
-            ),
-            tests=[
-                TestRecord(
-                    work_item_id=item.work_item_id,
-                    merge_index=item.merge_index,
-                    tester_agent_id=tester_agent_id,
-                    status="pass",
-                    test_summary="Phase 3 mock test evidence recorded.",
-                    test_result_ref=graph_artifact_id("test_result", item.work_item_id, tester_agent_id),
-                )
-                for tester_agent_id in item.tester_agent_ids
-            ],
+            execution=execution,
+            tests=tests,
         )
 
     def _record_execution_artifact(
@@ -434,17 +466,18 @@ class AgentGraphRunner:
         round_number: int,
         execution: ExecutionRecord,
     ) -> dict[str, Any]:
+        payload = execution.artifact_payload or {
+            "artifact_type": "execution_result",
+            "round": round_number,
+            "work_item_id": execution.work_item_id,
+            "merge_index": execution.merge_index,
+            "agent_id": execution.agent_id,
+            "status": execution.status,
+            "summary": execution.execution_summary,
+        }
         return recorder.record(
             execution.execution_result_ref,
-            {
-                "artifact_type": "execution_result",
-                "round": round_number,
-                "work_item_id": execution.work_item_id,
-                "merge_index": execution.merge_index,
-                "agent_id": execution.agent_id,
-                "status": execution.status,
-                "summary": execution.execution_summary,
-            },
+            payload,
             expected_type="execution_result",
         )
 
@@ -454,17 +487,18 @@ class AgentGraphRunner:
         round_number: int,
         test: TestRecord,
     ) -> dict[str, Any]:
+        payload = test.artifact_payload or {
+            "artifact_type": "test_result",
+            "round": round_number,
+            "work_item_id": test.work_item_id,
+            "merge_index": test.merge_index,
+            "tester_agent_id": test.tester_agent_id,
+            "status": test.status,
+            "summary": test.test_summary,
+        }
         return recorder.record(
             test.test_result_ref or graph_artifact_id("test_result", test.work_item_id, test.tester_agent_id),
-            {
-                "artifact_type": "test_result",
-                "round": round_number,
-                "work_item_id": test.work_item_id,
-                "merge_index": test.merge_index,
-                "tester_agent_id": test.tester_agent_id,
-                "status": test.status,
-                "summary": test.test_summary,
-            },
+            payload,
             expected_type="test_result",
         )
 
@@ -523,43 +557,6 @@ class AgentGraphRunner:
             payload["human_message"] = str(value["human_message"])
         return payload
 
-    def _mock_planner_order(self, request: str) -> PlannerOrder:
-        work_items = []
-        testers = [agent for agent in self.agent_workflow.agents if _is_tester(agent)]
-        workers = [
-            agent
-            for agent in self.agent_workflow.agents
-            if agent.id != self.agent_workflow.primary_planner_id and not _is_tester(agent)
-        ]
-        tester_ids = [agent.id for agent in testers]
-        for index, agent in enumerate(workers, start=1):
-            work_items.append(
-                {
-                    "work_item_id": f"{_safe_id(agent.id)}-work",
-                    "merge_index": index,
-                    "assignee_agent_id": agent.id,
-                    "task_summary": f"Phase 3 mock task for {agent.name or agent.id}.",
-                    "depends_on": [],
-                    "tester_agent_ids": tester_ids,
-                }
-            )
-        return PlannerOrder.model_validate(
-            {
-                "artifact_type": "planner_order",
-                "round": 1,
-                "round_goal": request,
-                "plan_graph": {
-                    "work_items": work_items,
-                    "final_tester_agent_id": tester_ids[-1] if len(tester_ids) > 1 else None,
-                },
-            }
-        )
-
-
-def _is_tester(agent: AgentWorkflowAgent) -> bool:
-    return agent.role in {"tester", "reviewer"} or any("test" in capability for capability in agent.capabilities)
-
-
 def _max_concurrency_from_data(data: dict[str, Any]) -> int:
     value = data.get("max_concurrency")
     try:
@@ -575,8 +572,3 @@ def _scopes_from_data(data: dict[str, Any]) -> list[str]:
     if isinstance(scopes, str) and scopes.strip():
         return [scopes.strip()]
     return []
-
-
-def _safe_id(value: str) -> str:
-    safe = "".join(char if char.isalnum() or char == "_" else "_" for char in value.strip())
-    return safe or "agent"

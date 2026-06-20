@@ -89,6 +89,7 @@ class ExecutionRecord(MergeIndexedModel):
     status: ExecutionStatus
     execution_summary: str
     execution_result_ref: str
+    artifact_payload: dict[str, Any] | None = None
 
 
 class TestRecord(MergeIndexedModel):
@@ -97,6 +98,7 @@ class TestRecord(MergeIndexedModel):
     status: TestStatus
     test_summary: str
     test_result_ref: str | None = None
+    artifact_payload: dict[str, Any] | None = None
 
 
 class WorkItemOutcome(MergeIndexedModel):

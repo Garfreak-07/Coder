@@ -1,6 +1,12 @@
 AGENT_GRAPH_EVENT_TYPES = [
     "agent_graph.run.started",
     "agent_graph.round.started",
+    "agent_graph.agent_call.started",
+    "agent_graph.agent_call.completed",
+    "agent_graph.agent_call.schema_failed",
+    "agent_graph.agent_call.repair_started",
+    "agent_graph.agent_call.repair_completed",
+    "agent_graph.agent_call.repair_failed",
     "planner.order.produced",
     "planner.plan_cached",
     "agent_graph.wave.started",
