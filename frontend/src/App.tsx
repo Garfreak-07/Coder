@@ -25,8 +25,6 @@ import {
   getLibrary,
   getLiveRun,
   getLiveRuns,
-  getProviderSettings,
-  getProviderStatus,
   getRun,
   getRunEvents,
   getRuns,
@@ -35,12 +33,10 @@ import {
   rollbackPatch,
   saveAgent,
   saveAgentWorkflow,
-  saveProviderSettings,
   saveWorkflow,
   startLiveRun,
   startLiveAgentRun,
   subscribeRunEvents,
-  testProvider,
   retryCurrentNode,
   validateAgentWorkflow,
   validateWorkflow
@@ -50,6 +46,7 @@ import { ProviderSettingsPanel } from "./components/ProviderSettingsPanel";
 import { AgentWorkflowAgentInspector } from "./features/agent-workflow/AgentWorkflowAgentInspector";
 import { AgentWorkflowEdgeInspector } from "./features/agent-workflow/AgentWorkflowEdgeInspector";
 import { AgentWorkflowValidationPanel } from "./features/agent-workflow/AgentWorkflowValidationPanel";
+import { useProviderSettings } from "./hooks/useProviderSettings";
 import { enUS, nodeTypeDescriptions, nodeTypeLabels } from "./i18n";
 import { EventReplayList, hydrateBlobRefs, objectList, objectValue, stringList } from "./runEvents";
 import { agentWorkflowTemplateCards, instantiateAgentWorkflowTemplate, type AgentWorkflowTemplateCard } from "./template";
@@ -92,9 +89,6 @@ import type {
   NodeSpec,
   NodeType,
   PreflightResult,
-  ProviderFormState,
-  ProviderSettings,
-  ProviderStatus,
   ProviderStatusItem,
   RunEvent,
   RunSummaryItem,
@@ -159,15 +153,15 @@ export function App() {
   const [historyQuery, setHistoryQuery] = useState("");
   const [historyStatusFilter, setHistoryStatusFilter] = useState("all");
   const [health, setHealth] = useState<HealthStatus | null>(null);
-  const [providerSettings, setProviderSettings] = useState<ProviderSettings | null>(null);
-  const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
-  const [providerForm, setProviderForm] = useState<ProviderFormState>({
-    default_provider: "openai",
-    default_model: "gpt-4.1-mini",
-    base_url: "",
-    api_key: "",
-    mock_mode: true
-  });
+  const {
+    providerSettings,
+    providerStatus,
+    providerForm,
+    updateProviderForm,
+    refreshProviderInfo,
+    persistProviderSettings,
+    runProviderTest
+  } = useProviderSettings(setStatus);
   const [selectedRunDetail, setSelectedRunDetail] = useState<StoredRunDetail | LiveRunDetail | null>(null);
   const [selectedRunKind, setSelectedRunKind] = useState<"live" | "stored" | null>(null);
   const [pendingPreflight, setPendingPreflight] = useState<PendingPreflightRun | null>(null);
@@ -221,65 +215,6 @@ export function App() {
         setCapabilities(nextCapabilities);
       })
       .catch((error) => setStatus(`Failed to load runtime info: ${error.message}`));
-  }
-
-  function refreshProviderInfo() {
-    Promise.all([getProviderSettings(), getProviderStatus()])
-      .then(([settings, status]) => {
-        setProviderSettings(settings);
-        setProviderStatus(status);
-        const provider = settings.default_provider || status.default_provider || "openai";
-        setProviderForm({
-          default_provider: provider,
-          default_model: settings.default_model || status.default_model || "gpt-4.1-mini",
-          base_url: settings.base_urls[provider] ?? "",
-          api_key: "",
-          mock_mode: settings.mock_mode
-        });
-      })
-      .catch((error) => setStatus(`Failed to load provider settings: ${error.message}`));
-  }
-
-  async function persistProviderSettings() {
-    const provider = providerForm.default_provider.trim().toLowerCase() || "openai";
-    const baseUrls = { ...(providerSettings?.base_urls ?? {}) };
-    if (providerForm.base_url.trim()) {
-      baseUrls[provider] = providerForm.base_url.trim();
-    } else {
-      delete baseUrls[provider];
-    }
-    const payload: Record<string, unknown> = {
-      default_provider: provider,
-      default_model: providerForm.default_model.trim() || "gpt-4.1-mini",
-      base_urls: baseUrls,
-      mock_mode: providerForm.mock_mode
-    };
-    if (providerForm.api_key.trim()) {
-      payload.api_keys = { [provider]: providerForm.api_key.trim() };
-    }
-    setStatus(`Saving provider ${provider}...`);
-    try {
-      const result = await saveProviderSettings(payload);
-      setProviderSettings(result.settings);
-      setProviderStatus(result.status);
-      setProviderForm((current) => ({ ...current, default_provider: provider, api_key: "" }));
-      setStatus(`Provider ${provider} saved.`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function runProviderTest() {
-    const provider = providerForm.default_provider.trim().toLowerCase() || "openai";
-    setStatus(`Checking provider ${provider}...`);
-    try {
-      const result = await testProvider(provider);
-      setProviderStatus(result);
-      const item = result.providers[0] ?? result.default_status;
-      setStatus(`Provider ${provider}: ${item.mode}, credentials ${item.credential_source}`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    }
   }
 
   async function openStoredRun(runId: string) {
@@ -1157,17 +1092,7 @@ export function App() {
             form={providerForm}
             settings={providerSettings}
             status={providerStatus}
-            onChange={(patch) => {
-              const nextProvider = patch.default_provider?.trim().toLowerCase();
-              setProviderForm((current) => {
-                const merged = { ...current, ...patch };
-                if (nextProvider && nextProvider !== current.default_provider) {
-                  merged.base_url = providerSettings?.base_urls[nextProvider] ?? "";
-                  merged.api_key = "";
-                }
-                return merged;
-              });
-            }}
+            onChange={updateProviderForm}
             onSave={persistProviderSettings}
             onRefresh={refreshProviderInfo}
             onTest={runProviderTest}
