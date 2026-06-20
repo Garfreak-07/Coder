@@ -15,6 +15,7 @@ from coder_workbench.agent_graph.executor import (
     AgentGraphExecutorProtocol,
 )
 from coder_workbench.agent_graph.interruption import build_graph_interrupt, should_interrupt_execution
+from coder_workbench.agent_graph.memory import PlannerMemoryStore
 from coder_workbench.agent_graph.merge import build_planner_input_bundle, build_round_summary
 from coder_workbench.agent_graph.scheduler import AgentGraphScheduler, ReadyWave
 from coder_workbench.agent_graph.schema import (
@@ -550,6 +551,21 @@ class AgentGraphRunner:
             round=round_number,
             next_action=data["planner_decision"]["next_action"],
         )
+        try:
+            memory = PlannerMemoryStore(repo_root).record_round(
+                workflow_id=self.agent_workflow.id,
+                bundle=planner_input_bundle,
+                round_summary=round_summary,
+                planner_decision=data["planner_decision"],
+            )
+            data["planner_memory"] = {
+                "workflow_id": memory.workflow_id,
+                "updated_at": memory.updated_at,
+                "planner_notes": len(memory.planner_notes),
+                "common_blockers": len(memory.common_blockers),
+            }
+        except Exception as exc:  # pragma: no cover - memory should not block runtime
+            data["planner_memory_error"] = str(exc)
 
         round_entry = {
             "round": round_number,

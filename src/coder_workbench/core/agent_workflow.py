@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from coder_workbench.core.authority import authority_profile_for_agent
 from coder_workbench.core.schema import AgentSpec, ContextPolicy, EdgeSpec, NodeSpec, PermissionPolicy, WorkflowSpec
 
 
@@ -382,6 +383,17 @@ def validate_agent_workflow(spec: AgentWorkflowSpec) -> AgentWorkflowValidationR
                         agent.id or None,
                     )
                 )
+        profile = authority_profile_for_agent(agent, primary_planner_id=spec.primary_planner_id)
+        allowed_artifacts = set(profile.allowed_artifact_types)
+        for artifact in sorted(produces - allowed_artifacts):
+            issues.append(
+                _issue(
+                    "authority_artifact_not_allowed",
+                    f'Agent "{agent.name or agent.id}" with {profile.authority} authority cannot produce {artifact}.',
+                    "agent",
+                    agent.id or None,
+                )
+            )
         produces_by_agent[agent.id] = produces
         requires_by_agent[agent.id] = requires
 

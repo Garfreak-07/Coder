@@ -16,6 +16,12 @@ from .agent_workflow import (
     validate_agent_workflow,
     validate_agent_workflow_payload,
 )
+from .authority import (
+    AUTHORITY_PROFILES,
+    AgentAuthorityProfile,
+    authority_catalog,
+    authority_profile_for_agent,
+)
 from .legacy_compile import compile_agent_workflow
 from .schema import (
     AgentSpec,
@@ -44,7 +50,11 @@ __all__ = [
     "NodeSpec",
     "PermissionPolicy",
     "WorkflowSpec",
+    "AUTHORITY_PROFILES",
+    "AgentAuthorityProfile",
     "assert_valid_agent_workflow",
+    "authority_catalog",
+    "authority_profile_for_agent",
     "capability_catalog",
     "capability_registry",
     "compile_agent_workflow",
