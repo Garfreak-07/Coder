@@ -17,13 +17,18 @@ Planner-led Orchestrator
 + Hidden Runtime Graph
 ```
 
-The ordinary user-facing workflow is:
+The default user-facing template is:
 
 ```text
 Planner Agent -> Executor Agent -> Tester Agent
       ^                                   |
       +----------- loop decision ---------+
 ```
+
+The product runtime also supports AgentGraph execution where Planner can split a
+round into multiple work items, assign them to reachable downstream Agents, wait
+on `depends_on`, and submit an ordered compact `PlannerInputBundle` back to
+Planner.
 
 Only Planner can ask the human or decide whether to continue, finish, stop, or
 request confirmation. Runtime internals such as context selection, artifact
@@ -63,6 +68,22 @@ from result presentation:
 7. `PlannerInputBundle` and `round_summary.ordered_state` are sorted by
    `merge_index`.
 
+Execution order is derived from dependency readiness, not from Planner list
+order or `merge_index`.
+
+## Runtime Boundary
+
+Product runs use the AgentGraph runtime:
+
+```text
+AgentWorkflowSpec -> PlannerOrder.plan_graph -> GraphRunCache -> AgentTaskEnvelope
+-> Execution/Test caches -> PlannerInputBundle -> PlannerDecision
+```
+
+Legacy `WorkflowSpec` / `WorkflowRunner` remain for advanced inspection and old
+saved workflows only. New product behavior should not be added to the legacy
+runner.
+
 ## Current Capabilities
 
 - `AgentWorkflowSpec` for the user-visible Planner / Executor / Tester layer.
@@ -70,9 +91,10 @@ from result presentation:
   count, hidden handoff inference, and deterministic save-blocking errors.
 - Initial capability registry for Planner, Executor/Worker, and Tester/Reviewer
   capabilities.
-- Compiler from Agent-only workflow to the internal runtime `WorkflowSpec`.
-- Product-level `/api/v2/live-agent-runs` endpoint that validates and compiles
-  Agent workflows on the backend before starting a live run.
+- `AgentGraphRuntime` powers product `/api/v2/live-agent-runs` executions
+  without compiling Agent workflows into legacy `WorkflowSpec`.
+- Legacy `WorkflowSpec` compilation remains available only for advanced runtime
+  preview and old saved workflows.
 - FastAPI runtime API and React + TypeScript workbench.
 - Mock-mode executor for local development without model credentials.
 - Structured artifact validation, event emission, storage, and replay.
