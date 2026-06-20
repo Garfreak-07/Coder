@@ -3,6 +3,27 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+DEFAULT_PROVIDER = "openai"
+DEFAULT_MODEL = "gpt-4.1-mini"
+
+PROVIDER_ENV_KEYS = {
+    "openai": "OPENAI_API_KEY",
+    "openai-compatible": "CODER_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
+    "moonshot": "MOONSHOT_API_KEY",
+    "kimi": "MOONSHOT_API_KEY",
+    "qwen": "DASHSCOPE_API_KEY",
+    "dashscope": "DASHSCOPE_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "together": "TOGETHER_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "perplexity": "PERPLEXITY_API_KEY",
+    "xai": "XAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "ollama": "OLLAMA_API_KEY",
+}
+
 
 @dataclass(frozen=True)
 class RuntimeConfig:
@@ -19,40 +40,26 @@ class RuntimeConfig:
 
 
 def load_runtime_config(provider_override: str | None = None, model_override: str | None = None) -> RuntimeConfig:
-    provider = (provider_override or os.getenv("CODER_PROVIDER", "openai")).strip().lower()
+    provider = (provider_override or os.getenv("CODER_PROVIDER", DEFAULT_PROVIDER)).strip().lower()
     return RuntimeConfig(
         provider=provider,
-        model=model_override or os.getenv("CODER_MODEL", "gpt-4.1-mini"),
+        model=model_override or os.getenv("CODER_MODEL", DEFAULT_MODEL),
         api_key=_api_key_for_provider(provider),
-        base_url=_base_url_for_provider(provider),
+        base_url=base_url_for_provider(provider),
     )
 
 
 def _api_key_for_provider(provider: str) -> str | None:
-    env_names = {
-        "openai": "OPENAI_API_KEY",
-        "openai-compatible": "CODER_API_KEY",
-        "deepseek": "DEEPSEEK_API_KEY",
-        "moonshot": "MOONSHOT_API_KEY",
-        "kimi": "MOONSHOT_API_KEY",
-        "qwen": "DASHSCOPE_API_KEY",
-        "dashscope": "DASHSCOPE_API_KEY",
-        "groq": "GROQ_API_KEY",
-        "openrouter": "OPENROUTER_API_KEY",
-        "together": "TOGETHER_API_KEY",
-        "mistral": "MISTRAL_API_KEY",
-        "perplexity": "PERPLEXITY_API_KEY",
-        "xai": "XAI_API_KEY",
-        "gemini": "GEMINI_API_KEY",
-        "ollama": "OLLAMA_API_KEY",
-    }
-    return os.getenv(env_names.get(provider, "CODER_API_KEY")) or os.getenv("CODER_API_KEY")
+    return os.getenv(PROVIDER_ENV_KEYS.get(provider, "CODER_API_KEY")) or os.getenv("CODER_API_KEY")
 
 
-def _base_url_for_provider(provider: str) -> str | None:
+def base_url_for_provider(provider: str) -> str | None:
     if os.getenv("CODER_BASE_URL"):
         return os.getenv("CODER_BASE_URL")
+    return default_base_url(provider)
 
+
+def default_base_url(provider: str) -> str | None:
     defaults = {
         "deepseek": "https://api.deepseek.com",
         "moonshot": "https://api.moonshot.cn/v1",

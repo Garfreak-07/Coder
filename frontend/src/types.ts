@@ -89,6 +89,36 @@ export interface PreflightResult {
   summary: Record<string, unknown>;
 }
 
+export interface ProviderKeyState {
+  configured: boolean;
+  source: string;
+}
+
+export interface ProviderSettings {
+  default_provider: string;
+  default_model: string;
+  base_urls: Record<string, string>;
+  api_keys: Record<string, ProviderKeyState>;
+  mock_mode: boolean;
+}
+
+export interface ProviderStatusItem {
+  provider: string;
+  configured: boolean;
+  credential_configured: boolean;
+  credential_source: string;
+  base_url?: string | null;
+  mode: string;
+}
+
+export interface ProviderStatus {
+  default_provider: string;
+  default_model: string;
+  mock_mode: boolean;
+  default_status: ProviderStatusItem;
+  providers: ProviderStatusItem[];
+}
+
 export interface WorkflowSummary {
   id: string;
   version?: string;

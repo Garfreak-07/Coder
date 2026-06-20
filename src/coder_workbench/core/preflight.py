@@ -31,6 +31,7 @@ def validate_workflow_preflight(
     *,
     registered_tools: list[str] | None = None,
     tool_capabilities: dict[str, dict[str, Any]] | None = None,
+    provider_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run product-level checks before starting a workflow run."""
 
@@ -86,6 +87,10 @@ def validate_workflow_preflight(
             )
 
     for agent in workflow.agents:
+        if provider_status:
+            provider_issue = _provider_issue_for_agent(agent, provider_status)
+            if provider_issue:
+                issues.append(provider_issue)
         for tool_name in agent.tools:
             capability = capabilities.get(tool_name)
             if registered and tool_name not in registered:
@@ -161,8 +166,26 @@ def validate_workflow_preflight(
             "token_budget": workflow.token_budget,
             "tools": _tool_summaries(workflow, capabilities),
             "permission_summary": _permission_summary(workflow, capabilities),
+            "provider_status": provider_status or {},
         },
     ).model_dump(mode="json")
+
+
+def _provider_issue_for_agent(agent: Any, provider_status: dict[str, Any]) -> PreflightIssue | None:
+    provider = str(getattr(agent, "provider", None) or provider_status.get("default_provider") or "").lower()
+    providers = provider_status.get("providers")
+    if not provider or not isinstance(providers, list):
+        return None
+    status = next((item for item in providers if isinstance(item, dict) and item.get("provider") == provider), None)
+    if not status or status.get("configured"):
+        return None
+    return _issue(
+        "warning",
+        "provider_credentials_missing",
+        f"Agent {agent.id} uses provider {provider!r}, but no credentials are configured; runtime will use mock output.",
+        "agent",
+        agent.id,
+    )
 
 
 def _runtime_tool_name(node_type: str, tool_name: str | None) -> str | None:

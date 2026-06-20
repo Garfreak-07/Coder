@@ -8,7 +8,7 @@ from coder_workbench.core.artifacts import ArtifactValidationError, artifact_sum
 from coder_workbench.core import WorkflowSpec
 from coder_workbench.executors import AgentExecutor, DefaultAgentExecutor
 from coder_workbench.runtime.conditions import evaluate_condition
-from coder_workbench.runtime.context import build_agent_context, build_context_packet, estimate_tokens
+from coder_workbench.runtime.context import build_agent_context, build_context_packet, fit_context_to_token_budget
 from coder_workbench.runtime.state import RunEvent, RunResult, RunState, summarize_value
 from coder_workbench.tools import ToolRegistry, default_tool_registry
 
@@ -26,11 +26,12 @@ class WorkflowRunner:
         agent_executor: AgentExecutor | None = None,
         tools: ToolRegistry | None = None,
         event_sink: Any | None = None,
+        runtime_settings: Any | None = None,
     ) -> None:
         self.workflow = workflow
         self.nodes = workflow.node_by_id()
         self.agents = workflow.agent_by_id()
-        self.agent_executor = agent_executor or DefaultAgentExecutor()
+        self.agent_executor = agent_executor or DefaultAgentExecutor(runtime_settings=runtime_settings)
         self.tools = tools or default_tool_registry()
         self.event_sink = event_sink
 
@@ -153,24 +154,47 @@ class WorkflowRunner:
                 "policy_violations": policy_violations,
             }
         context = build_agent_context(agent, state)
-        estimated = estimate_tokens(context)
+        budget_remaining = state.token_budget - state.estimated_tokens_used if state.token_budget else None
+        context, estimated, original_estimated, reductions = fit_context_to_token_budget(context, budget_remaining)
         projected_tokens = state.estimated_tokens_used + estimated
-        packet = build_context_packet(agent, state, node_id=node_id, context=context, estimated_tokens=estimated)
+        packet = build_context_packet(
+            agent,
+            state,
+            node_id=node_id,
+            context=context,
+            estimated_tokens=estimated,
+            original_estimated_tokens=original_estimated,
+            context_reductions=reductions,
+        )
         state.emit(
             "agent.context_packet",
             f"Context packet for agent {agent.id}",
             node_id=node_id,
             packet=packet,
         )
+        if reductions:
+            state.emit(
+                "budget.warning",
+                "Context compacted before agent call",
+                node_id=node_id,
+                estimated_tokens_used=state.estimated_tokens_used,
+                original_estimated_tokens=original_estimated,
+                estimated_tokens=estimated,
+                projected_tokens_used=projected_tokens,
+                token_budget=state.token_budget,
+                context_reductions=reductions,
+            )
         if state.token_budget and projected_tokens > state.token_budget:
             state.emit(
                 "budget.warning",
-                "Estimated token budget exceeded; agent call blocked",
+                "Estimated token budget exceeded after compaction; agent call blocked",
                 node_id=node_id,
                 estimated_tokens_used=state.estimated_tokens_used,
                 projected_tokens_used=projected_tokens,
                 estimated_tokens=estimated,
+                original_estimated_tokens=original_estimated,
                 token_budget=state.token_budget,
+                context_reductions=reductions,
             )
             self._block(state, "token budget exceeded")
             return {
@@ -480,8 +504,12 @@ def run_workflow(
     resume_checkpoint: dict[str, Any] | None = None,
     prior_events: list[RunEvent] | None = None,
     resume_after_node: str | None = None,
+    runner_factory: Any | None = None,
 ) -> RunResult:
-    return WorkflowRunner(workflow, event_sink=event_sink).run(
+    runner = runner_factory(workflow) if runner_factory else WorkflowRunner(workflow, event_sink=event_sink)
+    if event_sink is not None:
+        runner.event_sink = event_sink
+    return runner.run(
         request=request,
         repo_root=repo_root,
         initial_data=initial_data,

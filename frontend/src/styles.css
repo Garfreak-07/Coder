@@ -353,6 +353,30 @@ label {
   padding: 10px;
 }
 
+.object-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.object-links a {
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 999px;
+  color: #93c5fd;
+  font-size: 12px;
+  padding: 4px 8px;
+  text-decoration: none;
+}
+
+.rollback-status {
+  border-top: 1px solid #263244;
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+}
+
 .diff-block {
   border-top: 1px solid #263244;
   display: grid;
@@ -526,6 +550,13 @@ label {
   grid-template-columns: 1fr 1fr;
 }
 
+.provider-summary {
+  background: #101826;
+  border: 1px solid #263244;
+  border-radius: 10px;
+  padding: 8px;
+}
+
 .status-pill {
   background: #334155;
   border-radius: 999px;
@@ -612,6 +643,7 @@ label {
 }
 
 .preflight-tool-list,
+.provider-status-list,
 .preflight-issues {
   display: grid;
   gap: 8px;

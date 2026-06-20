@@ -123,6 +123,28 @@ class CommandApprovalTests(unittest.TestCase):
             self.assertEqual(restored.workflow.id, "command-approval-test")
             self.assertGreaterEqual(len(restored.events), 1)
 
+    def test_restored_blocked_live_run_can_be_approved_after_manager_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = RunStore(Path(tmp) / ".coder")
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            command = f'"{sys.executable}" -c "print(321)"'
+            manager = RunManager(store)
+            run = manager.start(_command_workflow(command), str(repo), "run check", {"scopes": []})
+            _wait_for_status(run, "blocked")
+
+            restarted = RunManager(store)
+            restored = restarted.get(run.id)
+            restarted.approve(restored.id, approved=True)
+            _wait_for_status(restored, "completed")
+
+            self.assertIsNotNone(restored.result)
+            assert restored.result is not None
+            self.assertEqual(restored.result.status, "completed")
+            self.assertTrue(restored.result.data["check_result"]["passed"])
+            self.assertIn("321", restored.result.data["check_result"]["output"])
+            self.assertIsNotNone(restored.stored_run_id)
+
 
 def _wait_for_status(run, status: str, timeout: float = 5.0) -> None:
     deadline = time.time() + timeout

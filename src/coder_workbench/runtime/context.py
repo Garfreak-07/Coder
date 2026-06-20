@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any
 
 from coder_workbench.core import AgentSpec, ContextPolicy
@@ -49,6 +50,8 @@ def build_context_packet(
     node_id: str,
     context: dict[str, Any],
     estimated_tokens: int,
+    original_estimated_tokens: int | None = None,
+    context_reductions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the inspectable context packet shown in run events.
 
@@ -83,8 +86,10 @@ def build_context_packet(
         "loop": loop,
         "token_estimate": {
             "packet": estimated_tokens,
+            "original_packet": original_estimated_tokens or estimated_tokens,
             "run_used_after_packet": state.estimated_tokens_used + estimated_tokens,
             "budget": state.token_budget,
+            "context_reductions": context_reductions or [],
         },
         "output_contract": {
             "key": agent.output_key,
@@ -99,6 +104,50 @@ def estimate_tokens(value: Any) -> int:
     # Conservative approximation. The important property is consistency so the
     # runtime can compare nodes and enforce budgets.
     return max(1, len(str(value)) // 4)
+
+
+def fit_context_to_token_budget(
+    context: dict[str, Any],
+    budget_remaining: int | None,
+) -> tuple[dict[str, Any], int, int, list[dict[str, Any]]]:
+    original_estimate = estimate_tokens(context)
+    if budget_remaining is None or original_estimate <= budget_remaining:
+        return context, original_estimate, original_estimate, []
+
+    compacted = deepcopy(context)
+    reductions: list[dict[str, Any]] = []
+
+    if "events" in compacted:
+        compacted.pop("events", None)
+        reductions.append({"action": "drop_event_history"})
+        current_estimate = estimate_tokens(compacted)
+        if current_estimate <= budget_remaining:
+            return compacted, current_estimate, original_estimate, reductions
+
+    state = compacted.get("state")
+    summaries = compacted.get("state_summaries")
+    if isinstance(state, dict) and isinstance(summaries, dict):
+        heavy_keys = sorted(state, key=lambda key: estimate_tokens(state[key]), reverse=True)
+        for key in heavy_keys:
+            summary = str(summaries.get(key) or summarize_value(state[key]))[:800]
+            state[key] = {
+                "summary": summary,
+                "omitted": "full value omitted after token budget compaction",
+            }
+            reductions.append({"action": "summarize_state", "key": key})
+            current_estimate = estimate_tokens(compacted)
+            if current_estimate <= budget_remaining:
+                return compacted, current_estimate, original_estimate, reductions
+
+        for key in heavy_keys:
+            state.pop(key, None)
+            reductions.append({"action": "drop_state", "key": key})
+            current_estimate = estimate_tokens(compacted)
+            if current_estimate <= budget_remaining:
+                return compacted, current_estimate, original_estimate, reductions
+
+    final_estimate = estimate_tokens(compacted)
+    return compacted, final_estimate, original_estimate, reductions
 
 
 def _compact_value(value: Any, policy: ContextPolicy) -> Any:

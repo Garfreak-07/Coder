@@ -195,7 +195,7 @@ class LoopAndContextPacketTests(unittest.TestCase):
             self.assertEqual(len(compacted[0]), 1)
             self.assertEqual(len(compacted[0][0]), 500)
 
-    def test_token_budget_excess_blocks_before_agent_call(self) -> None:
+    def test_token_budget_overflow_compacts_context_before_agent_call(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workflow = WorkflowSpec.model_validate(
                 {
@@ -227,6 +227,45 @@ class LoopAndContextPacketTests(unittest.TestCase):
                 "inspect context",
                 tmp,
                 initial_data={"large": "x" * 8000},
+            )
+
+            self.assertEqual(result.status, "completed")
+            self.assertEqual(result.agent_calls, 1)
+            self.assertEqual(len(executor.contexts), 1)
+            self.assertIsInstance(executor.contexts[0]["state"]["large"], dict)
+            budget_events = [event for event in result.events if event.type == "budget.warning"]
+            self.assertTrue(budget_events)
+            self.assertEqual(budget_events[0].payload["context_reductions"][0]["action"], "summarize_state")
+            packet = next(event.payload["packet"] for event in result.events if event.type == "agent.context_packet")
+            self.assertLess(packet["token_estimate"]["packet"], packet["token_estimate"]["original_packet"])
+            self.assertTrue(packet["token_estimate"]["context_reductions"])
+            self.assertTrue(any(event.type == "agent.called" for event in result.events))
+
+    def test_token_budget_excess_blocks_after_compaction_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workflow = WorkflowSpec.model_validate(
+                {
+                    "id": "budget-block-test",
+                    "name": "Budget block test",
+                    "token_budget": 1000,
+                    "nodes": [
+                        {"id": "start", "type": "start"},
+                        {"id": "agent", "type": "agent", "agent_id": "worker", "output_key": "worker_result"},
+                        {"id": "end", "type": "end"},
+                    ],
+                    "edges": [
+                        {"from": "start", "to": "agent"},
+                        {"from": "agent", "to": "end"},
+                    ],
+                    "agents": [{"id": "worker", "role": "Worker", "goal": "Use compact context."}],
+                }
+            )
+            executor = CapturingExecutor()
+
+            result = WorkflowRunner(workflow, agent_executor=executor).run(
+                "x" * 8000,
+                tmp,
+                initial_data={},
             )
 
             self.assertEqual(result.status, "blocked")

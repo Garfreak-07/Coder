@@ -7,6 +7,8 @@ import type {
   LibraryIndex,
   LiveRunDetail,
   PreflightResult,
+  ProviderSettings,
+  ProviderStatus,
   RunEvent,
   RunEventsPage,
   RunSummaryItem,
@@ -34,6 +36,35 @@ export function getLibrary(): Promise<LibraryIndex> {
 
 export function getHealth(): Promise<HealthStatus> {
   return requestJson<HealthStatus>("/api/v2/health");
+}
+
+export async function getProviderSettings(): Promise<ProviderSettings> {
+  const payload = await requestJson<{ settings: ProviderSettings }>("/api/v2/providers/settings");
+  return payload.settings;
+}
+
+export function getProviderStatus(): Promise<ProviderStatus> {
+  return requestJson<ProviderStatus>("/api/v2/providers/status");
+}
+
+export async function saveProviderSettings(input: Record<string, unknown>): Promise<{
+  settings: ProviderSettings;
+  status: ProviderStatus;
+}> {
+  return requestJson("/api/v2/providers/settings", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify(input)
+  });
+}
+
+export async function testProvider(provider: string): Promise<ProviderStatus> {
+  const payload = await requestJson<{ status: ProviderStatus }>("/api/v2/providers/test", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ provider })
+  });
+  return payload.status;
 }
 
 export async function getRuns(): Promise<RunSummaryItem[]> {

@@ -31,8 +31,9 @@ class LiveRun:
 
 
 class RunManager:
-    def __init__(self, store: RunStore) -> None:
+    def __init__(self, store: RunStore, runner_factory: Any | None = None) -> None:
         self.store = store
+        self.runner_factory = runner_factory
         self._runs: dict[str, LiveRun] = {}
         self._lock = Lock()
         self._load_persisted_live_runs()
@@ -160,6 +161,8 @@ class RunManager:
                 ]
                 status = payload.get("status", "failed")
                 if status in {"queued", "running"}:
+                    status = "blocked" if self._is_recoverable_blocked_result(result) else "failed"
+                if status == "blocked" and not self._is_recoverable_blocked_result(result):
                     status = "failed"
                 live = LiveRun(
                     id=str(payload["id"]),
@@ -171,11 +174,19 @@ class RunManager:
                     events=events,
                     result=result,
                     stored_run_id=payload.get("stored_run_id"),
-                    error=payload.get("error"),
+                    error=None if status == "blocked" else payload.get("error"),
                 )
                 self._runs[live.id] = live
             except Exception:
                 continue
+
+    def _is_recoverable_blocked_result(self, result: RunResult | None) -> bool:
+        return bool(
+            result
+            and result.status == "blocked"
+            and result.blocked_node_id
+            and result.resume_checkpoint
+        )
 
     def stream(self, run_id: str):
         run = self.get(run_id)
@@ -218,6 +229,7 @@ class RunManager:
                 resume_checkpoint=resume_checkpoint,
                 prior_events=prior_events,
                 resume_after_node=resume_after_node,
+                runner_factory=self.runner_factory,
             )
             run.result = result
             stored = self.store.save(

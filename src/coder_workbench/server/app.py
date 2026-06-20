@@ -12,8 +12,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from coder_workbench.core import WorkflowSpec, load_workflow
 from coder_workbench.core.preflight import validate_workflow_preflight
 from coder_workbench.runtime import run_workflow
+from coder_workbench.runtime.runner import WorkflowRunner
 from coder_workbench.server.library import LibraryStore
 from coder_workbench.server.manager import RunManager
+from coder_workbench.server.settings import ProviderSettingsStore, provider_status, workflow_provider_status
 from coder_workbench.server.storage import RunStore
 from coder_workbench.tools import default_tool_registry
 from coder_workbench.tools.filesystem import normalize_scope_paths, resolve_existing_dir
@@ -48,11 +50,16 @@ class RollbackRequest(BaseModel):
     scopes: list[str] = Field(default_factory=list)
 
 
+class ProviderSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+
 def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | None = None) -> FastAPI:
     app = FastAPI(title="Coder Runtime API", version="0.1.0")
     store = RunStore(store_root)
+    settings_store = ProviderSettingsStore(store_root)
     library = LibraryStore(Path(store_root) / "library")
-    manager = RunManager(store)
+    manager = RunManager(store, runner_factory=lambda workflow: WorkflowRunner(workflow, runtime_settings=settings_store.load()))
 
     @app.get("/api/v2/health")
     def health() -> dict[str, Any]:
@@ -60,6 +67,25 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
             "status": "ok",
             "tools": default_tool_registry().names(),
         }
+
+    @app.get("/api/v2/providers/settings")
+    def get_provider_settings() -> dict[str, Any]:
+        return {"settings": settings_store.response()}
+
+    @app.post("/api/v2/providers/settings")
+    def save_provider_settings(body: ProviderSettingsRequest) -> dict[str, Any]:
+        settings = settings_store.save(body.model_dump(mode="json"))
+        return {"settings": settings_store.response(), "status": provider_status(settings)}
+
+    @app.get("/api/v2/providers/status")
+    def get_provider_status() -> dict[str, Any]:
+        return provider_status(settings_store.load())
+
+    @app.post("/api/v2/providers/test")
+    def test_provider_settings(body: ProviderSettingsRequest) -> dict[str, Any]:
+        settings = settings_store.load()
+        provider = body.model_dump(mode="json").get("provider") or settings.default_provider
+        return {"status": provider_status(settings, [str(provider).strip().lower()])}
 
     @app.get("/api/v2/library")
     def library_index() -> dict[str, Any]:
@@ -108,6 +134,7 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
             request=body.request,
             repo_root=str(repo_root),
             initial_data=initial_data,
+            runner_factory=lambda spec: WorkflowRunner(spec, runtime_settings=settings_store.load()),
         )
         stored = store.save(
             workflow_id=workflow.id,
@@ -285,6 +312,7 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
             spec,
             registered_tools=registry.names(),
             tool_capabilities=registry.capabilities(),
+            provider_status=workflow_provider_status(settings_store.load(), spec),
         )
 
     @app.get("/api/v2/live-runs/{run_id}/events")

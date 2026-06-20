@@ -22,6 +22,7 @@ class RunStoreTests(unittest.TestCase):
             self.assertTrue((run_dir / "metadata.json").exists())
             self.assertTrue((run_dir / "result.json").exists())
             self.assertTrue((run_dir / "events.jsonl").exists())
+            self.assertTrue((root / "runs" / "index.sqlite").exists())
             self.assertFalse((root / "runs" / f"{stored.id}.json").exists())
 
             loaded = store.get(stored.id)

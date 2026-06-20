@@ -4,7 +4,7 @@ import json
 from typing import Any, Protocol
 
 from coder_workbench.core import AgentSpec
-from coder_workbench.config import load_runtime_config
+from coder_workbench.config import RuntimeConfig, load_runtime_config
 from coder_workbench.llm import create_chat_model
 
 
@@ -21,8 +21,22 @@ class DefaultAgentExecutor:
     routing can be developed and tested without spending tokens.
     """
 
+    def __init__(self, runtime_settings: Any | None = None) -> None:
+        self.runtime_settings = runtime_settings
+
     def run(self, agent: AgentSpec, context: dict[str, Any]) -> dict[str, Any]:
-        config = load_runtime_config(agent.provider, agent.model)
+        if self.runtime_settings is not None:
+            from coder_workbench.server.settings import resolve_settings_config
+
+            values = resolve_settings_config(self.runtime_settings, agent.provider, agent.model)
+            config = RuntimeConfig(
+                provider=str(values["provider"]),
+                model=str(values["model"]),
+                api_key=values["api_key"],
+                base_url=values["base_url"],
+            )
+        else:
+            config = load_runtime_config(agent.provider, agent.model)
         if not config.has_llm_credentials:
             return self._mock(agent, context)
 

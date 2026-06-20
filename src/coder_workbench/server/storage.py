@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
+import time
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -50,12 +52,14 @@ class RunStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root)
         self.runs_dir = self.root / "runs"
+        self.index_path = self.runs_dir / "index.sqlite"
         self.live_runs_dir = self.root / "live-runs"
         self.blobs_dir = self.root / "blobs"
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.live_runs_dir.mkdir(parents=True, exist_ok=True)
         self.blobs_dir.mkdir(parents=True, exist_ok=True)
         self._lock = Lock()
+        self._init_index()
 
     def save(self, workflow_id: str, repo_root: str, request: str, result: RunResult) -> StoredRun:
         stored = StoredRun(workflow_id=workflow_id, repo_root=repo_root, request=request, result=result)
@@ -77,6 +81,7 @@ class RunStore:
                 estimated_tokens_used=result.estimated_tokens_used,
             )
             (run_dir / "metadata.json").write_text(metadata.model_dump_json(indent=2), encoding="utf-8")
+            self._upsert_index(metadata, updated_at=time.time())
             result_payload = result.model_dump(mode="json")
             result_payload["events"] = []
             result_payload["artifacts"] = self._write_artifacts(run_dir, result.artifacts)
@@ -108,6 +113,16 @@ class RunStore:
         )
 
     def list(self) -> list[dict[str, Any]]:
+        indexed = self._list_from_index()
+        if indexed:
+            return indexed
+
+        runs = self._scan_run_metadata()
+        if runs:
+            self._rebuild_index(runs)
+        return runs
+
+    def _scan_run_metadata(self) -> list[dict[str, Any]]:
         runs: list[dict[str, Any]] = []
         items = list(self.runs_dir.glob("*/metadata.json")) + list(self.runs_dir.glob("*.json"))
         for path in sorted(items, key=lambda item: item.stat().st_mtime, reverse=True):
@@ -133,6 +148,98 @@ class RunStore:
                 }
             )
         return runs
+
+    def _init_index(self) -> None:
+        with sqlite3.connect(self.index_path) as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS runs (
+                    id TEXT PRIMARY KEY,
+                    workflow_id TEXT NOT NULL,
+                    repo_root TEXT NOT NULL,
+                    request TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    events INTEGER NOT NULL,
+                    agent_calls INTEGER NOT NULL,
+                    tool_calls INTEGER NOT NULL,
+                    estimated_tokens_used INTEGER NOT NULL,
+                    updated_at REAL NOT NULL
+                )
+                """
+            )
+
+    def _upsert_index(self, metadata: StoredRunMetadata, *, updated_at: float) -> None:
+        with sqlite3.connect(self.index_path) as connection:
+            connection.execute(
+                """
+                INSERT INTO runs (
+                    id, workflow_id, repo_root, request, status, events,
+                    agent_calls, tool_calls, estimated_tokens_used, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    workflow_id=excluded.workflow_id,
+                    repo_root=excluded.repo_root,
+                    request=excluded.request,
+                    status=excluded.status,
+                    events=excluded.events,
+                    agent_calls=excluded.agent_calls,
+                    tool_calls=excluded.tool_calls,
+                    estimated_tokens_used=excluded.estimated_tokens_used,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    metadata.id,
+                    metadata.workflow_id,
+                    metadata.repo_root,
+                    metadata.request,
+                    metadata.status,
+                    metadata.events,
+                    metadata.agent_calls,
+                    metadata.tool_calls,
+                    metadata.estimated_tokens_used,
+                    updated_at,
+                ),
+            )
+
+    def _list_from_index(self) -> list[dict[str, Any]]:
+        with sqlite3.connect(self.index_path) as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(
+                """
+                SELECT id, workflow_id, repo_root, request, status, events,
+                       agent_calls, tool_calls, estimated_tokens_used
+                FROM runs
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _rebuild_index(self, runs: list[dict[str, Any]]) -> None:
+        with sqlite3.connect(self.index_path) as connection:
+            connection.execute("DELETE FROM runs")
+            for index, run in enumerate(reversed(runs)):
+                connection.execute(
+                    """
+                    INSERT OR REPLACE INTO runs (
+                        id, workflow_id, repo_root, request, status, events,
+                        agent_calls, tool_calls, estimated_tokens_used, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run["id"],
+                        run["workflow_id"],
+                        run["repo_root"],
+                        run["request"],
+                        run["status"],
+                        int(run["events"]),
+                        int(run["agent_calls"]),
+                        int(run["tool_calls"]),
+                        int(run["estimated_tokens_used"]),
+                        time.time() + index,
+                    ),
+                )
 
     def get_events(self, run_id: str, *, cursor: int = 0, limit: int | None = None) -> dict[str, Any]:
         if cursor < 0:

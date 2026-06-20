@@ -23,6 +23,8 @@ import {
   getLibrary,
   getLiveRun,
   getLiveRuns,
+  getProviderSettings,
+  getProviderStatus,
   getRun,
   getRunEvents,
   getRuns,
@@ -30,9 +32,11 @@ import {
   getWorkflow,
   rollbackPatch,
   saveAgent,
+  saveProviderSettings,
   saveWorkflow,
   startLiveRun,
   subscribeRunEvents,
+  testProvider,
   validateWorkflow
 } from "./api";
 import { codingWorkbenchWorkflow } from "./examples";
@@ -48,6 +52,9 @@ import type {
   NodeSpec,
   NodeType,
   PreflightResult,
+  ProviderSettings,
+  ProviderStatus,
+  ProviderStatusItem,
   RunEvent,
   RunSummaryItem,
   StoredRunDetail,
@@ -75,6 +82,14 @@ interface PreflightToolFact {
   requiresApproval: boolean;
 }
 
+interface ProviderFormState {
+  default_provider: string;
+  default_model: string;
+  base_url: string;
+  api_key: string;
+  mock_mode: boolean;
+}
+
 export function App() {
   const [library, setLibrary] = useState<LibraryIndex>({ agents: [], workflows: [] });
   const [workflow, setWorkflow] = useState<WorkflowSpec>(workflowTemplate);
@@ -97,6 +112,15 @@ export function App() {
   const [runHistory, setRunHistory] = useState<RunSummaryItem[]>([]);
   const [liveRuns, setLiveRuns] = useState<RunSummaryItem[]>([]);
   const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [providerSettings, setProviderSettings] = useState<ProviderSettings | null>(null);
+  const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(null);
+  const [providerForm, setProviderForm] = useState<ProviderFormState>({
+    default_provider: "openai",
+    default_model: "gpt-4.1-mini",
+    base_url: "",
+    api_key: "",
+    mock_mode: true
+  });
   const [selectedRunDetail, setSelectedRunDetail] = useState<StoredRunDetail | LiveRunDetail | null>(null);
   const [selectedRunKind, setSelectedRunKind] = useState<"live" | "stored" | null>(null);
   const [pendingPreflight, setPendingPreflight] = useState<PendingPreflightRun | null>(null);
@@ -119,6 +143,7 @@ export function App() {
   useEffect(() => {
     refreshLibrary();
     refreshRuntimeInfo();
+    refreshProviderInfo();
   }, []);
 
   function refreshLibrary() {
@@ -135,6 +160,65 @@ export function App() {
         setHealth(nextHealth);
       })
       .catch((error) => setStatus(`Failed to load runtime info: ${error.message}`));
+  }
+
+  function refreshProviderInfo() {
+    Promise.all([getProviderSettings(), getProviderStatus()])
+      .then(([settings, status]) => {
+        setProviderSettings(settings);
+        setProviderStatus(status);
+        const provider = settings.default_provider || status.default_provider || "openai";
+        setProviderForm({
+          default_provider: provider,
+          default_model: settings.default_model || status.default_model || "gpt-4.1-mini",
+          base_url: settings.base_urls[provider] ?? "",
+          api_key: "",
+          mock_mode: settings.mock_mode
+        });
+      })
+      .catch((error) => setStatus(`Failed to load provider settings: ${error.message}`));
+  }
+
+  async function persistProviderSettings() {
+    const provider = providerForm.default_provider.trim().toLowerCase() || "openai";
+    const baseUrls = { ...(providerSettings?.base_urls ?? {}) };
+    if (providerForm.base_url.trim()) {
+      baseUrls[provider] = providerForm.base_url.trim();
+    } else {
+      delete baseUrls[provider];
+    }
+    const payload: Record<string, unknown> = {
+      default_provider: provider,
+      default_model: providerForm.default_model.trim() || "gpt-4.1-mini",
+      base_urls: baseUrls,
+      mock_mode: providerForm.mock_mode
+    };
+    if (providerForm.api_key.trim()) {
+      payload.api_keys = { [provider]: providerForm.api_key.trim() };
+    }
+    setStatus(`Saving provider ${provider}...`);
+    try {
+      const result = await saveProviderSettings(payload);
+      setProviderSettings(result.settings);
+      setProviderStatus(result.status);
+      setProviderForm((current) => ({ ...current, default_provider: provider, api_key: "" }));
+      setStatus(`Provider ${provider} saved.`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function runProviderTest() {
+    const provider = providerForm.default_provider.trim().toLowerCase() || "openai";
+    setStatus(`Checking provider ${provider}...`);
+    try {
+      const result = await testProvider(provider);
+      setProviderStatus(result);
+      const item = result.providers[0] ?? result.default_status;
+      setStatus(`Provider ${provider}: ${item.mode}, credentials ${item.credential_source}`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function openStoredRun(runId: string) {
@@ -602,6 +686,29 @@ export function App() {
         </section>
 
         <section className="panel">
+          <div className="panel-title">Provider Settings</div>
+          <ProviderSettingsPanel
+            form={providerForm}
+            settings={providerSettings}
+            status={providerStatus}
+            onChange={(patch) => {
+              const nextProvider = patch.default_provider?.trim().toLowerCase();
+              setProviderForm((current) => {
+                const merged = { ...current, ...patch };
+                if (nextProvider && nextProvider !== current.default_provider) {
+                  merged.base_url = providerSettings?.base_urls[nextProvider] ?? "";
+                  merged.api_key = "";
+                }
+                return merged;
+              });
+            }}
+            onSave={persistProviderSettings}
+            onRefresh={refreshProviderInfo}
+            onTest={runProviderTest}
+          />
+        </section>
+
+        <section className="panel">
           <div className="panel-title">{t.runtime.title}</div>
           <button onClick={refreshRuntimeInfo}>{t.runtime.refresh}</button>
           <div className="summary-grid">
@@ -758,7 +865,7 @@ export function App() {
             <div className="muted">{t.events.empty}</div>
           ) : (
             events.map((event, index) => (
-              <div className="event-row" key={event.id ?? `${event.type}-${index}`}>
+              <div className="event-row" id={eventDomId(event)} key={event.id ?? `${event.type}-${index}`}>
                 <div className="event-heading">
                   <strong>{event.type}</strong>
                   {event.node_id && <code>{event.node_id}</code>}
@@ -817,6 +924,7 @@ function PreflightModal({
   const errors = result.issues.filter((issue) => issue.level === "error");
   const warnings = result.issues.filter((issue) => issue.level === "warning");
   const canStart = result.status !== "error";
+  const providerStatuses = preflightProviderStatuses(result);
 
   return (
     <div className="modal-backdrop" role="presentation">
@@ -838,6 +946,28 @@ function PreflightModal({
           <span>{t.preflight.tokenBudget(facts.tokenBudget)}</span>
           <span>{t.preflight.stepBudget(facts.maxSteps)}</span>
           <span>{t.preflight.toolBudget(facts.maxToolCalls)}</span>
+        </div>
+
+        <div className="preflight-section">
+          <div className="panel-subtitle">Provider</div>
+          {providerStatuses.length === 0 ? (
+            <div className="muted">No provider status returned.</div>
+          ) : (
+            <div className="provider-status-list">
+              {providerStatuses.map((provider) => (
+                <div className="tool-risk-row" key={provider.provider}>
+                  <span>{provider.provider}</span>
+                  <span>
+                    {provider.mode} · {provider.credential_source}
+                    {provider.base_url ? ` · ${provider.base_url}` : ""}
+                  </span>
+                  <span className={`status-pill ${provider.configured ? "good" : "warn"}`}>
+                    {provider.configured ? "ready" : "mock"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="preflight-section">
@@ -961,6 +1091,19 @@ function preflightFacts(workflow: WorkflowSpec, scopes: string[], result: Prefli
           requiresApproval: false
         }))
   };
+}
+
+function preflightProviderStatuses(result: PreflightResult): ProviderStatusItem[] {
+  const providerStatus = objectValue(result.summary?.provider_status);
+  const providers = objectList(providerStatus?.providers);
+  return providers.map((provider) => ({
+    provider: String(provider.provider ?? "unknown"),
+    configured: Boolean(provider.configured),
+    credential_configured: Boolean(provider.credential_configured),
+    credential_source: String(provider.credential_source ?? "unknown"),
+    base_url: typeof provider.base_url === "string" ? provider.base_url : null,
+    mode: String(provider.mode ?? "unknown")
+  }));
 }
 
 function numberFromSummary(value: unknown, fallback: number): number {
@@ -1278,6 +1421,8 @@ function PatchPanel({
 }) {
   const [loadedToolResults, setLoadedToolResults] = useState<Record<string, Record<string, unknown>>>({});
   const [toolResultErrors, setToolResultErrors] = useState<Record<string, string>>({});
+  const [rollbackResult, setRollbackResult] = useState<Record<string, unknown> | null>(null);
+  const [rollbackLoading, setRollbackLoading] = useState(false);
   const toolResultIds = useMemo(() => storedToolResultIds(events), [events]);
   const toolResultKey = toolResultIds.join("|");
 
@@ -1318,15 +1463,23 @@ function PatchPanel({
   const applyErrors = Array.isArray(apply?.errors) ? apply.errors : [];
   const isLoadingToolResult = runId ? toolResultIds.some((id) => !loadedToolResults[id] && !toolResultErrors[id]) : false;
   const toolResultErrorMessages = Object.values(toolResultErrors);
+  const relatedObjects = useMemo(() => relatedPatchObjects(events), [events]);
 
   async function rollback() {
     if (!snapshotId) return;
     onStatus(`Rolling back snapshot ${snapshotId}...`);
+    setRollbackLoading(true);
+    setRollbackResult(null);
     try {
       const result = await rollbackPatch({ repo, snapshot_id: snapshotId, scopes });
+      setRollbackResult(result.rollback);
       onStatus(String(result.rollback.message ?? `Rolled back ${snapshotId}`));
     } catch (error) {
-      onStatus(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setRollbackResult({ status: "failed", message });
+      onStatus(message);
+    } finally {
+      setRollbackLoading(false);
     }
   }
 
@@ -1334,6 +1487,23 @@ function PatchPanel({
 
   return (
     <div className="patch-panel">
+      {(relatedObjects.artifacts.length > 0 || relatedObjects.contexts.length > 0) && (
+        <div>
+          <div className="panel-subtitle">Related Run Objects</div>
+          <div className="object-links">
+            {relatedObjects.artifacts.map((item) => (
+              <a href={`#${eventDomId(item.event)}`} key={item.event.id}>
+                {item.type}: {item.id.slice(0, 12)}
+              </a>
+            ))}
+            {relatedObjects.contexts.map((item) => (
+              <a href={`#${eventDomId(item.event)}`} key={item.event.id}>
+                context: {item.id.slice(0, 12)}
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
       {patch && (
         <div>
           <div className="panel-subtitle">Patch Preview</div>
@@ -1382,7 +1552,22 @@ function PatchPanel({
               })}
             </div>
           )}
-          {snapshotId && <button onClick={rollback}>Rollback snapshot</button>}
+          {snapshotId && (
+            <button onClick={rollback} disabled={rollbackLoading}>
+              {rollbackLoading ? "Rolling back..." : "Rollback snapshot"}
+            </button>
+          )}
+          {rollbackResult && (
+            <div className="rollback-status">
+              <div className="panel-subtitle">Rollback Status</div>
+              <div className="summary-grid">
+                <span>{String(rollbackResult.status ?? "unknown")}</span>
+                <span>{String(rollbackResult.snapshot_id ?? snapshotId ?? "no snapshot")}</span>
+                <span>{Array.isArray(rollbackResult.restored) ? `${rollbackResult.restored.length} files` : "files unknown"}</span>
+              </div>
+              {typeof rollbackResult.message !== "undefined" && <div className="muted">{String(rollbackResult.message)}</div>}
+            </div>
+          )}
         </div>
       )}
       {check && (
@@ -1449,6 +1634,111 @@ function TemplateCard({
       <button onClick={() => onUse(template)}>{t.templates.useTemplate}</button>
     </article>
   );
+}
+
+function ProviderSettingsPanel({
+  form,
+  settings,
+  status,
+  onChange,
+  onSave,
+  onRefresh,
+  onTest
+}: {
+  form: ProviderFormState;
+  settings: ProviderSettings | null;
+  status: ProviderStatus | null;
+  onChange: (patch: Partial<ProviderFormState>) => void;
+  onSave: () => void;
+  onRefresh: () => void;
+  onTest: () => void;
+}) {
+  const provider = form.default_provider.trim().toLowerCase() || "openai";
+  const currentStatus =
+    status?.providers.find((item) => item.provider === provider) ??
+    (status?.default_status.provider === provider ? status.default_status : null);
+  const keyState = settings?.api_keys[provider];
+
+  return (
+    <div className="form-stack">
+      <label>
+        Provider
+        <select value={form.default_provider} onChange={(event) => onChange({ default_provider: event.target.value })}>
+          {["openai", "deepseek", "openai-compatible", "qwen", "moonshot", "ollama"].map((providerName) => (
+            <option key={providerName} value={providerName}>
+              {providerName}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label>
+        Model
+        <input value={form.default_model} onChange={(event) => onChange({ default_model: event.target.value })} />
+      </label>
+      <label>
+        Base URL
+        <input
+          placeholder="Provider default"
+          value={form.base_url}
+          onChange={(event) => onChange({ base_url: event.target.value })}
+        />
+      </label>
+      <label>
+        API Key
+        <input
+          type="password"
+          placeholder={keyState?.configured ? `${keyState.source}: configured` : "Leave blank to keep current value"}
+          value={form.api_key}
+          onChange={(event) => onChange({ api_key: event.target.value })}
+        />
+      </label>
+      <label className="checkbox-row">
+        <input
+          type="checkbox"
+          checked={form.mock_mode}
+          onChange={(event) => onChange({ mock_mode: event.target.checked })}
+        />
+        Use mock output when credentials are missing
+      </label>
+      {currentStatus && (
+        <div className="summary-grid provider-summary">
+          <span>{currentStatus.mode}</span>
+          <span>{currentStatus.credential_source}</span>
+          <span>{currentStatus.configured ? "configured" : "missing"}</span>
+          <span>{currentStatus.base_url ?? "default URL"}</span>
+        </div>
+      )}
+      <div className="button-row">
+        <button onClick={onSave}>Save</button>
+        <button onClick={onTest}>Test</button>
+        <button onClick={onRefresh}>Refresh</button>
+      </div>
+    </div>
+  );
+}
+
+function relatedPatchObjects(events: RunEvent[]) {
+  const artifacts = events
+    .filter((event) => event.type === "artifact.produced")
+    .map((event) => {
+      const type = String(event.payload?.artifact_type ?? "artifact");
+      const id = String(event.payload?.artifact_id ?? event.id ?? "artifact");
+      return { event, type, id };
+    })
+    .filter((item) => item.type === "patch_artifact" || item.type === "plan_artifact")
+    .slice(-4);
+  const contexts = events
+    .filter((event) => event.type === "agent.context_packet")
+    .map((event) => {
+      const id = String(event.payload?.packet_id ?? event.id ?? "context");
+      return { event, id };
+    })
+    .slice(-4);
+  return { artifacts, contexts };
+}
+
+function eventDomId(event: RunEvent): string {
+  return `event-${String(event.id ?? event.type).replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
 function RunDetailCard({

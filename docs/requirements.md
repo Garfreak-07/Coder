@@ -799,6 +799,19 @@ Implemented:
 - run-start Preflight UI that blocks errors and requires confirmation for
   warnings while showing issues, permissions, scopes, tool risk, and budget
   summaries;
+- provider settings API/UI for default provider, default model,
+  OpenAI-compatible base URLs, keyed credentials, connection status, and mock
+  mode without returning secret values to the frontend;
+- provider status in workflow Preflight so runs expose missing credentials or
+  mock-mode behavior before agent execution;
+- durable blocked live-run recovery after API process restart, including
+  approval resume from persisted checkpoints;
+- token budget overflow handling that compacts or drops low-priority context
+  before blocking when the compacted packet still exceeds budget;
+- `runs/index.sqlite` run index for listing run metadata without reading full
+  run payloads;
+- Patch Approval panel links to related PatchArtifact/ContextPacket events and
+  displays rollback progress and result status;
 - GitHub Actions CI for Python tests, Python compile checks, and frontend build;
 - lazy loading for additional stored run events in the UI;
 - FastAPI runtime API;
@@ -813,29 +826,20 @@ Implemented:
 Near-term work should prioritize the `Coder v0.3 - Trust Runtime` foundation:
 
 1. Kernel contracts:
-   - add provider status and connection checks to the run-start Preflight UI;
    - enforce artifact schema failures in live recovery paths as clearly as
      synchronous runs.
 2. Storage separation:
    - continue moving snapshots and any remaining raw outputs into Blob storage
      and object references;
-   - add a lightweight run index so listing runs does not require scanning run
-     directories;
    - add orphan blob cleanup when deleting historical runs.
 3. Default workflow productization:
-   - strengthen Patch Approval to show diff, affected files, rollback status,
-     and related artifact/context links;
    - keep all file writes on the patch preview -> approval -> snapshot -> apply
      path.
 4. Recovery and replay:
-   - expand persisted blocked run snapshots into active resume after API process
-     restart;
    - add retry-current-node behavior;
    - group loop replay by iteration and show each iteration's ContextPacket and
      Artifact links.
 5. Experience hardening:
-   - add provider settings UI for OpenAI, DeepSeek, OpenAI-compatible base URL,
-     default model, connection test, and mock mode;
    - improve project summaries and candidate check detection;
    - add run history filtering/search and standardized failure reasons.
 
