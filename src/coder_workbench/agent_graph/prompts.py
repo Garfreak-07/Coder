@@ -75,6 +75,26 @@ def build_tester_prompt(
     )
 
 
+def build_final_tester_prompt(
+    *,
+    final_tester: AgentWorkflowAgent,
+    bundle: PlannerInputBundle,
+) -> str:
+    return "\n\n".join(
+        [
+            _json_only_header("test_result"),
+            "You are the Final Tester Agent. Aggregate local tester evidence across the full PlannerInputBundle.",
+            "Return one test_result for the whole round, not per-work-item output.",
+            "Do not ask the human. Do not make global continue/finish decisions.",
+            _test_result_schema_notes(),
+            "Final Tester Agent JSON:",
+            _compact_json(_agent_summary(final_tester)),
+            "PlannerInputBundle JSON:",
+            _compact_json(bundle.model_dump(mode="json", exclude_none=True)),
+        ]
+    )
+
+
 def build_planner_decision_prompt(
     *,
     planner: AgentWorkflowAgent,

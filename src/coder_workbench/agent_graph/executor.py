@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from coder_workbench.agent_graph.prompts import (
     build_planner_decision_prompt,
     build_planner_order_prompt,
+    build_final_tester_prompt,
     build_tester_prompt,
     build_worker_execution_prompt,
     schema_notes_for_artifact,
@@ -15,6 +16,7 @@ from coder_workbench.agent_graph.repair import build_repair_prompt, parse_json_o
 from coder_workbench.agent_graph.schema import (
     AgentTaskEnvelope,
     ExecutionRecord,
+    FinalTestRecord,
     PlannerInputBundle,
     PlannerOrder,
     TestRecord,
@@ -66,6 +68,15 @@ class AgentGraphExecutorProtocol(Protocol):
         planner_human_response: dict[str, Any] | None = None,
         emit: EmitEvent | None = None,
     ) -> dict[str, Any]:
+        ...
+
+    def create_final_test_result(
+        self,
+        *,
+        bundle: PlannerInputBundle,
+        final_tester_agent_id: str,
+        emit: EmitEvent | None = None,
+    ) -> FinalTestRecord:
         ...
 
 
@@ -254,6 +265,74 @@ class AgentGraphExecutor:
             },
             emit=emit,
             failure_status_code="planner_decision_schema_failed",
+        )
+
+    def create_final_test_result(
+        self,
+        *,
+        bundle: PlannerInputBundle,
+        final_tester_agent_id: str,
+        emit: EmitEvent | None = None,
+    ) -> FinalTestRecord:
+        final_tester = self._agent(final_tester_agent_id)
+        payload = self._invoke_or_mock(
+            artifact_type="test_result",
+            agent_id=final_tester.id,
+            prompt=build_final_tester_prompt(final_tester=final_tester, bundle=bundle),
+            mock_payload={
+                "artifact_type": "test_result",
+                "round": bundle.round,
+                "tester_agent_id": final_tester_agent_id,
+                "status": _aggregate_test_status(bundle),
+                "summary": _aggregate_test_summary(bundle),
+                "evidence": [ref for item in bundle.items for ref in item.refs],
+                "issues": [],
+                "remaining_work": _aggregate_remaining_work(bundle),
+                "confidence": "medium",
+                "check_commands": [],
+                "check_outputs_ref": None,
+            },
+            emit=emit,
+            fallback_payload={
+                "artifact_type": "test_result",
+                "round": bundle.round,
+                "tester_agent_id": final_tester_agent_id,
+                "status": "blocked",
+                "summary": "Final tester output did not match test_result schema after one repair.",
+                "remaining_work": ["schema_validation_failed"],
+                "confidence": "low",
+            },
+        )
+        payload = _with_forced_fields(
+            payload,
+            {
+                "artifact_type": "test_result",
+                "round": bundle.round,
+                "tester_agent_id": final_tester_agent_id,
+            },
+        )
+        artifact = self._validate_payload(
+            payload,
+            artifact_type="test_result",
+            agent_id=final_tester.id,
+            emit=emit,
+            fallback_payload={
+                "artifact_type": "test_result",
+                "round": bundle.round,
+                "tester_agent_id": final_tester_agent_id,
+                "status": "blocked",
+                "summary": "Final tester output did not match test_result schema after one repair.",
+                "remaining_work": ["schema_validation_failed"],
+                "confidence": "low",
+            },
+        )
+        return FinalTestRecord(
+            round=bundle.round,
+            final_tester_agent_id=final_tester_agent_id,
+            status=artifact["status"],
+            summary=artifact["summary"],
+            final_test_result_ref=_artifact_ref("test_result", "final", final_tester_agent_id),
+            artifact_payload=artifact,
         )
 
     def _invoke_or_mock(
@@ -591,6 +670,29 @@ def _artifact_ref(artifact_type: str, *parts: Any) -> str:
 
 def _is_tester(agent: AgentWorkflowAgent) -> bool:
     return agent.role in {"tester", "reviewer"} or any("test" in capability for capability in agent.capabilities)
+
+
+def _aggregate_test_status(bundle: PlannerInputBundle) -> str:
+    if any(item.execution_status == "blocked" or item.test_status == "blocked" for item in bundle.items):
+        return "blocked"
+    if any(item.execution_status == "failed" or item.test_status == "fail" for item in bundle.items):
+        return "fail"
+    return "pass"
+
+
+def _aggregate_test_summary(bundle: PlannerInputBundle) -> str:
+    if not bundle.items:
+        return "No work items required final aggregation."
+    status = _aggregate_test_status(bundle)
+    return f"Final tester aggregate status is {status} for {len(bundle.items)} work item(s)."
+
+
+def _aggregate_remaining_work(bundle: PlannerInputBundle) -> list[str]:
+    return [
+        item.summary
+        for item in bundle.items
+        if item.execution_status in {"blocked", "failed"} or item.test_status in {"blocked", "fail"}
+    ]
 
 
 def _safe_id(value: str) -> str:

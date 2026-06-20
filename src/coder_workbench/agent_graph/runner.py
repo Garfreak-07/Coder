@@ -14,7 +14,7 @@ from coder_workbench.agent_graph.executor import (
 )
 from coder_workbench.agent_graph.merge import build_planner_input_bundle, build_round_summary
 from coder_workbench.agent_graph.scheduler import AgentGraphScheduler, ReadyWave
-from coder_workbench.agent_graph.schema import ExecutionRecord, PlannerOrder, TestRecord, WorkItemOutcome
+from coder_workbench.agent_graph.schema import FinalTestRecord, ExecutionRecord, PlannerOrder, TestRecord, WorkItemOutcome
 from coder_workbench.agent_graph.validation import assert_valid_planner_order
 from coder_workbench.core import (
     AgentWorkflowSpec,
@@ -270,6 +270,26 @@ class AgentGraphRunner:
             if hidden_effects:
                 data["hidden_effects"] = hidden_effects
                 self._emit_hidden_effect_outputs(cache, hidden_effects, emit)
+
+            final_tester_agent_id = planner_order.plan_graph.final_tester_agent_id
+            if final_tester_agent_id:
+                pre_final_bundle = build_planner_input_bundle(cache)
+                final_test = cache.record_final_test(
+                    self.executor.create_final_test_result(
+                        bundle=pre_final_bundle,
+                        final_tester_agent_id=final_tester_agent_id,
+                        emit=emit,
+                    )
+                )
+                self._record_final_test_artifact(recorder, final_test)
+                emit(
+                    "test.final.completed",
+                    "Final tester aggregation completed",
+                    round=cache.round,
+                    final_tester_agent_id=final_test.final_tester_agent_id,
+                    test_result_ref=final_test.final_test_result_ref,
+                    status=final_test.status,
+                )
             data["graph_run_cache"] = cache.as_runtime_payload()
 
             planner_input_bundle = build_planner_input_bundle(cache)
@@ -498,6 +518,26 @@ class AgentGraphRunner:
         }
         return recorder.record(
             test.test_result_ref or graph_artifact_id("test_result", test.work_item_id, test.tester_agent_id),
+            payload,
+            expected_type="test_result",
+        )
+
+    def _record_final_test_artifact(
+        self,
+        recorder: AgentGraphArtifactRecorder,
+        final_test: FinalTestRecord,
+    ) -> dict[str, Any] | None:
+        if not final_test.final_test_result_ref:
+            return None
+        payload = final_test.artifact_payload or {
+            "artifact_type": "test_result",
+            "round": final_test.round,
+            "tester_agent_id": final_test.final_tester_agent_id,
+            "status": final_test.status,
+            "summary": final_test.summary,
+        }
+        return recorder.record(
+            final_test.final_test_result_ref,
             payload,
             expected_type="test_result",
         )

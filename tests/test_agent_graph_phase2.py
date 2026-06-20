@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from coder_workbench.agent_graph.cache import GraphRunCache
 from coder_workbench.agent_graph.runner import AgentGraphRunner
 from coder_workbench.agent_graph.schema import ExecutionRecord, PlannerOrder, TestRecord, WorkItem
-from coder_workbench.core import default_planner_led_agent_workflow
+from coder_workbench.core import AgentWorkflowSpec, default_planner_led_agent_workflow
 from coder_workbench.server.storage import RunStore
 
 
@@ -164,6 +164,72 @@ class AgentGraphRunnerPhase2Tests(unittest.TestCase):
 
         self.assertEqual(loaded["artifact_type"], "planner_input_bundle")
         self.assertEqual(loaded["items"][0]["work_item_id"], "executor-work")
+
+    def test_runner_records_final_tester_aggregate(self) -> None:
+        planner_order = {
+            "artifact_type": "planner_order",
+            "round": 1,
+            "round_goal": "Aggregate test evidence.",
+            "plan_graph": {
+                "work_items": [
+                    {
+                        "work_item_id": "executor-work",
+                        "merge_index": 1,
+                        "assignee_agent_id": "executor",
+                        "task_summary": "Run work.",
+                        "depends_on": [],
+                        "tester_agent_ids": ["tester", "tester2"],
+                    }
+                ],
+                "final_tester_agent_id": "final_tester",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            result = AgentGraphRunner(_workflow_with_final_tester()).run(
+                "Aggregate test evidence.",
+                tmp,
+                initial_data={"planner_order": planner_order},
+            )
+
+        self.assertEqual(result.status, "completed")
+        cache = result.data["graph_run_cache"]
+        self.assertEqual(cache["final_test_cache"]["final_tester_agent_id"], "final_tester")
+        self.assertEqual(cache["final_test_cache"]["final_test_result_ref"], "test_result_final_final_tester")
+        self.assertEqual(result.data["planner_input_bundle"]["final_test_ref"], "test_result_final_final_tester")
+        self.assertIn("test_result_final_final_tester", result.artifacts)
+        self.assertIn("test.final.completed", {event.type for event in result.events})
+
+def _workflow_with_final_tester() -> AgentWorkflowSpec:
+    payload = default_planner_led_agent_workflow().model_dump(mode="json", by_alias=True)
+    payload["agents"].extend(
+        [
+            {
+                "id": "tester2",
+                "name": "Second Tester",
+                "role": "tester",
+                "model_tier": "standard",
+                "can_talk_to_human": False,
+                "capabilities": ["model_review", "return_test_result"],
+            },
+            {
+                "id": "final_tester",
+                "name": "Final Tester",
+                "role": "reviewer",
+                "model_tier": "standard",
+                "can_talk_to_human": False,
+                "capabilities": ["aggregate_tests", "return_test_result"],
+            },
+        ]
+    )
+    payload["edges"] = [
+        {"from": "planner", "to": "executor"},
+        {"from": "executor", "to": "tester"},
+        {"from": "executor", "to": "tester2"},
+        {"from": "tester", "to": "final_tester"},
+        {"from": "tester2", "to": "final_tester"},
+        {"from": "final_tester", "to": "planner", "loop": True},
+    ]
+    return AgentWorkflowSpec.model_validate(payload)
 
 
 if __name__ == "__main__":

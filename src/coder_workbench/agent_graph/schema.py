@@ -115,6 +115,7 @@ class FinalTestRecord(BaseModel):
     status: TestStatus
     summary: str
     final_test_result_ref: str | None = None
+    artifact_payload: dict[str, Any] | None = None
 
 
 class PlanCache(BaseModel):
