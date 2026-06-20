@@ -32,7 +32,7 @@ def _handle_optional_check_commands(
 ) -> list[dict[str, Any]]:
     if not any("optional_check_command" in agent.capabilities for agent in agent_workflow.agents):
         return []
-    commands = _requested_check_commands(data.get("requested_check_commands"))
+    commands = _requested_check_commands_from_artifacts(cache)
     if not commands:
         return []
 
@@ -86,7 +86,7 @@ def _handle_patch_previews(
 ) -> list[dict[str, Any]]:
     if not any("modify_files" in agent.capabilities for agent in agent_workflow.agents):
         return []
-    changes = _requested_patch_changes(data.get("proposed_changes"))
+    changes = _requested_patch_changes_from_artifacts(cache)
     if not changes:
         return []
 
@@ -101,6 +101,28 @@ def _handle_patch_previews(
     }
     cache.record_hidden_effect(record, output=preview)
     return [record]
+
+
+def _requested_check_commands_from_artifacts(cache: GraphRunCache) -> list[dict[str, Any]]:
+    commands: list[dict[str, Any]] = []
+    for records in cache.test_cache.values():
+        for record in records:
+            artifact = record.artifact_payload or {}
+            for command in _requested_check_commands(artifact.get("check_commands")):
+                command.setdefault("work_item_id", artifact.get("work_item_id") or record.work_item_id)
+                command.setdefault("tester_agent_id", artifact.get("tester_agent_id") or record.tester_agent_id)
+                commands.append(command)
+    return commands
+
+
+def _requested_patch_changes_from_artifacts(cache: GraphRunCache) -> list[dict[str, Any]]:
+    changes: list[dict[str, Any]] = []
+    for record in cache.execution_cache.values():
+        artifact = record.artifact_payload or {}
+        for change in _requested_patch_changes(artifact.get("proposed_changes")):
+            change.setdefault("work_item_id", artifact.get("work_item_id") or record.work_item_id)
+            changes.append(change)
+    return changes
 
 
 def _requested_check_commands(value: Any) -> list[dict[str, Any]]:
