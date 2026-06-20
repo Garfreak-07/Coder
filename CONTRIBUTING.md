@@ -2,23 +2,24 @@
 
 Thanks for considering a contribution.
 
-Coder aims to stay small, safe, and token-efficient. Contributions should preserve that direction.
+Coder aims to stay small, safe, Planner-led, and token-efficient. Contributions should preserve that direction.
 
 ## Principles
 
-- Prefer simple deterministic code over extra agents.
-- Keep prompts short and structured.
+- Keep the ordinary workflow surface agent-only.
+- Prefer simple deterministic runtime code over extra exposed nodes.
+- Keep prompts short and artifact-shaped.
 - Avoid broad filesystem writes.
 - Never require secrets in committed files.
-- Keep user-facing workflows understandable for ordinary developers.
+- Keep Planner as the only human communication and subjective decision point.
 
 ## Before submitting changes
 
 Run:
 
 ```powershell
-python -m compileall src
-langgraph-coder --repo . --scope src
+python -m unittest discover -s tests
+python -m compileall src tests
 ```
 
 If you add behavior that can modify files, include:
@@ -34,4 +35,3 @@ If you add behavior that can modify files, include:
 - Do not commit generated `outputs/`.
 - Do not commit `.coder_history/`.
 - Keep commits focused and easy to review.
-

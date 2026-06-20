@@ -34,11 +34,11 @@ export const workflowTemplateCards: WorkflowTemplateCard[] = [
   {
     id: "default-coding",
     workflow: codingWorkbenchWorkflow,
-    agentCount: codingWorkbenchWorkflow.agents.length,
-    tools: ["project_index", "recommend_modules", "propose_patch", "apply_patch", "rollback_patch", "run_check"],
-    approvals: "requiredApprovals",
+    agentCount: 3,
+    tools: [],
+    approvals: "plannerOnlyHuman",
     modelRequirement: "optionalModel",
-    knowledgeRequirement: "projectKnowledge",
+    knowledgeRequirement: "structuredHandoff",
     risk: "mediumRisk"
   },
   {

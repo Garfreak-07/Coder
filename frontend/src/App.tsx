@@ -1410,6 +1410,119 @@ function ArtifactPreview({
   if (!artifact) {
     return <div className="muted">No artifact summary available.</div>;
   }
+  if (artifactType === "run_contract") {
+    const doneCriteria = stringList(artifact.done_criteria);
+    const allowedPaths = stringList(objectValue(artifact.scope)?.allowed_paths);
+    const forbiddenPaths = stringList(objectValue(artifact.scope)?.forbidden_paths);
+    return (
+      <div className="artifact-specific">
+        <div className="muted">{String(artifact.user_goal ?? "")}</div>
+        <KeyValueList
+          items={[
+            ["Done criteria", doneCriteria.length > 0 ? String(doneCriteria.length) : String(artifact.done_criteria ?? 0)],
+            ["Allowed paths", allowedPaths.join(", ") || "not specified"],
+            ["Forbidden paths", forbiddenPaths.join(", ") || "none"],
+            ["Max auto rounds", String(artifact.max_auto_rounds ?? objectValue(artifact.loop_policy)?.max_auto_rounds ?? "unknown")]
+          ]}
+        />
+        {doneCriteria.length > 0 && <InlineList title="Done criteria" values={doneCriteria} />}
+      </div>
+    );
+  }
+  if (artifactType === "planner_order") {
+    const instructions = stringList(artifact.instructions_for_executor);
+    const expected = stringList(artifact.expected_outputs);
+    const stops = stringList(artifact.stop_and_return_to_planner_when);
+    return (
+      <div className="artifact-specific">
+        <div className="muted">{String(artifact.round_goal ?? "")}</div>
+        <KeyValueList
+          items={[
+            ["Round", String(artifact.round ?? "unknown")],
+            ["Risk", String(artifact.risk_level ?? "unknown")],
+            ["Human confirmation", String(artifact.requires_human_confirmation ?? false)],
+            ["Expected outputs", expected.join(", ") || "none"]
+          ]}
+        />
+        {instructions.length > 0 && <InlineList title="Executor instructions" values={instructions} />}
+        {stops.length > 0 && <InlineList title="Return to Planner when" values={stops} />}
+      </div>
+    );
+  }
+  if (artifactType === "execution_result") {
+    const changedFiles = stringList(artifact.changed_files);
+    const unexpected = stringList(artifact.unexpected_issues);
+    return (
+      <div className="artifact-specific">
+        <div className="muted">{String(artifact.summary ?? "")}</div>
+        <KeyValueList
+          items={[
+            ["Round", String(artifact.round ?? "unknown")],
+            ["Status", String(artifact.status ?? "unknown")],
+            ["Changed files", changedFiles.join(", ") || "none"],
+            ["Needs Planner", String(artifact.needs_planner_decision ?? false)]
+          ]}
+        />
+        {unexpected.length > 0 && <InlineList title="Unexpected issues" values={unexpected} />}
+      </div>
+    );
+  }
+  if (artifactType === "test_result") {
+    const evidence = stringList(artifact.evidence);
+    const remaining = stringList(artifact.remaining_work);
+    const issues = objectList(artifact.issues).map((issue) => String(issue.title ?? JSON.stringify(issue)));
+    return (
+      <div className="artifact-specific">
+        <div className="muted">{String(artifact.summary ?? "")}</div>
+        <KeyValueList
+          items={[
+            ["Round", String(artifact.round ?? "unknown")],
+            ["Status", String(artifact.status ?? "unknown")],
+            ["Issues", String(issues.length || artifact.issues || 0)],
+            ["Confidence", String(artifact.confidence ?? "unknown")]
+          ]}
+        />
+        {issues.length > 0 && <InlineList title="Issues" values={issues} />}
+        {remaining.length > 0 && <InlineList title="Remaining work" values={remaining} />}
+        {evidence.length > 0 && <InlineList title="Evidence" values={evidence} />}
+      </div>
+    );
+  }
+  if (artifactType === "planner_decision") {
+    return (
+      <div className="artifact-specific">
+        <div className="muted">{String(artifact.reason ?? "")}</div>
+        <KeyValueList
+          items={[
+            ["Round", String(artifact.round ?? "unknown")],
+            ["Done", String(artifact.task_done ?? false)],
+            ["Next action", String(artifact.next_action ?? "unknown")],
+            ["Risk", String(artifact.risk_level ?? "unknown")],
+            ["Remaining auto rounds", String(artifact.remaining_auto_rounds ?? "unknown")]
+          ]}
+        />
+      </div>
+    );
+  }
+  if (artifactType === "round_summary") {
+    const refs = stringList(artifact.important_refs);
+    const remaining = stringList(artifact.remaining_work);
+    return (
+      <div className="artifact-specific">
+        <KeyValueList
+          items={[
+            ["Round", String(artifact.round ?? "unknown")],
+            ["Planner", String(artifact.planner_order_summary ?? "")],
+            ["Execution", String(artifact.execution_summary ?? "")],
+            ["Test", String(artifact.test_summary ?? "")],
+            ["Decision", String(artifact.planner_decision_summary ?? artifact.decision_summary ?? "")]
+          ]}
+        />
+        {refs.length > 0 && <InlineList title="Important refs" values={refs} />}
+        {remaining.length > 0 && <InlineList title="Remaining work" values={remaining} />}
+      </div>
+    );
+  }
   if (artifactType === "plan_artifact") {
     const targetFiles = stringList(artifact.target_files);
     const steps = stringList(artifact.implementation_steps);

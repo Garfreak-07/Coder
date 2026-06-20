@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -7,8 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from coder_workbench.module_map import build_module_map
-from coder_workbench.project_index import annotate_recommendations, recommend_modules
+from coder_workbench.project_index import annotate_recommendations, build_project_modules, recommend_modules
 from coder_workbench.tools.mcp import call_mcp_tool
 from coder_workbench.tools.patching import apply_patch, propose_patch, rollback_patch
 from coder_workbench.tools.filesystem import resolve_scoped_path, summarize_project
@@ -165,7 +164,7 @@ def _project_index(args: dict[str, Any], runtime_context: dict[str, Any]) -> dic
     repo_root = Path(runtime_context["repo_root"]).resolve()
     scope = _list_value(args.get("scope")) or _list_value(runtime_context.get("scopes"))
     files = summarize_project(repo_root, scope, max_files=int(args.get("max_files", 800)))
-    modules = build_module_map(files)
+    modules = build_project_modules(files)
     summary = _project_summary(repo_root, files, scope)
     return {
         "files": files,

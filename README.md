@@ -1,46 +1,63 @@
 # Coder
 
-Local-first agent workflow workbench for controlled coding tasks.
+Planner-led local agent workflow workbench for controlled coding tasks.
 
-Users define agents, nodes, edges, approvals, scopes, and context policy in a
-workflow document, then run it through a FastAPI backend and React workbench UI.
+Coder runs a local workflow where a strong Planner owns the global decision,
+Executor performs authorized implementation work, and Tester returns evidence.
+Agents exchange compact structured artifacts instead of full transcripts.
 
-Default behavior is conservative. The current runtime supports inspection,
-planning, approval gates, patch previews, scoped patch apply, rollback, checks,
-event logs, and scoped project indexing.
+## Current Product Target
 
-## Current product target
+The active direction is:
 
-The active product target is a local-first workflow workbench with controlled
-context, artifacts, approvals, replay, rollback, and resource budgets. The app
-should stay template-first for ordinary use while keeping workflow JSON, API
-fields, and internal schema stable in English for advanced editing.
+```text
+Planner-led Orchestrator
++ Structured Artifact Handoff
++ Agent-only Workflow UI
++ Hidden Runtime Graph
+```
+
+The ordinary user-facing workflow is:
+
+```text
+Planner Agent -> Executor Agent -> Tester Agent
+      ^                                   |
+      +----------- loop decision ---------+
+```
+
+Only Planner can ask the human or decide whether to continue, finish, stop, or
+request confirmation. Runtime internals such as context selection, artifact
+storage, loop routing, path guards, patch safety, approvals, and replay stay
+behind that agent-only surface.
 
 Current implementation work should follow [docs/requirements.md](docs/requirements.md).
 
-## Current capabilities
+## Core Artifacts
 
-- JSON workflow schema for agents, nodes, edges, and conditions.
-- React + TypeScript workflow workbench with canvas, inspector, JSON editor,
-  library save/load, live run launcher, and run timeline.
-- FastAPI runtime API with synchronous runs, live background runs, SSE
-  events, file-backed run storage, and local agent/workflow library storage.
-- Human approval gates with same-run approval resume:
-  `POST /api/v2/live-runs/{run_id}/approve`.
-- Token-conscious agent context policy and estimated token tracking.
-- Project scope selection and path guard enforcement for tools.
-- Built-in tools:
-  - `project_index`
-  - `recommend_modules`
-  - `dry_run_patch`
-  - `propose_patch`
-  - `apply_patch`
-  - `rollback_patch`
-  - `run_check`
-- Scoped patch preview, apply snapshots, rollback, and UI diff/check display.
+The default workflow uses six validated artifact types:
 
-See [docs/requirements.md](docs/requirements.md) for the product direction and
-roadmap.
+- `run_contract`
+- `planner_order`
+- `execution_result`
+- `test_result`
+- `planner_decision`
+- `round_summary`
+
+Legacy `plan_artifact`, `patch_artifact`, and `review_artifact` are retained
+only for old saved workflows.
+
+## Current Capabilities
+
+- `AgentWorkflowSpec` for the user-visible Planner / Executor / Tester layer.
+- Compiler from Agent-only workflow to the internal runtime `WorkflowSpec`.
+- FastAPI runtime API and React + TypeScript workbench.
+- Mock-mode executor for local development without model credentials.
+- Structured artifact validation, event emission, storage, and replay.
+- Context packet events before agent calls.
+- Provider settings for OpenAI-compatible model providers.
+- Local run history, stored run replay, and artifact/blob loading.
+- Scoped path guards, patch preview/apply/rollback primitives, command
+  approvals, and preflight checks retained as internal safety capabilities.
 
 ## Install
 
@@ -73,7 +90,7 @@ If `frontend/dist` exists, the API serves it from:
 http://127.0.0.1:8876
 ```
 
-## Run the frontend in development
+## Run the Frontend in Development
 
 ```powershell
 cd frontend
@@ -88,35 +105,23 @@ http://127.0.0.1:5173
 
 Vite proxies `/api/*` to the API on port `8876`.
 
-## Run a workflow from the CLI
+## Run the Default Workflow from the CLI
 
 ```powershell
 coder --repo . `
-  --scope src `
   --workflow examples\workflows\coding-workbench.json `
-  --request "Inspect runtime safety"
+  --request "Build the smallest Planner-led loop"
 ```
 
-Use `--approve` to pre-approve human gates for CLI/debug runs.
+Use `--approve` only for workflows that include explicit human gates.
 
-## API keys and local secrets
+## API Keys and Local Secrets
 
 Do not commit API keys or local secrets. Copy `.env.example` to `.env` for local
 model configuration. `.env` is ignored by Git.
 
-Supported provider configuration is OpenAI-compatible and remains optional; when
-credentials are missing, the runtime uses a mock executor for safe local
-testing.
-
-## Module map
-
-Generate a clickable module map:
-
-```powershell
-coder --repo "D:\projects\some-app" --map-only --scope src
-```
-
-The product contract is the JSON workflow runtime.
+Supported provider configuration is OpenAI-compatible and remains optional.
+When credentials are missing, the runtime uses mock mode for safe local testing.
 
 ## License
 

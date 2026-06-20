@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "coder-workbench"
 version = "0.1.0"
-description = "Local-first agent workflow workbench for controlled coding tasks."
+description = "Planner-led local agent workflow workbench with structured handoffs."
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = [

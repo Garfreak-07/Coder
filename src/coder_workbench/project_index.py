@@ -2,8 +2,10 @@
 
 import re
 from collections import Counter, defaultdict
+from typing import Any
 
-from .module_map import FileSummary, ModuleInfo
+FileSummary = dict[str, Any]
+ModuleInfo = dict[str, Any]
 
 
 STOPWORDS = {
@@ -30,6 +32,36 @@ STOPWORDS = {
     "实现",
     "功能",
 }
+
+
+def build_project_modules(files: list[FileSummary]) -> list[ModuleInfo]:
+    """Group project files into small repo-relative modules."""
+
+    grouped: dict[str, list[FileSummary]] = defaultdict(list)
+    for file in files:
+        path = str(file.get("path") or "")
+        if not path:
+            continue
+        parts = path.split("/")
+        module_path = parts[0] if len(parts) == 1 else "/".join(parts[:2])
+        grouped[module_path].append(file)
+
+    modules: list[ModuleInfo] = []
+    for index, (path, module_files) in enumerate(sorted(grouped.items())):
+        size = sum(int(file.get("size_bytes") or 0) for file in module_files)
+        modules.append(
+            {
+                "id": f"module_{index + 1}",
+                "name": path,
+                "path": path,
+                "file_count": len(module_files),
+                "size_bytes": size,
+                "importance": _module_importance(path, module_files),
+                "risk": _module_risk(path),
+                "reason": _module_reason(path, module_files),
+            }
+        )
+    return modules
 
 
 def recommend_modules(
@@ -127,3 +159,29 @@ def _score_module(
                 hits[term] += 1
 
     return score, list(hits.keys())[:8]
+
+
+def _module_importance(path: str, files: list[FileSummary]) -> str:
+    important_names = {"pyproject.toml", "package.json", "README.md", "README"}
+    if path in {"src", "frontend", "tests"}:
+        return "high"
+    if any(str(file.get("path") or "").split("/")[-1] in important_names for file in files):
+        return "high"
+    if len(files) >= 10:
+        return "medium"
+    return "low"
+
+
+def _module_risk(path: str) -> str:
+    if path.startswith(".github") or path in {"pyproject.toml", "package.json"}:
+        return "medium"
+    if path.startswith("tests"):
+        return "low"
+    if path.startswith("src") or path.startswith("frontend"):
+        return "medium"
+    return "low"
+
+
+def _module_reason(path: str, files: list[FileSummary]) -> str:
+    kinds = sorted({str(file.get("kind") or "text") for file in files})
+    return f"{path} contains {len(files)} project files ({', '.join(kinds[:4])})."

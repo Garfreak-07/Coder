@@ -1,6 +1,7 @@
-# Coder Workbench Frontend
+# Coder Frontend
 
-React + TypeScript + Vite frontend for the v2 workflow workbench.
+React + TypeScript + Vite frontend for the Planner-led local agent workflow
+workbench.
 
 ## Run locally
 
@@ -26,7 +27,7 @@ http://127.0.0.1:5173
 
 Vite proxies `/api/*` to the local FastAPI backend on port `8876`.
 
-## Serve the built frontend from the v2 API
+## Serve the built frontend from the API
 
 After building:
 
@@ -36,7 +37,7 @@ cd ..
 coder-api --host 127.0.0.1 --port 8876
 ```
 
-If `frontend/dist` exists, the v2 API serves it at:
+If `frontend/dist` exists, the API serves it at:
 
 ```text
 http://127.0.0.1:8876

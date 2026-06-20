@@ -29,7 +29,17 @@ export interface AgentSpec {
   model?: string | null;
   tools: string[];
   output_key?: string | null;
-  artifact_type?: "plan_artifact" | "patch_artifact" | "review_artifact" | null;
+  artifact_type?:
+    | "run_contract"
+    | "planner_order"
+    | "execution_result"
+    | "test_result"
+    | "planner_decision"
+    | "round_summary"
+    | "plan_artifact"
+    | "patch_artifact"
+    | "review_artifact"
+    | null;
   permissions: PermissionPolicy;
   context: ContextPolicy;
 }

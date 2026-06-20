@@ -1,21 +1,22 @@
 {
-  "id": "coding-workbench",
-  "version": "0.1",
-  "name": "Token-Conscious Coding Workbench",
-  "description": "A JSON-driven workflow where canvas edges determine execution. Agents receive compact state summaries by default.",
-  "max_steps": 20,
-  "max_agent_calls": 6,
-  "max_tool_calls": 6,
-  "token_budget": 40000,
+  "id": "default-planner-led-runtime",
+  "version": "0.3",
+  "name": "Planner-led Agent Workflow",
+  "description": "Planner decides. Executor changes only by order. Tester returns evidence. Runtime graph details stay hidden.",
+  "max_steps": 18,
+  "max_agent_calls": 18,
+  "max_tool_calls": 0,
+  "token_budget": 80000,
   "agents": [
     {
-      "id": "planner",
-      "role": "Planning Agent",
-      "goal": "Select the smallest useful scope and produce implementation instructions.",
-      "instructions": "Use project_index and module recommendations. Return concise JSON with summary, target_files, risks, and next_action.",
+      "id": "planner_contract",
+      "name": "Planner Agent",
+      "role": "Planner Agent",
+      "goal": "Negotiate the RunContract with the human-facing request.",
+      "instructions": "Return strict JSON for the requested artifact. Do not include full transcripts. Use only structured runtime inputs.",
       "tools": [],
-      "output_key": "plan",
-      "artifact_type": "plan_artifact",
+      "output_key": "run_contract",
+      "artifact_type": "run_contract",
       "permissions": {
         "read_files": true,
         "edit_files": false,
@@ -24,22 +25,50 @@
         "requires_approval": false
       },
       "context": {
-        "input_keys": ["project_index", "module_recommendations"],
-        "summary_keys": ["project_index", "module_recommendations"],
+        "input_keys": [],
+        "summary_keys": [],
         "max_items_per_key": 12,
         "max_chars_per_value": 3500,
+        "include_all_state": false,
+        "include_event_history": false,
+        "include_full_outputs": false
+      }
+    },
+    {
+      "id": "planner_order",
+      "name": "Planner Agent",
+      "role": "Planner Agent",
+      "goal": "Produce the next executable order for the Executor.",
+      "instructions": "Return strict JSON for the requested artifact. Do not include full transcripts. Use only structured runtime inputs.",
+      "tools": [],
+      "output_key": "planner_order",
+      "artifact_type": "planner_order",
+      "permissions": {
+        "read_files": true,
+        "edit_files": false,
+        "run_commands": false,
+        "use_network": false,
+        "requires_approval": false
+      },
+      "context": {
+        "input_keys": ["run_contract", "round_summary", "execution_result", "test_result"],
+        "summary_keys": ["round_summary"],
+        "max_items_per_key": 12,
+        "max_chars_per_value": 3500,
+        "include_all_state": false,
         "include_event_history": false,
         "include_full_outputs": false
       }
     },
     {
       "id": "executor",
-      "role": "Implementation Agent",
-      "goal": "Prepare a scoped patch proposal.",
-      "instructions": "Follow the approved plan. Return JSON with a changes array of {path, action, content}. Do not claim files were changed.",
-      "tools": ["propose_patch"],
-      "output_key": "execution",
-      "artifact_type": "patch_artifact",
+      "name": "Executor Agent",
+      "role": "Executor Agent",
+      "goal": "Follow PlannerOrder and return only execution facts.",
+      "instructions": "Return strict JSON for the requested artifact. Do not include full transcripts. Use only structured runtime inputs.",
+      "tools": [],
+      "output_key": "execution_result",
+      "artifact_type": "execution_result",
       "permissions": {
         "read_files": true,
         "edit_files": true,
@@ -48,22 +77,24 @@
         "requires_approval": true
       },
       "context": {
-        "input_keys": ["plan", "approval"],
-        "summary_keys": ["project_index"],
-        "max_items_per_key": 8,
-        "max_chars_per_value": 2500,
+        "input_keys": ["run_contract", "planner_order"],
+        "summary_keys": ["run_contract", "planner_order"],
+        "max_items_per_key": 12,
+        "max_chars_per_value": 3500,
+        "include_all_state": false,
         "include_event_history": false,
         "include_full_outputs": false
       }
     },
     {
-      "id": "reviewer",
-      "role": "Review Agent",
-      "goal": "Judge whether the workflow should finish, retry, or block.",
-      "instructions": "Use only compact execution and check summaries. Return JSON with status and reason.",
+      "id": "tester",
+      "name": "Tester Agent",
+      "role": "Tester Agent",
+      "goal": "Review execution evidence and return a TestResult.",
+      "instructions": "Return strict JSON for the requested artifact. Do not include full transcripts. Use only structured runtime inputs.",
       "tools": [],
-      "output_key": "review",
-      "artifact_type": "review_artifact",
+      "output_key": "test_result",
+      "artifact_type": "test_result",
       "permissions": {
         "read_files": true,
         "edit_files": false,
@@ -72,172 +103,107 @@
         "requires_approval": false
       },
       "context": {
-        "input_keys": ["execution", "check_result"],
-        "summary_keys": ["plan"],
-        "max_items_per_key": 8,
-        "max_chars_per_value": 2500,
+        "input_keys": ["planner_order", "execution_result"],
+        "summary_keys": ["planner_order", "execution_result"],
+        "max_items_per_key": 12,
+        "max_chars_per_value": 3500,
+        "include_all_state": false,
+        "include_event_history": false,
+        "include_full_outputs": false
+      }
+    },
+    {
+      "id": "planner_decision",
+      "name": "Planner Agent",
+      "role": "Planner Agent",
+      "goal": "Decide whether to finish, continue, ask the human, or stop.",
+      "instructions": "Return strict JSON for the requested artifact. Do not include full transcripts. Use only structured runtime inputs.",
+      "tools": [],
+      "output_key": "planner_decision",
+      "artifact_type": "planner_decision",
+      "permissions": {
+        "read_files": true,
+        "edit_files": false,
+        "run_commands": false,
+        "use_network": false,
+        "requires_approval": false
+      },
+      "context": {
+        "input_keys": ["run_contract", "execution_result", "test_result", "round_summary"],
+        "summary_keys": ["execution_result", "test_result", "round_summary"],
+        "max_items_per_key": 12,
+        "max_chars_per_value": 3500,
+        "include_all_state": false,
+        "include_event_history": false,
+        "include_full_outputs": false
+      }
+    },
+    {
+      "id": "round_summarizer",
+      "name": "Planner Agent",
+      "role": "Planner Agent",
+      "goal": "Compress this round into a compact carry-forward summary.",
+      "instructions": "Return strict JSON for the requested artifact. Do not include full transcripts. Use only structured runtime inputs.",
+      "tools": [],
+      "output_key": "round_summary",
+      "artifact_type": "round_summary",
+      "permissions": {
+        "read_files": true,
+        "edit_files": false,
+        "run_commands": false,
+        "use_network": false,
+        "requires_approval": false
+      },
+      "context": {
+        "input_keys": ["planner_order", "execution_result", "test_result", "planner_decision"],
+        "summary_keys": ["planner_order", "execution_result", "test_result", "planner_decision"],
+        "max_items_per_key": 12,
+        "max_chars_per_value": 3500,
+        "include_all_state": false,
         "include_event_history": false,
         "include_full_outputs": false
       }
     }
   ],
   "nodes": [
+    { "id": "start", "type": "start" },
+    { "id": "run_contract", "type": "agent", "agent_id": "planner_contract", "output_key": "run_contract" },
+    { "id": "planner_order", "type": "agent", "agent_id": "planner_order", "output_key": "planner_order" },
+    { "id": "execute", "type": "agent", "agent_id": "executor", "output_key": "execution_result" },
+    { "id": "test", "type": "agent", "agent_id": "tester", "output_key": "test_result" },
+    { "id": "planner_decision", "type": "agent", "agent_id": "planner_decision", "output_key": "planner_decision" },
+    { "id": "round_summary", "type": "agent", "agent_id": "round_summarizer", "output_key": "round_summary" },
     {
-      "id": "start",
-      "type": "start"
-    },
-    {
-      "id": "index_project",
-      "type": "tool",
-      "tool": "project_index",
-      "input": {
-        "max_files": 800
-      },
-      "output_key": "project_index"
-    },
-    {
-      "id": "recommend_scope",
-      "type": "tool",
-      "tool": "recommend_modules",
-      "input": {
-        "query": "$request"
-      },
-      "output_key": "module_recommendations"
-    },
-    {
-      "id": "plan",
-      "type": "agent",
-      "agent_id": "planner",
-      "output_key": "plan"
-    },
-    {
-      "id": "approval",
-      "type": "human_gate",
-      "approval_reason": "Approve before an implementation-capable agent runs.",
-      "output_key": "approval"
-    },
-    {
-      "id": "execute",
-      "type": "agent",
-      "agent_id": "executor",
-      "output_key": "execution"
-    },
-    {
-      "id": "propose_patch",
-      "type": "tool",
-      "tool": "propose_patch",
-      "input": {
-        "changes": "$execution"
-      },
-      "output_key": "patch_preview"
-    },
-    {
-      "id": "patch_approval",
-      "type": "human_gate",
-      "approval_reason": "Approve before applying the proposed patch.",
-      "output_key": "patch_approval"
-    },
-    {
-      "id": "apply_patch",
-      "type": "tool",
-      "tool": "apply_patch",
-      "input": {
-        "patch": "$patch_preview"
-      },
-      "output_key": "patch_apply"
-    },
-    {
-      "id": "check",
-      "type": "tool",
-      "tool": "run_check",
-      "input": {
-        "command": ""
-      },
-      "output_key": "check_result"
-    },
-    {
-      "id": "review",
-      "type": "agent",
-      "agent_id": "reviewer",
-      "output_key": "review"
-    },
-    {
-      "id": "review_retry",
+      "id": "planner_loop",
       "type": "loop",
       "loop_mode": "retry_until",
-      "condition": "review.status == 'pass' or review.status == 'completed' or review.status == 'done'",
+      "condition": "planner_decision.next_action == 'finish' or planner_decision.next_action == 'stop' or planner_decision.next_action == 'ask_human'",
       "max_iterations": 3,
-      "output_key": "review_retry"
+      "output_key": "planner_loop"
     },
-    {
-      "id": "finish",
-      "type": "end"
-    }
+    { "id": "finish", "type": "end" }
   ],
   "edges": [
+    { "from": "start", "to": "run_contract" },
+    { "from": "run_contract", "to": "planner_order" },
+    { "from": "planner_order", "to": "execute" },
+    { "from": "execute", "to": "test" },
+    { "from": "test", "to": "planner_decision" },
+    { "from": "planner_decision", "to": "round_summary" },
+    { "from": "round_summary", "to": "planner_loop" },
     {
-      "from": "start",
-      "to": "index_project"
-    },
-    {
-      "from": "index_project",
-      "to": "recommend_scope"
-    },
-    {
-      "from": "recommend_scope",
-      "to": "plan"
-    },
-    {
-      "from": "plan",
-      "to": "approval"
-    },
-    {
-      "from": "approval",
-      "to": "execute",
-      "when": "approval.approved == True"
-    },
-    {
-      "from": "execute",
-      "to": "propose_patch"
-    },
-    {
-      "from": "propose_patch",
-      "to": "patch_approval"
-    },
-    {
-      "from": "patch_approval",
-      "to": "apply_patch",
-      "when": "patch_approval.approved == True"
-    },
-    {
-      "from": "apply_patch",
-      "to": "check"
-    },
-    {
-      "from": "check",
-      "to": "review"
-    },
-    {
-      "from": "review",
-      "to": "review_retry"
-    },
-    {
-      "from": "review_retry",
-      "to": "approval",
-      "when": "review_retry.should_continue == True",
+      "from": "planner_loop",
+      "to": "planner_order",
+      "when": "planner_loop.should_continue == True",
       "max_traversals": 3
     },
-    {
-      "from": "review_retry",
-      "to": "finish",
-      "when": "review_retry.should_continue == False"
-    }
+    { "from": "planner_loop", "to": "finish", "when": "planner_loop.should_continue == False" }
   ],
   "stop_conditions": [
-    "approval required",
-    "max_steps reached",
-    "max_agent_calls reached",
-    "max_tool_calls reached",
-    "token budget warning"
+    "planner_decision.next_action == finish",
+    "planner_decision.next_action == ask_human",
+    "planner_decision.next_action == stop",
+    "max_auto_rounds reached",
+    "token budget exceeded"
   ]
 }

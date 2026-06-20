@@ -73,6 +73,118 @@ class DefaultAgentExecutor:
     def _mock(self, agent: AgentSpec, context: dict[str, Any]) -> dict[str, Any]:
         request = context.get("request", "")
         summaries = context.get("state_summaries", {})
+        if agent.artifact_type == "run_contract":
+            return {
+                "artifact_type": "run_contract",
+                "user_goal": str(request),
+                "done_criteria": [
+                    "Planner has produced a decision for the current request.",
+                    "Executor and Tester returned structured facts for the round.",
+                ],
+                "scope": {
+                    "allowed_paths": [],
+                    "forbidden_paths": [".git", ".env", ".coder_history", ".coder"],
+                },
+                "loop_policy": {
+                    "max_auto_rounds": 3,
+                    "user_can_override": True,
+                },
+                "risk_policy": {
+                    "planner_is_risk_judge": True,
+                    "high_risk_requires_human": True,
+                    "low_risk_auto_continue": True,
+                },
+                "execution_policy": {
+                    "executor_can_modify_files": True,
+                    "executor_cannot_ask_human": True,
+                    "executor_must_follow_planner_order": True,
+                },
+                "test_policy": {
+                    "default_mode": "model_review_and_optional_command",
+                    "tester_cannot_ask_human": True,
+                },
+                "human_agreements": [],
+            }
+        if agent.artifact_type == "planner_order":
+            return {
+                "artifact_type": "planner_order",
+                "round": _round_from_context(context),
+                "round_goal": f"Handle the smallest useful step for: {request}",
+                "instructions_for_executor": [
+                    "Use the current RunContract and stay inside scope.",
+                    "Return an ExecutionResult with facts only.",
+                ],
+                "allowed_actions": ["inspect_context", "prepare_changes_when_authorized"],
+                "forbidden_actions": ["ask_human_directly", "change_global_goal"],
+                "target_files_or_outputs": [],
+                "expected_outputs": ["execution_result"],
+                "risk_level": "low",
+                "requires_human_confirmation": False,
+                "tester_instructions": [
+                    "Review the ExecutionResult and return evidence without deciding the next step."
+                ],
+                "stop_and_return_to_planner_when": [
+                    "The requested work exceeds the RunContract.",
+                    "A human decision is required before continuing.",
+                ],
+            }
+        if agent.artifact_type == "execution_result":
+            return {
+                "artifact_type": "execution_result",
+                "round": _round_from_context(context),
+                "status": "completed",
+                "summary": f"Mock executor completed a dry run for: {request}",
+                "changed_files": [],
+                "created_files": [],
+                "deleted_files": [],
+                "patch_refs": [],
+                "outputs": sorted(summaries.keys()),
+                "unexpected_issues": [],
+                "out_of_contract": False,
+                "needs_planner_decision": False,
+                "tester_notes": ["No real file mutation was performed in mock mode."],
+            }
+        if agent.artifact_type == "test_result":
+            return {
+                "artifact_type": "test_result",
+                "round": _round_from_context(context),
+                "status": "pass",
+                "summary": "Mock tester found no blocking issue.",
+                "evidence": sorted(summaries.keys()),
+                "issues": [],
+                "remaining_work": [],
+                "confidence": "medium",
+                "check_commands": [],
+                "check_outputs_ref": None,
+            }
+        if agent.artifact_type == "planner_decision":
+            return {
+                "artifact_type": "planner_decision",
+                "round": _round_from_context(context),
+                "task_done": True,
+                "next_action": "finish",
+                "risk_level": "low",
+                "requires_human_confirmation": False,
+                "reason": "Mock execution and test artifacts are complete.",
+                "next_round_goal": "",
+                "remaining_auto_rounds": 2,
+                "human_message": None,
+            }
+        if agent.artifact_type == "round_summary":
+            return {
+                "artifact_type": "round_summary",
+                "round": _round_from_context(context),
+                "planner_order_summary": "Planner issued a scoped low-risk order.",
+                "execution_summary": "Executor returned structured execution facts.",
+                "test_summary": "Tester returned structured evidence.",
+                "planner_decision_summary": "Planner decided to finish.",
+                "important_refs": sorted(summaries.keys()),
+                "carry_forward_constraints": [
+                    "Only Planner can talk to the human.",
+                    "Executor and Tester return facts, not decisions.",
+                ],
+                "remaining_work": [],
+            }
         if agent.artifact_type == "plan_artifact":
             return {
                 "artifact_type": "plan_artifact",
@@ -126,3 +238,13 @@ def _try_parse_json(value: str) -> Any:
         return json.loads(cleaned)
     except json.JSONDecodeError:
         return None
+
+
+def _round_from_context(context: dict[str, Any]) -> int:
+    loop = context.get("loop")
+    if isinstance(loop, dict):
+        try:
+            return max(1, int(loop.get("iteration", 1)))
+        except (TypeError, ValueError):
+            return 1
+    return 1
