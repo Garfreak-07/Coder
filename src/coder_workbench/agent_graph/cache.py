@@ -26,6 +26,8 @@ class GraphRunCache(BaseModel):
     execution_cache: dict[str, ExecutionRecord] = Field(default_factory=dict)
     test_cache: dict[str, list[TestRecord]] = Field(default_factory=dict)
     final_test_cache: FinalTestRecord | None = None
+    hidden_effects: list[dict[str, Any]] = Field(default_factory=list)
+    hidden_effect_outputs: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
     def cache_planner_order(self, planner_order: PlannerOrder, planner_order_ref: str) -> PlanCache:
         self.round = planner_order.round
@@ -75,6 +77,13 @@ class GraphRunCache(BaseModel):
 
     def record_final_test(self, record: FinalTestRecord) -> FinalTestRecord:
         self.final_test_cache = record
+        return record
+
+    def record_hidden_effect(self, record: dict[str, Any], output: dict[str, Any] | None = None) -> dict[str, Any]:
+        self.hidden_effects.append(record)
+        output_ref = record.get("output_ref") or record.get("patch_ref")
+        if output_ref and output is not None:
+            self.hidden_effect_outputs[str(output_ref)] = output
         return record
 
     def work_items(self) -> list[CachedWorkItem]:

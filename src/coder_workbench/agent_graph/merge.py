@@ -37,6 +37,7 @@ def build_planner_input_bundle(cache: GraphRunCache) -> PlannerInputBundle:
         items=items,
         final_test_summary=cache.final_test_cache.summary if cache.final_test_cache else None,
         final_test_ref=cache.final_test_cache.final_test_result_ref if cache.final_test_cache else None,
+        effects=cache.hidden_effects,
     )
 
 

@@ -4,6 +4,7 @@ from typing import Any
 
 from coder_workbench.agent_graph.cache import GraphRunCache
 from coder_workbench.agent_graph.context import upstream_refs_for_item
+from coder_workbench.agent_graph.effects import apply_hidden_effects
 from coder_workbench.agent_graph.merge import build_planner_input_bundle, build_round_summary
 from coder_workbench.agent_graph.scheduler import AgentGraphScheduler
 from coder_workbench.agent_graph.schema import ExecutionRecord, PlannerOrder, TestRecord
@@ -152,6 +153,15 @@ class AgentGraphRunner:
                         scheduler.mark_failed(item.work_item_id)
 
             data["scheduler_status"] = dict(scheduler.status_by_id)
+            hidden_effects = apply_hidden_effects(
+                agent_workflow=self.agent_workflow,
+                cache=cache,
+                repo_root=repo_root,
+                scopes=_scopes_from_data(data),
+                data=data,
+            )
+            if hidden_effects:
+                data["hidden_effects"] = hidden_effects
             data["graph_run_cache"] = cache.as_runtime_payload()
 
             planner_input_bundle = build_planner_input_bundle(cache)
@@ -364,6 +374,15 @@ def _max_concurrency_from_data(data: dict[str, Any]) -> int:
         return max(1, int(value))
     except (TypeError, ValueError):
         return 4
+
+
+def _scopes_from_data(data: dict[str, Any]) -> list[str]:
+    scopes = data.get("scopes")
+    if isinstance(scopes, list):
+        return [str(scope) for scope in scopes if str(scope).strip()]
+    if isinstance(scopes, str) and scopes.strip():
+        return [scopes.strip()]
+    return []
 
 
 def _safe_id(value: str) -> str:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -129,6 +130,7 @@ class PlannerInputBundle(BaseModel):
     items: list[PlannerInputBundleItem]
     final_test_summary: str | None = None
     final_test_ref: str | None = None
+    effects: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class RoundSummaryItem(BaseModel):
