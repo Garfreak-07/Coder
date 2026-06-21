@@ -24,6 +24,12 @@ from coder_workbench.agent_graph.schema import (
     WorkItem,
 )
 from coder_workbench.agent_graph.synthesis import build_synthesis_artifact
+from coder_workbench.agent_harness import (
+    CodeWorkerHarness,
+    FinalReviewHarness,
+    PlannerHarness,
+    TestHarness,
+)
 from coder_workbench.config import RuntimeConfig, load_runtime_config
 from coder_workbench.core import AgentWorkflowAgent, AgentWorkflowSpec
 from coder_workbench.core.artifacts import ArtifactValidationError, validate_artifact
@@ -51,6 +57,7 @@ class AgentGraphExecutorProtocol(Protocol):
         previous_round_summary: dict[str, Any] | None = None,
         planner_human_response: dict[str, Any] | None = None,
         skill_index: SkillIndex | None = None,
+        repo_intelligence: dict[str, Any] | None = None,
         round_number: int = 1,
         emit: EmitEvent | None = None,
     ) -> PlannerOrder:
@@ -105,6 +112,10 @@ class AgentGraphExecutor:
         self.agent_workflow = agent_workflow
         self.runtime_settings = runtime_settings
         self.model_factory = model_factory
+        self.planner_harness = PlannerHarness()
+        self.code_worker_harness = CodeWorkerHarness()
+        self.test_harness = TestHarness()
+        self.final_review_harness = FinalReviewHarness()
 
     def create_planner_order(
         self,
@@ -114,6 +125,7 @@ class AgentGraphExecutor:
         previous_round_summary: dict[str, Any] | None = None,
         planner_human_response: dict[str, Any] | None = None,
         skill_index: SkillIndex | None = None,
+        repo_intelligence: dict[str, Any] | None = None,
         round_number: int = 1,
         emit: EmitEvent | None = None,
     ) -> PlannerOrder:
@@ -127,9 +139,14 @@ class AgentGraphExecutor:
                 previous_round_summary=previous_round_summary,
                 planner_human_response=planner_human_response,
                 skill_index=skill_index,
+                repo_intelligence=repo_intelligence,
                 round_number=round_number,
             ),
-            mock_payload=self._mock_planner_order_payload(request, round_number=round_number),
+            mock_payload=self._mock_planner_order_payload(
+                request,
+                round_number=round_number,
+                repo_intelligence=repo_intelligence,
+            ),
             emit=emit,
             failure_status_code="planner_order_schema_failed",
         )
@@ -322,15 +339,29 @@ class AgentGraphExecutor:
     ) -> dict[str, Any]:
         planner = self._agent(self.agent_workflow.primary_planner_id)
         has_interrupts = bool(bundle.interrupts)
+        has_failed_tests = any(item.execution_status == "failed" or item.test_status == "fail" for item in bundle.items)
+        has_blocked_work = any(item.execution_status == "blocked" or item.test_status == "blocked" for item in bundle.items)
         can_continue_from_interrupts = has_interrupts and all(
             interrupt.continue_without_human_possible is True
             for interrupt in bundle.interrupts
         )
-        mock_next_action = "continue" if can_continue_from_interrupts else "ask_human" if has_interrupts else "finish"
+        mock_next_action = (
+            "continue"
+            if can_continue_from_interrupts or has_failed_tests
+            else "ask_human"
+            if has_interrupts or has_blocked_work
+            else "finish"
+        )
         mock_reason = "Worker requested Planner intervention." if has_interrupts else (
+            "Tests failed; Planner will replan inside the existing RunContract."
+            if has_failed_tests
+            else "Work is blocked and requires Planner or user judgment."
+            if has_blocked_work
+            else (
             "Planner human response recorded; AgentGraph resume completed."
             if planner_human_response
             else "Mock AgentGraph execution and test artifacts are complete."
+            )
         )
         return self._invoke_or_mock(
             artifact_type="planner_decision",
@@ -348,7 +379,7 @@ class AgentGraphExecutor:
                 "risk_level": "medium" if has_interrupts else "low",
                 "requires_human_confirmation": mock_next_action == "ask_human",
                 "reason": mock_reason,
-                "next_round_goal": "Resolve the blocked work item." if mock_next_action == "continue" else "",
+                "next_round_goal": "Fix failing test evidence and rerun checks." if has_failed_tests else "Resolve the blocked work item." if mock_next_action == "continue" else "",
                 "remaining_auto_rounds": 2 if mock_next_action == "continue" else 0,
                 "human_message": "Planner needs user input to resolve the blocked work item."
                 if mock_next_action == "ask_human"
@@ -651,7 +682,13 @@ class AgentGraphExecutor:
             )
         return load_runtime_config()
 
-    def _mock_planner_order_payload(self, request: str, *, round_number: int = 1) -> dict[str, Any]:
+    def _mock_planner_order_payload(
+        self,
+        request: str,
+        *,
+        round_number: int = 1,
+        repo_intelligence: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         testers = [agent for agent in self.agent_workflow.agents if _is_tester(agent)]
         workers = [
             agent
@@ -659,6 +696,7 @@ class AgentGraphExecutor:
             if agent.id != self.agent_workflow.primary_planner_id and not _is_tester(agent)
         ]
         tester_ids = [agent.id for agent in testers]
+        repo_hint = _repo_intelligence_hint(repo_intelligence)
         return {
             "artifact_type": "planner_order",
             "round": round_number,
@@ -669,7 +707,7 @@ class AgentGraphExecutor:
                         "work_item_id": f"{_safe_id(agent.id)}-work",
                         "merge_index": index,
                         "assignee_agent_id": agent.id,
-                        "task_summary": f"Mock task for {agent.name or agent.id}.",
+                        "task_summary": f"Mock task for {agent.name or agent.id}. {repo_hint}".strip(),
                         "depends_on": [],
                         "tester_agent_ids": tester_ids,
                     }
@@ -823,3 +861,25 @@ def _aggregate_remaining_work(bundle: PlannerInputBundle) -> list[str]:
 def _safe_id(value: str) -> str:
     safe = "".join(char if char.isalnum() or char == "_" else "_" for char in value.strip())
     return safe or "agent"
+
+
+def _repo_intelligence_hint(repo_intelligence: dict[str, Any] | None) -> str:
+    if not repo_intelligence:
+        return ""
+    repo_index = repo_intelligence.get("repo_index") if isinstance(repo_intelligence.get("repo_index"), dict) else {}
+    command_discovery = (
+        repo_intelligence.get("command_discovery")
+        if isinstance(repo_intelligence.get("command_discovery"), dict)
+        else {}
+    )
+    important = [str(item) for item in repo_index.get("important_files", [])][:2]
+    commands = command_discovery.get("test_commands") if isinstance(command_discovery.get("test_commands"), list) else []
+    command = ""
+    if commands and isinstance(commands[0], dict):
+        command = str(commands[0].get("command") or "")
+    details = []
+    if important:
+        details.append(f"Use repo intelligence files: {', '.join(important)}.")
+    if command:
+        details.append(f"Discovered check command: {command}.")
+    return " ".join(details)

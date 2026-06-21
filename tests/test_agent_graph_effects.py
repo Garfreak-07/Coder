@@ -103,6 +103,30 @@ class AgentGraphEffectsTests(unittest.TestCase):
         self.assertIn("-before", preview["files"][0]["diff"])
         self.assertIn("+after", preview["files"][0]["diff"])
 
+    def test_modify_files_effect_blocks_risk_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / ".env").write_text("TOKEN=old\n", encoding="utf-8")
+
+            result = AgentGraphRunner(
+                default_planner_led_agent_workflow(),
+                executor=EffectSourceExecutor(
+                    proposed_changes=[
+                        {
+                            "path": ".env",
+                            "action": "update",
+                            "expected_before": "TOKEN=old\n",
+                            "content": "TOKEN=new\n",
+                        }
+                    ],
+                ),
+            ).run("Preview risky file changes.", str(repo))
+
+        effect = result.data["planner_input_bundle"]["effects"][0]
+        self.assertEqual(effect["status"], "patch_preview_blocked")
+        self.assertEqual(result.data["planner_input_bundle"]["plan_status"], "interrupted")
+        self.assertEqual(result.data["planner_input_bundle"]["interrupts"][0]["blocker_type"], "risk_boundary")
+
 
 class EffectSourceExecutor:
     def __init__(

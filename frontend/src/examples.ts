@@ -15,7 +15,7 @@ export const defaultPlannerLedAgentWorkflow: AgentWorkflowSpec = {
   id: "default-planner-led",
   version: "0.4",
   name: "Planner-led Agent Workflow",
-  description: "Planner decides. Executor changes only by order. Tester returns evidence. Runtime hides graph details.",
+  description: "Planner decides. Code Worker proposes changes by order. Tester returns evidence. Runtime hides graph details.",
   primary_planner_id: "planner",
   agents: [
     {
@@ -28,7 +28,7 @@ export const defaultPlannerLedAgentWorkflow: AgentWorkflowSpec = {
     },
     {
       id: "executor",
-      name: "Executor Agent",
+      name: "Code Worker Agent",
       role: "executor",
       model_tier: "standard",
       can_talk_to_human: false,
@@ -85,7 +85,7 @@ export function compileAgentWorkflow(spec: AgentWorkflowSpec): WorkflowSpec {
       runtimeAgent(planner, {
         runtimeId: "planner_order",
         role: "Planner Agent",
-        goal: "Produce the next executable order for the Executor.",
+        goal: "Produce the next executable order for the Code Worker.",
         artifactType: "planner_order",
         outputKey: "planner_order",
         inputKeys: ["run_contract", "round_summary", "execution_result", "test_result"],
@@ -93,7 +93,7 @@ export function compileAgentWorkflow(spec: AgentWorkflowSpec): WorkflowSpec {
       }),
       runtimeAgent(executor, {
         runtimeId: "executor",
-        role: "Executor Agent",
+        role: "Code Worker Agent",
         goal: "Follow the PlannerOrder and return only execution facts.",
         artifactType: "execution_result",
         outputKey: "execution_result",

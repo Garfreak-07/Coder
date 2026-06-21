@@ -9,7 +9,7 @@ export const enUS = {
   templates: {
     title: "Start From Template",
     defaultCodingName: "Planner-led Default Workflow",
-    defaultCodingPurpose: "Planner decides, Executor acts, Tester returns evidence, and only structured handoff data is passed.",
+    defaultCodingPurpose: "Planner decides, Code Worker acts, Tester returns evidence, and only structured handoff data is passed.",
     blankName: "Blank Advanced Workflow",
     blankPurpose: "Start/end only. Useful for legacy runtime editing or JSON import.",
     useTemplate: "Use Template",
@@ -24,7 +24,7 @@ export const enUS = {
     optionalModel: "OpenAI/DeepSeek or mock mode",
     projectKnowledge: "Project summary, expandable with local md/txt knowledge",
     structuredHandoff: "Structured artifacts such as RunContract, PlannerOrder, and ExecutionResult",
-    mediumRisk: "Medium: Executor owns implementation but direct write tools stay hidden by default",
+    mediumRisk: "Medium: Code Worker owns implementation but direct write tools stay hidden by default",
     lowRisk: "Low: no writable nodes"
   },
   library: {
@@ -168,7 +168,7 @@ export const zhCN = {
   templates: {
     title: "从模板开始",
     defaultCodingName: "Planner-led 默认工作流",
-    defaultCodingPurpose: "Planner 决策，Executor 执行，Tester 返回证据；只传结构化交接信息。",
+    defaultCodingPurpose: "Planner 决策，Code Worker 执行，Tester 返回证据；只传结构化交接信息。",
     blankName: "空白高级工作流",
     blankPurpose: "只包含 start/end，适合手动搭建或粘贴 JSON。",
     useTemplate: "使用模板",
@@ -183,7 +183,7 @@ export const zhCN = {
     optionalModel: "OpenAI/DeepSeek 或 mock 模式",
     projectKnowledge: "项目摘要，可扩展本地 md/txt 知识库",
     structuredHandoff: "RunContract、PlannerOrder、ExecutionResult 等结构化 artifact",
-    mediumRisk: "中：Executor 有实现职责，但默认不暴露直接写入工具",
+    mediumRisk: "中：Code Worker 有实现职责，但默认不暴露直接写入工具",
     lowRisk: "低：不包含可写节点"
   },
   library: {

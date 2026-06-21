@@ -560,7 +560,7 @@ def default_planner_led_agent_workflow() -> AgentWorkflowSpec:
             "id": "default-planner-led",
             "version": "0.4",
             "name": "Planner-led Agent Workflow",
-            "description": "Planner decides. Executor changes only by order. Tester returns evidence. Runtime hides graph details.",
+            "description": "Planner decides. Code Worker proposes changes by order. Tester returns evidence. Runtime hides graph details.",
             "primary_planner_id": "planner",
             "agents": [
                 {
@@ -580,7 +580,7 @@ def default_planner_led_agent_workflow() -> AgentWorkflowSpec:
                 },
                 {
                     "id": "executor",
-                    "name": "Executor Agent",
+                    "name": "Code Worker Agent",
                     "role": "executor",
                     "model_tier": "standard",
                     "can_talk_to_human": False,

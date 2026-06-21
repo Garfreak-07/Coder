@@ -5,6 +5,7 @@ from typing import Any
 from coder_workbench.agent_graph.artifacts import graph_artifact_id
 from coder_workbench.agent_graph.cache import GraphRunCache
 from coder_workbench.core import AgentWorkflowSpec
+from coder_workbench.coding.risk_map import build_risk_map, is_risk_path
 from coder_workbench.tools import default_tool_registry
 from coder_workbench.tools.patching import propose_patch
 
@@ -89,6 +90,46 @@ def _handle_patch_previews(
     changes = _requested_patch_changes_from_artifacts(cache)
     if not changes:
         return []
+
+    risk_map = build_risk_map(repo_root).model_dump(mode="json")
+    risky_changes = [
+        change
+        for change in changes
+        if is_risk_path(str(change.get("path") or change.get("file") or ""), risk_map)
+    ]
+    if risky_changes:
+        work_item_id = str(risky_changes[0].get("work_item_id") or "")
+        execution = cache.execution_cache.get(work_item_id) if work_item_id else None
+        record = {
+            "effect_type": "modify_files",
+            "status": "patch_preview_blocked",
+            "work_item_id": work_item_id or None,
+            "reason": "Proposed change targets a risk path.",
+            "errors": [
+                {
+                    "path": str(change.get("path") or change.get("file") or ""),
+                    "code": "risk_path",
+                    "message": "Risk paths require Planner intervention before preview or apply.",
+                }
+                for change in risky_changes
+            ],
+        }
+        cache.record_hidden_effect(record)
+        cache.record_interrupt(
+            {
+                "round": cache.round,
+                "work_item_id": work_item_id or "patch-preview",
+                "merge_index": execution.merge_index if execution else 1,
+                "agent_id": execution.agent_id if execution else "runtime",
+                "blocker_type": "risk_boundary",
+                "reason": "Patch preview blocked because proposed changes target risk paths.",
+                "planner_question": "Should Planner reject this change, narrow scope, or ask the user for explicit permission?",
+                "continue_without_human_possible": False,
+                "candidate_options": [],
+                "artifact_ref": graph_artifact_id("patch_preview", "blocked", work_item_id or "runtime"),
+            }
+        )
+        return [record]
 
     preview = propose_patch({"changes": changes}, {"repo_root": repo_root, "scopes": scopes, "data": data})
     patch_ref = graph_artifact_id("patch_preview", preview["patch_id"])

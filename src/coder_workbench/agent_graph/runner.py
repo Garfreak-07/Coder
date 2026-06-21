@@ -40,6 +40,12 @@ from coder_workbench.core import (
     assert_valid_agent_workflow,
 )
 from coder_workbench.core.authority import authority_profile_for_agent
+from coder_workbench.coding import (
+    build_coding_context_packet,
+    build_debug_finding,
+    build_repo_intelligence,
+    build_run_coding_eval,
+)
 from coder_workbench.runtime.state import RunEvent, RunResult, summarize_value
 from coder_workbench.skills import (
     ContextPacketV2,
@@ -129,6 +135,8 @@ class AgentGraphRunner:
             data["skill_index"] = skill_index.model_dump(mode="json")
             skill_store_root = _skill_store_root_from_data_or_repo(data, repo_root)
             data["skill_store_root"] = str(skill_store_root)
+            repo_intelligence = _repo_intelligence_from_data_or_repo(data, repo_root)
+            data["repo_intelligence"] = repo_intelligence
 
             emit(
                 "agent_graph.run.started",
@@ -142,6 +150,14 @@ class AgentGraphRunner:
                 "Installed SkillIndex loaded",
                 skills=len(skill_index.skills),
                 enabled_skills=len(skill_index.enabled()),
+            )
+            emit(
+                "repo_intelligence.available",
+                "Repository intelligence loaded",
+                languages=repo_intelligence.get("repo_index", {}).get("languages", []),
+                frameworks=repo_intelligence.get("repo_index", {}).get("frameworks", []),
+                test_commands=len(repo_intelligence.get("command_discovery", {}).get("test_commands", [])),
+                symbol_files=len(repo_intelligence.get("symbol_index", {}).get("files", [])),
             )
             max_rounds = _max_auto_rounds_from_workflow_or_data(self.agent_workflow, data)
             previous_bundle: PlannerInputBundle | None = None
@@ -301,6 +317,7 @@ class AgentGraphRunner:
         )
 
         cache = GraphRunCache(round=round_number, skill_index=skill_index.model_dump(mode="json"))
+        repo_intelligence = _repo_intelligence_from_data_or_repo(data, repo_root)
         planner_order = (
             self._planner_order_from_initial_data(data)
             if round_number == 1 and previous_bundle is None
@@ -311,6 +328,7 @@ class AgentGraphRunner:
             previous_round_summary=previous_round_summary,
             planner_human_response=planner_human_response,
             skill_index=skill_index,
+            repo_intelligence=repo_intelligence,
             round_number=round_number,
             emit=emit,
         )
@@ -422,6 +440,8 @@ class AgentGraphRunner:
                     skill_index=skill_index,
                     skill_store_root=skill_store_root,
                     run_id=str(data.get("run_id") or ""),
+                    repo_root=repo_root,
+                    repo_intelligence=repo_intelligence,
                 )
                 task_contexts.append({"item": item, "envelope": envelope})
             outcomes = self._run_wave(wave, task_contexts)
@@ -518,8 +538,12 @@ class AgentGraphRunner:
             data=data,
         )
         if hidden_effects:
-            data["hidden_effects"] = hidden_effects
             self._emit_hidden_effect_outputs(cache, hidden_effects, emit)
+        debug_findings = self._record_debug_findings(cache, recorder, repo_root, emit)
+        if debug_findings:
+            data["debug_findings"] = debug_findings
+        if cache.hidden_effects:
+            data["hidden_effects"] = cache.hidden_effects
 
         final_tester_agent_id = planner_order.plan_graph.final_tester_agent_id
         if final_tester_agent_id and not cache.interrupts:
@@ -685,6 +709,7 @@ class AgentGraphRunner:
                 token_ledger=ledger,
             )
         ]
+        output.setdefault("coding_eval", build_run_coding_eval(output, events))
         return output
 
     def _block_for_planner_human(
@@ -727,6 +752,8 @@ class AgentGraphRunner:
         skill_index: SkillIndex,
         skill_store_root: Path,
         run_id: str,
+        repo_root: str,
+        repo_intelligence: dict[str, Any],
     ) -> Any:
         upstream_refs = upstream_refs_for_item(cache, item)
         route = SkillRouter(skill_index).select(
@@ -758,6 +785,20 @@ class AgentGraphRunner:
             upstream_refs=upstream_refs,
             skill_route=route_payload,
         )
+        coding_packet = build_coding_context_packet(
+            repo_root,
+            envelope=envelope,
+            repo_index=repo_intelligence.get("repo_index"),
+            symbol_index=repo_intelligence.get("symbol_index"),
+            command_discovery=repo_intelligence.get("command_discovery"),
+            risk_map=repo_intelligence.get("risk_map"),
+            upstream_refs=upstream_refs,
+            selected_skills=route_payload["selected_skill_context"],
+        )
+        envelope = envelope.model_copy(
+            update={"coding_context_packet": coding_packet.model_dump(mode="json")}
+        )
+        cache.agent_tasks[item.work_item_id] = envelope
         packet = _context_packet_v2(
             envelope=envelope,
             route=route,
@@ -792,6 +833,13 @@ class AgentGraphRunner:
             round=cache.round,
             work_item_id=item.work_item_id,
             packet=packet.model_dump(mode="json"),
+        )
+        emit(
+            "agent.coding_context_packet",
+            "CodingContextPacket prepared for work item",
+            round=cache.round,
+            work_item_id=item.work_item_id,
+            packet=coding_packet.model_dump(mode="json"),
         )
         emit(
             "token.ledger.entry",
@@ -956,6 +1004,91 @@ class AgentGraphRunner:
             expected_type="test_result",
         )
 
+    def _record_debug_findings(
+        self,
+        cache: GraphRunCache,
+        recorder: AgentGraphArtifactRecorder,
+        repo_root: str,
+        emit: Any,
+    ) -> list[dict[str, Any]]:
+        findings: list[dict[str, Any]] = []
+        for records in cache.test_cache.values():
+            for test in records:
+                if test.status != "fail":
+                    continue
+                artifact = test.artifact_payload or {}
+                commands = artifact.get("check_commands") if isinstance(artifact.get("check_commands"), list) else []
+                first_command = commands[0] if commands else {}
+                command = first_command.get("command") if isinstance(first_command, dict) else first_command
+                finding = build_debug_finding(
+                    {
+                        "artifact_type": "check_result",
+                        "command": str(command or ""),
+                        "status": "fail",
+                        "summary": test.test_summary,
+                        "output": test.test_summary,
+                        "output_ref": test.test_result_ref or "",
+                    },
+                    work_item_id=test.work_item_id,
+                    repo_root=repo_root,
+                )
+                findings.append(self._record_debug_finding(cache, recorder, finding.model_dump(mode="json"), emit))
+
+        for effect in list(cache.hidden_effects):
+            if effect.get("effect_type") != "optional_check_command":
+                continue
+            if effect.get("status") not in {"failed", "check_requires_planner_confirmation"}:
+                continue
+            output_ref = str(effect.get("output_ref") or "")
+            output = cache.hidden_effect_outputs.get(output_ref, {}) if output_ref else {}
+            status = "blocked" if effect.get("status") == "check_requires_planner_confirmation" else "fail"
+            finding = build_debug_finding(
+                {
+                    "artifact_type": "check_result",
+                    "command": str(effect.get("command") or ""),
+                    "status": status,
+                    "summary": str(effect.get("reason") or ""),
+                    "output": str(output.get("output") or effect.get("reason") or ""),
+                    "output_ref": output_ref,
+                },
+                work_item_id=str(effect.get("work_item_id") or ""),
+                repo_root=repo_root,
+            )
+            findings.append(self._record_debug_finding(cache, recorder, finding.model_dump(mode="json"), emit))
+        return findings
+
+    def _record_debug_finding(
+        self,
+        cache: GraphRunCache,
+        recorder: AgentGraphArtifactRecorder,
+        finding: dict[str, Any],
+        emit: Any,
+    ) -> dict[str, Any]:
+        ref = graph_artifact_id(
+            "debug_finding",
+            finding.get("work_item_id") or "round",
+            len(cache.hidden_effects) + 1,
+        )
+        artifact = recorder.record(ref, finding)
+        record = {
+            "effect_type": "debug_finding",
+            "status": "created",
+            "work_item_id": finding.get("work_item_id"),
+            "debug_finding_ref": ref,
+            "failure_summary": finding.get("failure_summary"),
+            "likely_files": finding.get("likely_files", []),
+        }
+        cache.record_hidden_effect(record)
+        emit(
+            "debug.finding.created",
+            "DebugFindingArtifact created",
+            artifact_id=ref,
+            work_item_id=finding.get("work_item_id"),
+            failure_summary=finding.get("failure_summary"),
+            likely_files=finding.get("likely_files", []),
+        )
+        return artifact
+
     def _emit_hidden_effect_outputs(
         self,
         cache: GraphRunCache,
@@ -990,6 +1123,7 @@ class AgentGraphRunner:
         previous_round_summary: dict[str, Any] | None,
         planner_human_response: dict[str, Any] | None,
         skill_index: SkillIndex,
+        repo_intelligence: dict[str, Any],
         round_number: int,
         emit: Any,
     ) -> PlannerOrder:
@@ -1005,6 +1139,8 @@ class AgentGraphRunner:
         }
         if "skill_index" in parameters:
             kwargs["skill_index"] = skill_index
+        if "repo_intelligence" in parameters:
+            kwargs["repo_intelligence"] = repo_intelligence
         return self.executor.create_planner_order(request, **kwargs)
 
     def _planner_order_from_initial_data(self, data: dict[str, Any]) -> PlannerOrder | None:
@@ -1100,6 +1236,50 @@ def _skill_store_root_from_data_or_repo(data: dict[str, Any], repo_root: str) ->
     if isinstance(value, str) and value.strip():
         return Path(value)
     return Path(repo_root) / ".coder"
+
+
+def _repo_intelligence_from_data_or_repo(data: dict[str, Any], repo_root: str) -> dict[str, Any]:
+    value = data.get("repo_intelligence")
+    if isinstance(value, dict):
+        return value
+    try:
+        return build_repo_intelligence(repo_root)
+    except Exception as exc:
+        return {
+            "repo_index": {
+                "artifact_type": "repo_index",
+                "languages": [],
+                "frameworks": [],
+                "source_dirs": [],
+                "test_dirs": [],
+                "important_files": [],
+                "risk_files": [".env", ".git", ".coder"],
+                "package_managers": [],
+                "file_count": 0,
+                "confidence": "low",
+            },
+            "command_discovery": {
+                "artifact_type": "command_discovery",
+                "test_commands": [],
+                "build_commands": [],
+                "lint_commands": [],
+                "confidence": "low",
+            },
+            "risk_map": {
+                "artifact_type": "risk_map",
+                "risk_files": [".env", ".git", ".coder"],
+                "items": [],
+                "confidence": "low",
+            },
+            "symbol_index": {
+                "artifact_type": "symbol_index",
+                "files": [],
+                "parser": "regex_fallback",
+                "languages": [],
+                "confidence": "low",
+            },
+            "error": str(exc),
+        }
 
 
 def _context_packet_v2(

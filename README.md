@@ -11,18 +11,19 @@ Agents exchange compact structured artifacts instead of full transcripts.
 The active direction is:
 
 ```text
-Planner-led Orchestrator
-+ Structured Artifact Handoff
-+ Agent-only Workflow UI
-+ Hidden Runtime Graph
+v0.8 Coding Harness Core
++ Planner-led coding loop
++ Repository intelligence kernel
++ AgentHarness sub-agent boundary
++ Patch preview, sandbox check, debug evidence, and coding evaluation
 ```
 
 The default user-facing template is:
 
 ```text
-Planner Agent -> Executor Agent -> Tester Agent
-      ^                                   |
-      +----------- loop decision ---------+
+Planner Agent -> Code Worker Agent -> Tester Agent -> Planner Agent
+      ^                                             |
+      +----------- automatic replan / finish --------+
 ```
 
 The product runtime also supports AgentGraph execution where Planner can split a
@@ -31,17 +32,22 @@ on `depends_on`, and submit an ordered compact `PlannerInputBundle` back to
 Planner.
 
 Only Planner can ask the human or decide whether to continue, finish, stop, or
-request confirmation. Runtime internals such as context selection, artifact
-storage, loop routing, path guards, patch safety, approvals, and replay stay
-behind that agent-only surface.
+request confirmation. Worker, Tester, and Final Reviewer return structured
+facts, evidence, or blockers to Planner. Runtime internals such as repository
+indexing, context selection, artifact storage, loop routing, path guards, patch
+safety, sandbox checks, approvals, and replay stay behind that agent-only
+surface.
 
-Current implementation work follows the v0.4 AgentWorkflow builder track:
-ordinary users create Agents, choose capabilities, connect Agents, set loop
-limits, save, and run while runtime graph details stay internal.
+The v0.4 AgentWorkflow builder remains the user-facing workflow surface.
+v0.8 strengthens the coding runtime underneath it: Coder first builds repo
+intelligence, Planner creates reachable concrete work items, Code Worker emits
+`proposed_changes`, runtime creates patch previews, Tester returns evidence,
+debug findings are fed back to Planner, and coding diagnostics report whether
+the loop actually improved the task.
 
 ## Core Artifacts
 
-The default workflow uses six validated artifact types:
+The default workflow uses six validated planning artifacts:
 
 - `run_contract`
 - `planner_order`
@@ -49,6 +55,18 @@ The default workflow uses six validated artifact types:
 - `test_result`
 - `planner_decision`
 - `round_summary`
+
+The v0.8 coding kernel also produces internal coding artifacts:
+
+- `repo_index`
+- `command_discovery`
+- `risk_map`
+- `symbol_index`
+- `coding_context_packet`
+- `patch_preview`
+- `check_result`
+- `debug_finding`
+- `coding_evaluation_report`
 
 Legacy `plan_artifact`, `patch_artifact`, and `review_artifact` are retained
 only for old saved workflows.
@@ -87,6 +105,12 @@ runner.
 ## Current Capabilities
 
 - `AgentWorkflowSpec` for the user-visible Planner / Executor / Tester layer.
+- `AgentHarness` base loop with Planner, Code Worker, Tester, and Final Review
+  policies.
+- Repository intelligence for Python packages, Vite/React frontends, risk
+  paths, check commands, and regex-backed symbol navigation.
+- Coding context packet selection that includes relevant files and snippets
+  without loading the full repository.
 - v0.4 Agent workflow validation with one primary Planner, arbitrary Agent
   count, hidden handoff inference, and deterministic save-blocking errors.
 - Initial capability registry for Planner, Executor/Worker, and Tester/Reviewer
@@ -103,6 +127,8 @@ runner.
 - Local run history, stored run replay, and artifact/blob loading.
 - Scoped path guards, patch preview/apply/rollback primitives, command
   approvals, and preflight checks retained as internal safety capabilities.
+- DebugFinding artifacts and `coding_eval` diagnostics for Planner replan and
+  benchmark reporting.
 
 ## Install
 
@@ -159,6 +185,34 @@ coder --repo . `
 ```
 
 Use `--approve` only for workflows that include explicit human gates.
+
+## Coding Harness Diagnostics
+
+AgentGraph runs now include repository intelligence and coding diagnostics in
+their run data:
+
+```text
+repo_intelligence.repo_index
+repo_intelligence.command_discovery
+repo_intelligence.risk_map
+repo_intelligence.symbol_index
+graph_run_cache.context_packets_v2
+debug_findings
+coding_eval
+```
+
+The first benchmark fixture is in:
+
+```text
+tests/fixtures/coding_tasks/python_bugfix_001.json
+```
+
+Run backend validation with:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests
+.\.venv\Scripts\python.exe -m compileall src tests
+```
 
 ## API Keys and Local Secrets
 

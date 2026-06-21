@@ -16,6 +16,7 @@ def build_planner_order_prompt(
     previous_round_summary: dict[str, Any] | None = None,
     planner_human_response: dict[str, Any] | None = None,
     skill_index: SkillIndex | None = None,
+    repo_intelligence: dict[str, Any] | None = None,
     round_number: int = 1,
 ) -> str:
     parts = [
@@ -27,6 +28,12 @@ def build_planner_order_prompt(
         "merge_index is only the stable result presentation order returned to Planner.",
         "If previous PlannerInputBundle or RoundSummary exists, plan only remaining or corrective work.",
         "Do not repeat completed passed work unless necessary. New work_item_id values should be unique for this round.",
+        "Use repo intelligence before creating work_items.",
+        "Do not create vague work items.",
+        "Assign work_items to reachable Agents only.",
+        "Use depends_on only for real execution dependency.",
+        "Use merge_index only for result presentation.",
+        "Do not touch risk_files unless the RunContract allows it.",
         _planner_order_schema_notes(),
         "Round number:",
         str(round_number),
@@ -35,6 +42,19 @@ def build_planner_order_prompt(
         "AgentWorkflow JSON:",
         _compact_json(_workflow_summary(agent_workflow)),
     ]
+    if repo_intelligence:
+        parts.extend(
+            [
+                "RepoIndex summary JSON:",
+                _compact_json(repo_intelligence.get("repo_index", {})),
+                "CommandDiscovery summary JSON:",
+                _compact_json(repo_intelligence.get("command_discovery", {})),
+                "RiskMap summary JSON:",
+                _compact_json(repo_intelligence.get("risk_map", {})),
+                "SymbolIndex summary JSON:",
+                _compact_json(_symbol_index_summary(repo_intelligence.get("symbol_index", {}))),
+            ]
+        )
     if skill_index and skill_index.skills:
         parts.extend(
             [
@@ -75,6 +95,8 @@ def build_worker_execution_prompt(
             _compact_json(item.model_dump(mode="json")),
             "AgentTaskEnvelope JSON:",
             _compact_json(envelope.model_dump(mode="json")),
+            "CodingContextPacket JSON:",
+            _compact_json(envelope.coding_context_packet),
             "Selected Skill context JSON:",
             _compact_json(envelope.selected_skill_context),
         ]
@@ -270,3 +292,23 @@ def _agent_summary(agent: AgentWorkflowAgent) -> dict[str, Any]:
 
 def _compact_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2)[:8000]
+
+
+def _symbol_index_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    files = value.get("files") if isinstance(value.get("files"), list) else []
+    return {
+        "artifact_type": value.get("artifact_type", "symbol_index"),
+        "parser": value.get("parser"),
+        "languages": value.get("languages", []),
+        "file_count": len(files),
+        "files": [
+            {
+                "path": item.get("path"),
+                "symbols": item.get("symbols", [])[:12],
+            }
+            for item in files[:40]
+            if isinstance(item, dict)
+        ],
+    }

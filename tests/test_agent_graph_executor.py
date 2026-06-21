@@ -6,7 +6,7 @@ from typing import Any
 
 from coder_workbench.agent_graph.executor import AgentGraphExecutor
 from coder_workbench.agent_graph.runner import AgentGraphRunner
-from coder_workbench.agent_graph.schema import AgentTaskEnvelope, PlannerOrder, WorkItem
+from coder_workbench.agent_graph.schema import AgentTaskEnvelope, PlannerInputBundle, PlannerOrder, WorkItem
 from coder_workbench.core import default_planner_led_agent_workflow
 from coder_workbench.server.settings import ProviderSettings
 from coder_workbench.skills import SkillIndex, SkillIndexEntry
@@ -98,6 +98,51 @@ class AgentGraphExecutorTests(unittest.TestCase):
         self.assertIn("Installed SkillIndex JSON", model.prompts[0])
         self.assertIn("github-research", model.prompts[0])
         self.assertNotIn("# GitHub Research", model.prompts[0])
+
+    def test_planner_order_prompt_includes_repo_intelligence(self) -> None:
+        model = FakeChatModel(
+            [
+                (
+                    '{"artifact_type":"planner_order","round":1,"round_goal":"Fix tests",'
+                    '"plan_graph":{"work_items":[{"work_item_id":"executor-work","merge_index":1,'
+                    '"assignee_agent_id":"executor","task_summary":"Use repo intelligence","depends_on":[],'
+                    '"tester_agent_ids":["tester"]}]}}'
+                )
+            ]
+        )
+        executor = _executor(model)
+
+        executor.create_planner_order(
+            "Fix tests",
+            repo_intelligence={
+                "repo_index": {
+                    "artifact_type": "repo_index",
+                    "languages": ["python"],
+                    "frameworks": ["fastapi"],
+                    "source_dirs": ["src"],
+                    "test_dirs": ["tests"],
+                    "important_files": ["pyproject.toml"],
+                    "risk_files": [".env"],
+                    "package_managers": ["pip"],
+                    "file_count": 3,
+                    "confidence": "high",
+                },
+                "command_discovery": {
+                    "artifact_type": "command_discovery",
+                    "test_commands": [{"command": "python -m unittest discover -s tests", "cwd": ".", "confidence": "high"}],
+                    "build_commands": [],
+                    "lint_commands": [],
+                    "confidence": "high",
+                },
+                "risk_map": {"artifact_type": "risk_map", "risk_files": [".env"], "items": [], "confidence": "high"},
+                "symbol_index": {"artifact_type": "symbol_index", "files": [], "parser": "regex_fallback", "languages": ["python"], "confidence": "medium"},
+            },
+        )
+
+        self.assertIn("RepoIndex summary JSON", model.prompts[0])
+        self.assertIn("CommandDiscovery summary JSON", model.prompts[0])
+        self.assertIn("RiskMap summary JSON", model.prompts[0])
+        self.assertIn("Use repo intelligence before creating work_items", model.prompts[0])
 
     def test_valid_worker_json_becomes_execution_record(self) -> None:
         model = FakeChatModel(
@@ -231,6 +276,32 @@ class AgentGraphExecutorTests(unittest.TestCase):
 
         self.assertEqual(decision["next_action"], "finish")
         self.assertEqual(decision["reason"], "All work is done.")
+
+    def test_mock_planner_decision_continues_on_failed_tests(self) -> None:
+        executor = AgentGraphExecutor(default_planner_led_agent_workflow())
+
+        decision = executor.create_planner_decision(
+            bundle=PlannerInputBundle(
+                round=1,
+                planner_order_ref="planner_order_round_1",
+                plan_status="partial_failed",
+                items=[
+                    {
+                        "work_item_id": "executor-work",
+                        "merge_index": 1,
+                        "task_summary": "Fix tests.",
+                        "execution_status": "completed",
+                        "execution_summary": "Changed code.",
+                        "test_status": "fail",
+                        "test_summary": "Tests failed.",
+                        "refs": [],
+                    }
+                ],
+            )
+        )
+
+        self.assertEqual(decision["next_action"], "continue")
+        self.assertIn("Fix failing test", decision["next_round_goal"])
 
     def test_valid_final_tester_json_becomes_final_test_record(self) -> None:
         model = FakeChatModel(['{"artifact_type":"test_result","status":"pass","summary":"Aggregate passed."}'])
