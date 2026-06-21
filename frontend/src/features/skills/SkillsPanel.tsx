@@ -269,6 +269,7 @@ function SkillCard({
   actions: ReactNode;
 }) {
   const connectors = "requires_connectors" in skill ? skill.requires_connectors : skill.connectors;
+  const connectorOperations = skill.connector_operations ?? [];
   return (
     <article className="skill-card">
       <div className="skill-card-heading">
@@ -284,6 +285,7 @@ function SkillCard({
         <span>{skill.publisher}</span>
         <span>{skill.trust_level}</span>
         <span>{connectors.length > 0 ? connectors.join(", ") : "no connectors"}</span>
+        <span>{connectorOperations.length > 0 ? `${connectorOperations.length} connector ops` : "no connector ops"}</span>
         <span>{skill.external_effect ? "external effects" : "no external effects"}</span>
         {installed && <span>{installed.enabled ? "enabled" : "disabled"}</span>}
         {update?.pinned_version && <span>pinned {update.pinned_version}</span>}

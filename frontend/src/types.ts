@@ -367,6 +367,17 @@ export interface HealthStatus {
   tools: string[];
 }
 
+export interface ConnectorOperationSummary {
+  connector_id: string;
+  operation_id: string;
+  risk_level: string;
+  external_effect: boolean;
+  requires_preview: boolean;
+  requires_human_approval: boolean;
+  descriptor_sha256?: string | null;
+  package_sha256?: string;
+}
+
 export interface SkillSummary {
   id: string;
   name: string;
@@ -378,6 +389,7 @@ export interface SkillSummary {
   requires: string[];
   produces: string[];
   connectors: string[];
+  connector_operations: ConnectorOperationSummary[];
   trust_level: "official" | "verified" | "community" | "local" | "untrusted" | string;
   enabled: boolean;
   external_effect: boolean;
@@ -394,6 +406,7 @@ export interface SkillIndexEntry {
   produces: string[];
   requires: string[];
   connectors: string[];
+  connector_operations: ConnectorOperationSummary[];
   trust_level: string;
   enabled: boolean;
   max_skill_tokens: number;
@@ -422,6 +435,7 @@ export interface RemoteSkillEntry {
   risk_level: string;
   external_effect: boolean;
   requires_connectors: string[];
+  connector_operations: ConnectorOperationSummary[];
   trust_level: string;
 }
 
