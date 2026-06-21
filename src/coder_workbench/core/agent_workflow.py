@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from coder_workbench.core.archetypes import agent_payload_from_role_card
 from coder_workbench.core.authority import authority_profile_for_agent
 from coder_workbench.core.schema import AgentSpec, ContextPolicy, EdgeSpec, NodeSpec, PermissionPolicy, WorkflowSpec
 
@@ -88,10 +89,18 @@ class AgentWorkflowAgent(BaseModel):
 
     id: str
     name: str
-    role: str
+    role: str = ""
+    role_card: str | None = None
     model_tier: str = "standard"
     can_talk_to_human: bool = False
     capabilities: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_role_card(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        return agent_payload_from_role_card(data)
 
 
 class AgentWorkflowEdge(BaseModel):

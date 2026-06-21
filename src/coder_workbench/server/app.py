@@ -15,9 +15,11 @@ from coder_workbench.core import (
     AgentWorkflowValidationError,
     WorkflowSpec,
     capability_catalog,
+    compile_runtime_profiles,
     compile_agent_workflow,
     default_planner_led_agent_workflow,
     load_workflow,
+    role_card_catalog,
     validate_agent_workflow_payload,
 )
 from coder_workbench.core.preflight import validate_workflow_preflight
@@ -121,6 +123,10 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
     @app.get("/api/v2/capabilities")
     def get_capabilities() -> dict[str, Any]:
         return {"capabilities": capability_catalog()}
+
+    @app.get("/api/v2/agent-role-cards")
+    def get_agent_role_cards() -> dict[str, Any]:
+        return {"role_cards": role_card_catalog()}
 
     @app.get("/api/v2/skills/installed")
     def get_installed_skills() -> dict[str, Any]:
@@ -263,6 +269,22 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
     @app.post("/api/v2/agent-workflows/validate")
     def validate_agent_workflow_endpoint(agent_workflow: dict[str, Any]) -> dict[str, Any]:
         return validate_agent_workflow_payload(agent_workflow).model_dump(mode="json")
+
+    @app.post("/api/v2/agent-workflows/runtime-profiles")
+    def agent_workflow_runtime_profiles(agent_workflow: dict[str, Any]) -> dict[str, Any]:
+        try:
+            _raise_agent_workflow_validation(agent_workflow)
+            spec = AgentWorkflowSpec.model_validate(agent_workflow)
+        except AgentWorkflowValidationError as exc:
+            raise HTTPException(status_code=400, detail=exc.result.model_dump(mode="json")) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "profiles": [
+                profile.model_dump(mode="json")
+                for profile in compile_runtime_profiles(spec)
+            ]
+        }
 
     @app.post("/api/v2/library/workflows")
     def save_workflow(workflow: dict[str, Any]) -> dict[str, Any]:

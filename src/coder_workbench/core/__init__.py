@@ -22,6 +22,15 @@ from .authority import (
     authority_catalog,
     authority_profile_for_agent,
 )
+from .archetypes import (
+    AgentRuntimeProfile,
+    RoleCardSpec,
+    compile_agent_runtime_profile,
+    compile_runtime_profiles,
+    role_card_catalog,
+    role_card_for_id,
+    role_card_registry,
+)
 from .legacy_compile import compile_agent_workflow
 from .schema import (
     AgentSpec,
@@ -42,8 +51,10 @@ __all__ = [
     "AgentWorkflowValidationError",
     "AgentWorkflowValidationIssue",
     "AgentWorkflowValidationResult",
+    "AgentRuntimeProfile",
     "CapabilityPermissions",
     "CapabilitySpec",
+    "RoleCardSpec",
     "AgentSpec",
     "ContextPolicy",
     "EdgeSpec",
@@ -58,8 +69,13 @@ __all__ = [
     "capability_catalog",
     "capability_registry",
     "compile_agent_workflow",
+    "compile_agent_runtime_profile",
+    "compile_runtime_profiles",
     "default_planner_led_agent_workflow",
     "load_workflow",
+    "role_card_catalog",
+    "role_card_for_id",
+    "role_card_registry",
     "validate_agent_workflow",
     "validate_agent_workflow_payload",
 ]
