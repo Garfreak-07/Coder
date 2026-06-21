@@ -6,17 +6,21 @@ Coder is built around an AgentGraph runtime where Planner owns global decisions,
 Code Worker performs bounded implementation work, Tester returns evidence, and
 the runtime passes compact structured artifacts instead of transcripts.
 
-The current architecture target is v0.9:
+The current architecture target is v0.9.1:
 
 ```text
 Ordinary Agent workflow UI
 -> AgentRecipe / RuntimeProfileCompiler
--> AgentGraphRunner
+-> RuntimeProfileCache
+-> RunController / RunGuard
+-> AgentGraphRunner / AgentGraphScheduler
+-> ActionGateway
+-> BudgetBroker
 -> ContextService
 -> AgentRun
 -> AgentEngineRegistry
 -> CodeWorkerEngine / Tester / Planner paths
--> structured artifacts and PlannerDecision
+-> TraceSpan, partitioned stores, structured artifacts, PlannerDecision
 ```
 
 Only Planner can ask the user. Non-Planner Agents return artifacts, blockers, or
@@ -27,15 +31,20 @@ evidence to Planner.
 ```text
 src/coder_workbench/
   agent_model/       AgentRecipe, RuntimeProfileCompiler, runtime profiles
+  actions/           ActionSpec and ActionGateway for controlled effects
   agent_engine/      AgentEngine specs, registry, harness validation, engines
   agent_graph/       Planner-led graph runner, scheduling, cache, merge logic
   agent_harness/     Harness loops and shared ArtifactRepairService
+  budget/            BudgetBroker reservations before model/tool/context work
   coding/            Repo intelligence, PatchService, CommandService, checks
   context/           ContextService, ContextPacketV2 and TokenLedger wiring
   core/              AgentWorkflowSpec, artifacts, authority, legacy compile
   extensions/        Extension manifests, plugin/skill routing and runtime
+  observability/     TraceSpan and TraceContext models
   runtime/           Legacy WorkflowSpec interpreter and run state
+  runtime_kernel/    RunController, RunGuard, round state, plan fingerprinting
   server/            FastAPI app, storage, live run managers
+  server/stores/     Partitioned run events, artifacts, blobs, ledgers, cache
   skills/            Installed skill store, registry client, skill router
   tools/             Compatibility tool registry and low-level tool wrappers
 frontend/
@@ -51,14 +60,18 @@ Product Agent workflow runs use:
 ```text
 AgentWorkflowSpec
 -> PlannerOrder.plan_graph
+-> RunController / RunGuard
 -> GraphRunCache
+-> ActionGateway
 -> AgentTaskEnvelope
 -> ContextService
+-> BudgetBroker reservations
 -> AgentRun
 -> AgentEngine
 -> execution_result / test_result
 -> PlannerInputBundle
 -> PlannerDecision
+-> RunController next-round decision
 ```
 
 `WorkflowSpec` and `WorkflowRunner` are legacy compatibility paths for old saved
@@ -94,15 +107,26 @@ retained only for old `WorkflowSpec` flows.
 
 - `ContextService` builds `ContextPacketV2`, selects skill context, prepares
   coding context packets, and writes token ledger entries.
+- `RunController` owns PlannerDecision loop control, max rounds, and repeated
+  plan fingerprint guards.
+- `BudgetBroker` reserves model, tool, and context budgets before execution.
+- `ActionGateway` is the runtime entry point for context construction, patch
+  preview, command checks, and artifact repair/validation.
 - `RuntimeProfileCompiler` converts ordinary Agent roles into internal engine,
   context, token, artifact, plugin, skill, memory, repair, and tool policies.
+- `RuntimeProfileCache` avoids recompiling identical workflow/extension/profile
+  combinations.
 - `AgentRun` dispatches work through `AgentEngineRegistry`.
 - `PatchService` owns proposed change validation, risk path blocking, patch
-  preview, apply, and rollback.
+  preview, apply, and rollback behind `ActionGateway`.
 - `CommandService` owns scoped cwd validation, command approval, timeouts, and
-  output capture.
+  output capture behind `ActionGateway`.
 - `ArtifactRepairService` owns one-shot JSON artifact repair for model outputs.
 - `ExtensionRouter` routes globally installed plugins and skills per work item.
+- `TraceContext` attaches `trace_id`, `span_id`, and `parent_span_id` to run
+  events.
+- `PartitionedRunStores` provides logical event, artifact, blob, ledger,
+  extension, and cache stores over the `.coder` layout.
 
 ## Install
 
@@ -182,6 +206,10 @@ Legacy `/api/v2/skills/*`, `/api/v2/live-runs`, and `WorkflowSpec` endpoints
 remain for compatibility. New Agent product behavior should use the AgentGraph
 and Extensions endpoints.
 
+`compile_agent_workflow_legacy_preview()` is the explicit compatibility
+compiler for advanced preview and migration/debug only. `compile_agent_workflow()`
+remains a compatibility alias.
+
 ## Testing
 
 Backend:
@@ -210,8 +238,10 @@ Focused architecture boundary tests:
 - User interaction must remain `User <-> Planner` only.
 - Worker, Tester, and Final Tester must not ask the user directly.
 - Product live Agent workflows must not compile into legacy `WorkflowSpec`.
-- New patch and command behavior should go through `PatchService` and
-  `CommandService`.
+- New context, patch, command, repair, and validation behavior should enter
+  through `ActionGateway`; services such as `ContextService`, `PatchService`,
+  and `CommandService` stay behind that boundary.
+- Budget-affecting work should reserve through `BudgetBroker` before execution.
 - New model-output repair behavior should go through `ArtifactRepairService`.
 - Extensions are globally installed and routed per work item.
 - Ordinary UI should not expose runtime JSON, harness graphs, context policies,

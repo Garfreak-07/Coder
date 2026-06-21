@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from coder_workbench.actions import ActionGateway, ActionSpec, RunContext
 from coder_workbench.agent_graph.artifacts import graph_artifact_id
 from coder_workbench.agent_graph.cache import GraphRunCache
 from coder_workbench.core import AgentWorkflowSpec
-from coder_workbench.coding.command_service import CommandService
-from coder_workbench.coding.patch_service import PatchService
 
 
 def apply_hidden_effects(
@@ -16,10 +15,12 @@ def apply_hidden_effects(
     repo_root: str,
     scopes: list[str],
     data: dict[str, Any],
+    action_gateway: ActionGateway | None = None,
 ) -> list[dict[str, Any]]:
+    gateway = action_gateway or ActionGateway()
     records: list[dict[str, Any]] = []
-    records.extend(_handle_optional_check_commands(agent_workflow, cache, repo_root, scopes, data))
-    records.extend(_handle_patch_previews(agent_workflow, cache, repo_root, scopes, data))
+    records.extend(_handle_optional_check_commands(agent_workflow, cache, repo_root, scopes, data, gateway))
+    records.extend(_handle_patch_previews(agent_workflow, cache, repo_root, scopes, data, gateway))
     return records
 
 
@@ -29,6 +30,7 @@ def _handle_optional_check_commands(
     repo_root: str,
     scopes: list[str],
     data: dict[str, Any],
+    action_gateway: ActionGateway,
 ) -> list[dict[str, Any]]:
     if not any("optional_check_command" in agent.capabilities for agent in agent_workflow.agents):
         return []
@@ -37,14 +39,26 @@ def _handle_optional_check_commands(
         return []
 
     records: list[dict[str, Any]] = []
-    command_service = CommandService(repo_root, scopes=scopes, data=data)
     for index, command_request in enumerate(commands, start=1):
-        result = command_service.run_check(
-            str(command_request["command"]),
-            cwd=str(command_request.get("cwd") or "."),
-            timeout_seconds=int(command_request.get("timeout_seconds") or 120),
+        action = action_gateway.run(
+            ActionSpec(
+                action_id=f"run_command:{cache.round}:{index}",
+                action_type="run_command_sandbox",
+                input={
+                    "command": str(command_request["command"]),
+                    "cwd": str(command_request.get("cwd") or "."),
+                    "timeout_seconds": int(command_request.get("timeout_seconds") or 120),
+                },
+            ),
+            run_context=RunContext(
+                run_id=str(data.get("run_id") or "agent-graph"),
+                repo_root=repo_root,
+                scopes=scopes,
+                data=data,
+            ),
         )
-        if result.get("blocked"):
+        result = dict(action.payload.get("result") or {})
+        if action.status == "blocked" or result.get("blocked"):
             record = {
                 "effect_type": "optional_check_command",
                 "status": "check_requires_planner_confirmation",
@@ -78,6 +92,7 @@ def _handle_patch_previews(
     repo_root: str,
     scopes: list[str],
     data: dict[str, Any],
+    action_gateway: ActionGateway,
 ) -> list[dict[str, Any]]:
     if not any("modify_files" in agent.capabilities for agent in agent_workflow.agents):
         return []
@@ -85,7 +100,30 @@ def _handle_patch_previews(
     if not changes:
         return []
 
-    preview = PatchService(repo_root, scopes=scopes, data=data).preview(changes)
+    action = action_gateway.run(
+        ActionSpec(
+            action_id=f"propose_patch:{cache.round}",
+            action_type="propose_patch",
+            input={"changes": changes},
+        ),
+        run_context=RunContext(
+            run_id=str(data.get("run_id") or "agent-graph"),
+            repo_root=repo_root,
+            scopes=scopes,
+            data=data,
+        ),
+    )
+    preview = dict(action.payload.get("preview") or {})
+    if action.status == "failed":
+        record = {
+            "effect_type": "modify_files",
+            "status": "patch_preview_failed",
+            "work_item_id": None,
+            "reason": action.summary,
+            "error_code": action.error_code,
+        }
+        cache.record_hidden_effect(record)
+        return [record]
     if preview.get("status") == "blocked":
         risky_changes = list(preview.get("risky_changes") or [])
         work_item_id = str(risky_changes[0].get("work_item_id") or "") if risky_changes else ""

@@ -3,6 +3,10 @@
 Extensions are globally installed and routed by the runtime. Users do not need
 to attach every capability to every Agent.
 
+Ordinary users still see Agents, workflows, plugins, and skills. Runtime routing
+goes through `ActionGateway` so plugin, skill, context, patch, command, and MCP
+paths can share budget and permission controls.
+
 ## Plugins
 
 Plugins provide executable operations:
@@ -13,7 +17,9 @@ Plugins provide executable operations:
 - Browser or external automation
 - AgentEngine packages
 
-External-effect operations require preview and approval metadata.
+External-effect operations require preview and approval metadata. Runtime
+execution should enter through `ActionGateway`, which reserves with
+`BudgetBroker` before dispatching to services or extension runtimes.
 
 ## Skills
 
@@ -25,7 +31,8 @@ Skills provide knowledge and procedures:
 - Domain templates
 
 `ExtensionRouter` routes relevant skills per work item. `ContextService`
-enforces token budgets and records loaded and omitted skill tokens.
+constructs the packet and records loaded and omitted skill tokens, but
+`BudgetBroker` performs the pre-execution context reservation.
 
 ## API
 
@@ -38,3 +45,17 @@ New product endpoints:
 - `/api/v2/extensions/install`
 
 Existing `/api/v2/skills/*` endpoints remain temporary compatibility aliases.
+Legacy `WorkflowSpec` paths must not become new extension integration points.
+
+## v0.9.1 Boundary
+
+- Ordinary users still manage Agents, workflows, plugins, and skills.
+- `RunController` owns Planner loop continuation; extensions do not decide
+  global run state.
+- `BudgetBroker` reserves extension, context, tool, and model-call budgets
+  before execution.
+- `ActionGateway` is the entry point for extension-backed runtime actions.
+- Extension metadata and cache files live behind partitioned extension/cache
+  stores.
+- Legacy `WorkflowSpec` endpoints remain compatibility aliases, not new
+  extension surfaces.

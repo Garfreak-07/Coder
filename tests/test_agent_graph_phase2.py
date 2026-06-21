@@ -170,9 +170,11 @@ class AgentGraphRunnerPhase2Tests(unittest.TestCase):
             store = RunStore(Path(tmp) / ".coder")
             stored = store.save("agent-graph", tmp, "Record artifacts.", result)
             loaded = store.get_artifact(stored.id, "planner_input_bundle_round_1")
+            ledger_entries = store.partitions.ledgers.list(stored.id)
 
         self.assertEqual(loaded["artifact_type"], "planner_input_bundle")
         self.assertEqual(loaded["items"][0]["work_item_id"], "executor-work")
+        self.assertEqual(ledger_entries[0]["work_item_id"], "executor-work")
 
     def test_runner_records_final_tester_aggregate(self) -> None:
         planner_order = {
@@ -207,6 +209,27 @@ class AgentGraphRunnerPhase2Tests(unittest.TestCase):
         self.assertEqual(result.data["planner_input_bundle"]["final_test_ref"], "test_result_final_final_tester")
         self.assertIn("test_result_final_final_tester", result.artifacts)
         self.assertIn("test.final.completed", {event.type for event in result.events})
+
+    def test_runner_events_carry_trace_and_span_hierarchy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = AgentGraphRunner(default_planner_led_agent_workflow()).run("Trace the run.", tmp)
+
+        trace_ids = {event.payload.get("trace_id") for event in result.events}
+        self.assertEqual(len(trace_ids), 1)
+        self.assertIn("trace_id", result.data)
+        self.assertEqual(trace_ids, {result.data["trace_id"]})
+
+        spans = {span["span_id"]: span for span in result.data["trace_spans"]}
+        wave_event = next(event for event in result.events if event.type == "agent_graph.wave.started")
+        agent_started = next(event for event in result.events if event.type == "agent_task.started")
+        action_completed = next(event for event in result.events if event.type == "action.completed")
+
+        self.assertEqual(agent_started.payload["parent_span_id"], wave_event.payload["span_id"])
+        self.assertEqual(
+            action_completed.payload["parent_span_id"],
+            agent_started.payload["span_id"],
+        )
+        self.assertEqual(spans[action_completed.payload["span_id"]]["kind"], "action")
 
     def test_runner_routes_installed_skills_into_task_envelope_and_ledger(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

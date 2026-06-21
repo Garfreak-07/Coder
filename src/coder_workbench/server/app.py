@@ -16,7 +16,7 @@ from coder_workbench.core import (
     WorkflowSpec,
     capability_catalog,
     compile_runtime_profiles,
-    compile_agent_workflow,
+    compile_agent_workflow_legacy_preview,
     default_planner_led_agent_workflow,
     load_workflow,
     role_card_catalog,
@@ -431,7 +431,7 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
     @app.get("/api/v2/agent-workflows/default")
     def get_default_agent_workflow() -> dict[str, Any]:
         agent_workflow = default_planner_led_agent_workflow()
-        workflow = compile_agent_workflow(agent_workflow)
+        workflow = compile_agent_workflow_legacy_preview(agent_workflow)
         return {
             "agent_workflow": agent_workflow.model_dump(mode="json", by_alias=True, exclude_none=True),
             "runtime_boundary": LEGACY_RUNTIME_PREVIEW_BOUNDARY,
@@ -449,7 +449,7 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
         try:
             _raise_agent_workflow_validation(agent_workflow)
             spec = AgentWorkflowSpec.model_validate(agent_workflow)
-            workflow = compile_agent_workflow(spec)
+            workflow = compile_agent_workflow_legacy_preview(spec)
         except AgentWorkflowValidationError as exc:
             raise HTTPException(status_code=400, detail=exc.result.model_dump(mode="json")) from exc
         except Exception as exc:

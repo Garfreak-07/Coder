@@ -32,7 +32,7 @@ from .archetypes import (
     role_card_for_id,
     role_card_registry,
 )
-from .legacy_compile import compile_agent_workflow
+from .legacy_compile import compile_agent_workflow, compile_agent_workflow_legacy_preview
 from .schema import (
     AgentSpec,
     ContextPolicy,
@@ -70,6 +70,7 @@ __all__ = [
     "capability_catalog",
     "capability_registry",
     "compile_agent_workflow",
+    "compile_agent_workflow_legacy_preview",
     "compile_agent_runtime_profile",
     "compile_runtime_profiles",
     "default_capabilities_for_role",

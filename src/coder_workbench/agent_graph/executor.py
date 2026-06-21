@@ -30,11 +30,13 @@ from coder_workbench.agent_harness import (
     TestHarness,
 )
 from coder_workbench.agent_harness.repair import ArtifactRepairService
+from coder_workbench.budget import BudgetBroker
 from coder_workbench.config import RuntimeConfig, load_runtime_config
 from coder_workbench.core import AgentWorkflowAgent, AgentWorkflowSpec
 from coder_workbench.core.artifacts import ArtifactValidationError, validate_artifact
 from coder_workbench.core.authority import authority_profile_for_agent
 from coder_workbench.llm import create_chat_model
+from coder_workbench.skills import estimate_tokens
 from coder_workbench.skills.index import SkillIndex
 
 
@@ -109,6 +111,8 @@ class AgentGraphExecutor:
         runtime_settings: Any | None = None,
         model_factory: ModelFactory = create_chat_model,
         agent_run: AgentRun | None = None,
+        budget_broker: BudgetBroker | None = None,
+        run_id: str | None = None,
     ) -> None:
         self.agent_workflow = agent_workflow
         self.runtime_settings = runtime_settings
@@ -117,6 +121,8 @@ class AgentGraphExecutor:
         self.test_harness = TestHarness()
         self.final_review_harness = FinalReviewHarness()
         self.agent_run = agent_run or AgentRun(agent_workflow)
+        self.budget_broker = budget_broker
+        self.run_id = run_id
 
     def create_planner_order(
         self,
@@ -446,7 +452,32 @@ class AgentGraphExecutor:
             work_item_id=work_item_id,
             merge_index=merge_index,
         )
+        reservation = None
+        if self.budget_broker is not None:
+            reservation = self.budget_broker.reserve_model_call(
+                run_id=self.run_id or self.agent_workflow.id,
+                agent_id=agent_id,
+                estimated_tokens=estimate_tokens(prompt),
+                action_type=f"model_call:{artifact_type}",
+            )
+            if not reservation.approved:
+                self._emit(
+                    emit,
+                    "budget.warning",
+                    "BudgetBroker denied AgentGraph model call",
+                    agent_id=agent_id,
+                    artifact_type=artifact_type,
+                    work_item_id=work_item_id,
+                    merge_index=merge_index,
+                    error_code=reservation.reason,
+                )
+                raise AgentGraphExecutorError(
+                    "BudgetBroker denied AgentGraph model call",
+                    status_code=reservation.reason,
+                )
         response = model.invoke(prompt)
+        if reservation is not None:
+            self.budget_broker.commit(reservation.reservation_id, actual_tokens=estimate_tokens(prompt))
         content = getattr(response, "content", str(response))
         payload = parse_json_object(str(content))
         if payload is None:

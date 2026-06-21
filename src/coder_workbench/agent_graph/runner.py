@@ -6,6 +6,7 @@ from inspect import signature
 from pathlib import Path
 from typing import Any
 
+from coder_workbench.actions import ActionGateway, ActionSpec, RunContext
 from coder_workbench.agent_graph.artifacts import AgentGraphArtifactRecorder, graph_artifact_id
 from coder_workbench.agent_graph.agent_run import AgentRun
 from coder_workbench.agent_graph.cache import GraphRunCache
@@ -41,13 +42,15 @@ from coder_workbench.core import (
     assert_valid_agent_workflow,
 )
 from coder_workbench.core.authority import authority_profile_for_agent
-from coder_workbench.context import ContextService
+from coder_workbench.budget import BudgetBroker, BudgetLimit
 from coder_workbench.coding import (
     build_debug_finding,
     build_repo_intelligence,
     build_run_coding_eval,
 )
+from coder_workbench.observability import TraceContext, TraceSpan
 from coder_workbench.runtime.state import RunEvent, RunResult, summarize_value
+from coder_workbench.runtime_kernel import RunController, RunGuard
 from coder_workbench.skills import (
     InstalledSkillStore,
     SkillIndex,
@@ -90,6 +93,8 @@ class AgentGraphRunner:
             runtime_settings=runtime_settings,
             agent_run=self.agent_run,
         )
+        self.budget_broker = BudgetBroker()
+        self.action_gateway = ActionGateway(budget_broker=self.budget_broker)
 
     def run(
         self,
@@ -108,12 +113,54 @@ class AgentGraphRunner:
         status = "completed"
         status_reason = None
         status_code = None
+        run_id = str(data.get("run_id") or self.agent_workflow.id)
+        data["run_id"] = run_id
+        trace = TraceContext(trace_id=str(data.get("trace_id") or "") or None)
+        run_span = trace.start_span(
+            name=f"run:{self.agent_workflow.id}",
+            kind="run",
+            workflow_id=self.agent_workflow.id,
+            run_id=run_id,
+        )
+        data["trace_id"] = trace.trace_id
+        self.budget_broker = BudgetBroker(_budget_limit_from_data(data))
+        self.action_gateway = ActionGateway(budget_broker=self.budget_broker)
+        if hasattr(self.executor, "budget_broker"):
+            self.executor.budget_broker = self.budget_broker
+        if hasattr(self.executor, "run_id"):
+            self.executor.run_id = run_id
 
         def emit(event_type: str, message: str, **payload: Any) -> None:
+            span = payload.pop("_span", None) or run_span
+            if isinstance(span, TraceSpan):
+                payload = {**span.event_payload(), **payload}
             event = RunEvent(type=event_type, message=message, payload=payload)
             events.append(event)
             if self.event_sink:
                 self.event_sink(event)
+
+        def finalize_result(
+            *,
+            final_status: str,
+            blocked_node_id: str | None = None,
+            resume_checkpoint: dict[str, Any] | None = None,
+            status_reason: str | None = None,
+            status_code: str | None = None,
+        ) -> RunResult:
+            trace_status = "ok" if final_status == "completed" else final_status
+            trace.finish_span(run_span, trace_status)  # type: ignore[arg-type]
+            data["trace_spans"] = trace.spans_payload()
+            data["budget_usage"] = self.budget_broker.usage(run_id).__dict__
+            return self._result(
+                status=final_status,
+                data=data,
+                artifacts=artifacts,
+                events=events,
+                blocked_node_id=blocked_node_id,
+                resume_checkpoint=resume_checkpoint,
+                status_reason=status_reason,
+                status_code=status_code,
+            )
 
         recorder = AgentGraphArtifactRecorder(artifacts, emit)
 
@@ -157,6 +204,7 @@ class AgentGraphRunner:
                 symbol_files=len(repo_intelligence.get("symbol_index", {}).get("files", [])),
             )
             max_rounds = _max_auto_rounds_from_workflow_or_data(self.agent_workflow, data)
+            controller = RunController(guard=_run_guard_from_data(data, max_rounds=max_rounds))
             previous_bundle: PlannerInputBundle | None = None
             previous_round_summary: dict[str, Any] | None = None
             planner_human_response = data.get("planner_human_response") if isinstance(data.get("planner_human_response"), dict) else None
@@ -188,7 +236,12 @@ class AgentGraphRunner:
                     next_action=data["planner_decision"]["next_action"],
                 )
                 data.pop("resume_mode", None)
-                action = data["planner_decision"]["next_action"]
+                controller.record_round(round_number=previous_bundle.round)
+                controller_decision = controller.evaluate_planner_decision(
+                    data["planner_decision"],
+                    round_number=previous_bundle.round,
+                )
+                action = controller_decision.action
                 if action == "ask_human":
                     status, status_reason, status_code, blocked_node_id, result_resume_checkpoint = self._block_for_planner_human(
                         data=data,
@@ -196,11 +249,21 @@ class AgentGraphRunner:
                         emit=emit,
                         round_number=previous_bundle.round,
                     )
-                    return self._result(
-                        status=status,
+                    return finalize_result(
+                        final_status=status,
+                        blocked_node_id=blocked_node_id,
+                        resume_checkpoint=result_resume_checkpoint,
+                        status_reason=status_reason,
+                        status_code=status_code,
+                    )
+                if action == "blocked":
+                    status, status_reason, status_code, blocked_node_id, result_resume_checkpoint = self._block_for_controller(
                         data=data,
-                        artifacts=artifacts,
-                        events=events,
+                        decision=controller_decision,
+                        emit=emit,
+                    )
+                    return finalize_result(
+                        final_status=status,
                         blocked_node_id=blocked_node_id,
                         resume_checkpoint=result_resume_checkpoint,
                         status_reason=status_reason,
@@ -208,7 +271,7 @@ class AgentGraphRunner:
                     )
                 if action in {"finish", "stop"}:
                     emit("agent_graph.run.completed", f"Agent graph {self.agent_workflow.id} completed")
-                    return self._result(status="completed", data=data, artifacts=artifacts, events=events)
+                    return finalize_result(final_status="completed")
                 round_request = data["planner_decision"].get("next_round_goal") or request
                 start_round = previous_bundle.round + 1
 
@@ -225,23 +288,22 @@ class AgentGraphRunner:
                     planner_human_response=planner_human_response if round_number == start_round else None,
                     skill_index=skill_index,
                     skill_store_root=skill_store_root,
+                    trace_context=trace,
+                    parent_span=run_span,
                 )
-                action = outcome.planner_decision["next_action"]
+                estimated_tokens_used = _estimated_tokens_used(data)
+                controller.record_round(
+                    outcome,
+                    agent_calls=len(outcome.planner_input_bundle.items),
+                    tool_calls=len(outcome.planner_input_bundle.effects),
+                    estimated_tokens=max(0, estimated_tokens_used - controller.estimated_tokens),
+                )
+                controller_decision = controller.evaluate_planner_decision(
+                    outcome.planner_decision,
+                    round_number=round_number,
+                )
+                action = controller_decision.action
                 if action == "continue":
-                    if round_number >= max_rounds:
-                        prompt = "Planner requested another round, but max_auto_rounds has been reached."
-                        data["planner_human_prompt"] = prompt
-                        emit(
-                            "agent_graph.run.blocked",
-                            "Agent graph blocked after reaching max_auto_rounds",
-                            code="max_auto_rounds_reached",
-                        )
-                        status = "blocked"
-                        status_reason = prompt
-                        status_code = "max_auto_rounds_reached"
-                        blocked_node_id = self.agent_workflow.primary_planner_id
-                        result_resume_checkpoint = {"data": data}
-                        break
                     previous_bundle = outcome.planner_input_bundle
                     previous_round_summary = outcome.round_summary.model_dump(mode="json")
                     round_request = outcome.planner_decision.get("next_round_goal") or request
@@ -253,6 +315,13 @@ class AgentGraphRunner:
                         decision=outcome.planner_decision,
                         emit=emit,
                         round_number=round_number,
+                    )
+                    break
+                if action == "blocked":
+                    status, status_reason, status_code, blocked_node_id, result_resume_checkpoint = self._block_for_controller(
+                        data=data,
+                        decision=controller_decision,
+                        emit=emit,
                     )
                     break
                 emit("agent_graph.run.completed", f"Agent graph {self.agent_workflow.id} completed")
@@ -279,11 +348,8 @@ class AgentGraphRunner:
             status_code = exc.status_code if isinstance(exc, AgentGraphExecutorError) else "agent_graph_runtime_exception"
             emit("agent_graph.run.failed", f"Agent graph failed: {exc}", error=str(exc))
 
-        return self._result(
-            status=status,
-            data=data,
-            artifacts=artifacts,
-            events=events,
+        return finalize_result(
+            final_status=status,
             blocked_node_id=blocked_node_id,
             resume_checkpoint=result_resume_checkpoint,
             status_reason=status_reason,
@@ -304,13 +370,22 @@ class AgentGraphRunner:
         planner_human_response: dict[str, Any] | None,
         skill_index: SkillIndex,
         skill_store_root: Path,
+        trace_context: TraceContext,
+        parent_span: TraceSpan,
     ) -> RoundOutcome:
+        round_span = trace_context.start_span(
+            name=f"round:{round_number}",
+            kind="round",
+            parent=parent_span,
+            round=round_number,
+        )
         emit(
             "agent_graph.round.started",
             f"Agent graph round {round_number} started",
             workflow_id=self.agent_workflow.id,
             round=round_number,
             primary_planner_id=self.agent_workflow.primary_planner_id,
+            _span=round_span,
         )
 
         cache = GraphRunCache(round=round_number, skill_index=skill_index.model_dump(mode="json"))
@@ -416,7 +491,15 @@ class AgentGraphRunner:
                 ready_work_item_ids=wave.ready_work_item_ids,
                 work_item_ids=[item.work_item_id for item in wave.items],
                 deferred_ready_work_item_ids=wave.deferred_ready_work_item_ids,
+                _span=trace_context.start_span(
+                    name=f"wave:{round_number}:{wave.wave_index}",
+                    kind="wave",
+                    parent=round_span,
+                    round=round_number,
+                    wave_index=wave.wave_index,
+                ),
             )
+            wave_span = trace_context.spans[-1]
             task_contexts = []
             for item in wave.items:
                 scheduler.mark_running(item.work_item_id)
@@ -434,11 +517,14 @@ class AgentGraphRunner:
                     planner_order_ref,
                     emit,
                     request=request,
+                    data=data,
                     skill_index=skill_index,
                     skill_store_root=skill_store_root,
                     run_id=str(data.get("run_id") or ""),
                     repo_root=repo_root,
                     repo_intelligence=repo_intelligence,
+                    trace_context=trace_context,
+                    parent_span=wave_span,
                 )
                 task_contexts.append({"item": item, "envelope": envelope})
             outcomes = self._run_wave(wave, task_contexts)
@@ -533,6 +619,7 @@ class AgentGraphRunner:
             repo_root=repo_root,
             scopes=_scopes_from_data(data),
             data=data,
+            action_gateway=self.action_gateway,
         )
         if hidden_effects:
             self._emit_hidden_effect_outputs(cache, hidden_effects, emit)
@@ -739,6 +826,29 @@ class AgentGraphRunner:
             {"data": data},
         )
 
+    def _block_for_controller(
+        self,
+        *,
+        data: dict[str, Any],
+        decision: Any,
+        emit: Any,
+    ) -> tuple[str, str, str, str, dict[str, Any]]:
+        prompt = decision.reason or "RunController blocked the run."
+        data["planner_human_prompt"] = prompt
+        status_code = decision.status_code or "run_controller_blocked"
+        emit(
+            "agent_graph.run.blocked",
+            "Agent graph blocked by RunController",
+            code=status_code,
+        )
+        return (
+            "blocked",
+            str(prompt),
+            status_code,
+            self.agent_workflow.primary_planner_id,
+            {"data": data},
+        )
+
     def _start_work_item(
         self,
         cache: GraphRunCache,
@@ -746,27 +856,91 @@ class AgentGraphRunner:
         planner_order_ref: str,
         emit: Any,
         request: str,
+        data: dict[str, Any],
         skill_index: SkillIndex,
         skill_store_root: Path,
         run_id: str,
         repo_root: str,
         repo_intelligence: dict[str, Any],
+        trace_context: TraceContext,
+        parent_span: TraceSpan,
     ) -> Any:
         upstream_refs = upstream_refs_for_item(cache, item)
-        context = ContextService().build_for_work_item(
-            cache=cache,
-            item=item,
-            planner_order_ref=planner_order_ref,
-            upstream_refs=upstream_refs,
-            user_request=request,
-            role=self._agent_role(item.assignee_agent_id),
-            skill_index=skill_index,
-            skill_store_root=skill_store_root,
-            run_id=run_id,
-            repo_root=repo_root,
-            repo_intelligence=repo_intelligence,
-            artifact_type=self._work_artifact_type(item.assignee_agent_id),
+        agent_span = trace_context.start_span(
+            name=f"agent_run:{item.work_item_id}",
+            kind="agent_run",
+            parent=parent_span,
+            round=cache.round,
+            work_item_id=item.work_item_id,
+            agent_id=item.assignee_agent_id,
         )
+        action_span = trace_context.start_span(
+            name=f"action:build_context:{item.work_item_id}",
+            kind="action",
+            parent=agent_span,
+            round=cache.round,
+            work_item_id=item.work_item_id,
+            action_type="build_context",
+        )
+        emit(
+            "action.started",
+            "ActionGateway build_context started",
+            round=cache.round,
+            work_item_id=item.work_item_id,
+            action_type="build_context",
+            _span=action_span,
+        )
+        action_result = self.action_gateway.run(
+            ActionSpec(
+                action_id=f"build_context:{cache.round}:{item.work_item_id}",
+                action_type="build_context",
+            ),
+            run_context=RunContext(
+                run_id=run_id or self.agent_workflow.id,
+                repo_root=repo_root,
+                scopes=_scopes_from_data(data),
+                data=data,
+                cache=cache,
+                item=item,
+                planner_order_ref=planner_order_ref,
+                upstream_refs=upstream_refs,
+                user_request=request,
+                role=self._agent_role(item.assignee_agent_id),
+                skill_index=skill_index,
+                skill_store_root=skill_store_root,
+                repo_intelligence=repo_intelligence,
+                artifact_type=self._work_artifact_type(item.assignee_agent_id),
+                emit=emit,
+            ),
+        )
+        if action_result.status != "ok":
+            trace_context.finish_span(action_span, "blocked" if action_result.status == "blocked" else "failed")
+            emit(
+                "action.blocked" if action_result.status == "blocked" else "action.failed",
+                action_result.summary,
+                round=cache.round,
+                work_item_id=item.work_item_id,
+                action_type="build_context",
+                status=action_result.status,
+                error_code=action_result.error_code,
+                _span=action_span,
+            )
+            raise AgentGraphExecutorError(
+                action_result.summary or "build_context action failed",
+                status_code=action_result.error_code or "build_context_failed",
+            )
+        trace_context.finish_span(action_span, "ok")
+        emit(
+            "action.completed",
+            "ActionGateway build_context completed",
+            round=cache.round,
+            work_item_id=item.work_item_id,
+            action_type="build_context",
+            status=action_result.status,
+            token_used=action_result.token_used,
+            _span=action_span,
+        )
+        context = action_result.payload["context"]
         envelope = context.envelope
         route = context.skill_route
         packet = context.context_packet
@@ -782,6 +956,7 @@ class AgentGraphRunner:
             omitted_skill_ids=route.omitted_skill_ids,
             estimated_skill_tokens=route.estimated_skill_tokens,
             scores=route.scores,
+            _span=action_span,
         )
         emit(
             "agent.context_packet_v2",
@@ -789,6 +964,7 @@ class AgentGraphRunner:
             round=cache.round,
             work_item_id=item.work_item_id,
             packet=packet.model_dump(mode="json"),
+            _span=action_span,
         )
         emit(
             "agent.coding_context_packet",
@@ -796,6 +972,7 @@ class AgentGraphRunner:
             round=cache.round,
             work_item_id=item.work_item_id,
             packet=coding_packet.model_dump(mode="json"),
+            _span=action_span,
         )
         emit(
             "token.ledger.entry",
@@ -803,6 +980,7 @@ class AgentGraphRunner:
             round=cache.round,
             work_item_id=item.work_item_id,
             entry=ledger_entry.model_dump(mode="json"),
+            _span=action_span,
         )
         emit(
             "agent_task.ready",
@@ -811,6 +989,7 @@ class AgentGraphRunner:
             work_item_id=item.work_item_id,
             assigned_agent_id=item.assignee_agent_id,
             merge_index=item.merge_index,
+            _span=agent_span,
         )
         emit(
             "agent_task.started",
@@ -818,6 +997,7 @@ class AgentGraphRunner:
             round=cache.round,
             work_item_id=item.work_item_id,
             envelope=envelope.model_dump(mode="json"),
+            _span=agent_span,
         )
         return envelope
 
@@ -1164,6 +1344,20 @@ def _max_auto_rounds_from_workflow_or_data(agent_workflow: AgentWorkflowSpec, da
         return max(1, int(value))
     except (TypeError, ValueError):
         return 3
+
+
+def _run_guard_from_data(data: dict[str, Any], *, max_rounds: int) -> RunGuard:
+    guard_data = data.get("run_guard")
+    values = dict(guard_data) if isinstance(guard_data, dict) else {}
+    values.setdefault("max_rounds", max_rounds)
+    return RunGuard.model_validate(values)
+
+
+def _budget_limit_from_data(data: dict[str, Any]) -> BudgetLimit:
+    budget_data = data.get("budget_limit")
+    if isinstance(budget_data, dict):
+        return BudgetLimit.model_validate(budget_data)
+    return BudgetLimit()
 
 
 def _scopes_from_data(data: dict[str, Any]) -> list[str]:

@@ -65,6 +65,9 @@ class RunStore:
         self.index_path = self.runs_dir / "index.sqlite"
         self.live_runs_dir = self.root / "live-runs"
         self.blobs_dir = self.root / "blobs"
+        from coder_workbench.server.stores import PartitionedRunStores
+
+        self.partitions = PartitionedRunStores(self.root)
         self.runs_dir.mkdir(parents=True, exist_ok=True)
         self.live_runs_dir.mkdir(parents=True, exist_ok=True)
         self.blobs_dir.mkdir(parents=True, exist_ok=True)
@@ -97,6 +100,7 @@ class RunStore:
             result_payload = result.model_dump(mode="json")
             result_payload["events"] = []
             result_payload["artifacts"] = self._write_artifacts(run_dir, result.artifacts)
+            self._write_ledgers(run_dir, result_payload.get("data", {}).get("token_ledger"))
             (run_dir / "result.json").write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
             events = self._externalize_context_packets(run_dir, result.events)
             events = self._externalize_tool_results(run_dir, events)
@@ -477,6 +481,20 @@ class RunStore:
                 "size_chars": len(json.dumps(artifact, ensure_ascii=False)),
             }
         return refs
+
+    def _write_ledgers(self, run_dir: Path, ledger_entries: Any) -> None:
+        if not isinstance(ledger_entries, list):
+            return
+        ledger_dir = run_dir / "ledgers"
+        ledger_dir.mkdir(parents=True, exist_ok=True)
+        for index, entry in enumerate(ledger_entries, start=1):
+            if not isinstance(entry, dict):
+                continue
+            ledger_id = self._safe_object_id(str(entry.get("ledger_id") or f"token_ledger_{index}"))
+            (ledger_dir / f"{ledger_id}.json").write_text(
+                json.dumps(entry, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
     def _externalize_large_values(self, value: Any) -> Any:
         return externalize_large_values(value, write_blob=self._write_blob, threshold=BLOB_STRING_THRESHOLD)

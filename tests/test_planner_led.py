@@ -9,6 +9,7 @@ from coder_workbench.core import (
     AgentWorkflowSpec,
     capability_registry,
     compile_agent_workflow,
+    compile_agent_workflow_legacy_preview,
     default_planner_led_agent_workflow,
     validate_agent_workflow_payload,
 )
@@ -450,7 +451,7 @@ class AgentWorkflowApiTests(unittest.TestCase):
             client = TestClient(create_app(store_root=tmp, frontend_dist=tmp))
             agent_workflow = default_planner_led_agent_workflow().model_dump(mode="json", by_alias=True)
 
-            with patch("coder_workbench.server.app.compile_agent_workflow", side_effect=AssertionError("legacy compile called")):
+            with patch("coder_workbench.server.app.compile_agent_workflow_legacy_preview", side_effect=AssertionError("legacy compile called")):
                 response = client.post(
                     "/api/v2/live-agent-runs",
                     json={

@@ -46,6 +46,22 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         self.assertNotIn("DefaultAgentExecutor", source)
         self.assertIn("AgentRun", source)
 
+    def test_agent_graph_low_level_services_route_through_action_gateway(self) -> None:
+        runner_source = inspect.getsource(__import__("coder_workbench.agent_graph.runner", fromlist=["_"]))
+        effects_source = inspect.getsource(__import__("coder_workbench.agent_graph.effects", fromlist=["_"]))
+
+        self.assertNotIn("ContextService", runner_source)
+        self.assertIn("ActionGateway", runner_source)
+        self.assertNotIn("PatchService", effects_source)
+        self.assertNotIn("CommandService", effects_source)
+        self.assertIn("ActionGateway", effects_source)
+
+    def test_agent_run_uses_runtime_profile_cache(self) -> None:
+        source = inspect.getsource(__import__("coder_workbench.agent_graph.agent_run", fromlist=["_"]))
+
+        self.assertIn("RuntimeProfileCache", source)
+        self.assertIn("compile_or_get", source)
+
     def test_code_work_item_uses_agent_engine_path(self) -> None:
         calls: list[str] = []
         original = CodeWorkerEngine.run_execution
