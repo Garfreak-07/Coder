@@ -46,7 +46,7 @@ export function toAgentFlowNodes(workflow: AgentWorkflowSpec): FlowNode[] {
     type: "default",
     position: workflow.ui?.layout?.[agent.id] ?? agentPositions[agent.role] ?? { x: 80 + index * 280, y: 120 },
     data: {
-      label: `${agent.name}\n${roleLabels[agent.role] ?? agent.role} - ${agent.model_tier}${agent.can_talk_to_human ? " - can ask user" : ""}`
+      label: `${agent.name}\n${roleLabels[agent.role] ?? agent.role}${agent.can_talk_to_human ? " - can ask user" : ""}`
     },
     className: `workflow-node agent-workflow-node agent-role-${agent.role}`
   }));

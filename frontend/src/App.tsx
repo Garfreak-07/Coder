@@ -18,6 +18,7 @@ import {
   compileLegacyRuntimePreview,
   deleteRun,
   getAgent,
+  getAgentRuntimeProfiles,
   getAgentWorkflow,
   getDefaultAgentWorkflow,
   getLibrary,
@@ -42,6 +43,7 @@ import { ProviderSettingsPanel } from "./components/ProviderSettingsPanel";
 import { AgentWorkflowAgentInspector } from "./features/agent-workflow/AgentWorkflowAgentInspector";
 import { AgentWorkflowEdgeInspector } from "./features/agent-workflow/AgentWorkflowEdgeInspector";
 import { AgentWorkflowValidationPanel } from "./features/agent-workflow/AgentWorkflowValidationPanel";
+import { SkillsPanel } from "./features/skills/SkillsPanel";
 import { useProviderSettings } from "./hooks/useProviderSettings";
 import { useRuntimeInfo } from "./hooks/useRuntimeInfo";
 import { enUS, nodeTypeDescriptions, nodeTypeLabels } from "./i18n";
@@ -73,6 +75,7 @@ import {
 } from "./workflowGraph";
 import type {
   AgentSpec,
+  AgentModelTier,
   AgentWorkflowAgent,
   AgentWorkflowEdge,
   AgentWorkflowValidationResult,
@@ -98,6 +101,9 @@ const loopModes: LoopMode[] = ["retry_until", "while", "for_each"];
 const t = enUS;
 const initialAgentWorkflow = cloneAgentWorkflow(defaultPlannerLedAgentWorkflow);
 const initialRuntimeWorkflow = codingWorkbenchWorkflow;
+const appSections = ["workflows", "skills", "runs", "settings"] as const;
+type AppSection = (typeof appSections)[number];
+type PlannerStrength = "fast" | "balanced" | "strong";
 
 interface PendingPreflightRun {
   repo: string;
@@ -117,6 +123,7 @@ interface PreflightToolFact {
 }
 
 export function App() {
+  const [activeSection, setActiveSection] = useState<AppSection>("workflows");
   const [library, setLibrary] = useState<LibraryIndex>({ agents: [], agent_workflows: [], workflows: [] });
   const [agentWorkflow, setAgentWorkflow] = useState<AgentWorkflowSpec>(() => cloneAgentWorkflow(initialAgentWorkflow));
   const [workflow, setWorkflow] = useState<WorkflowSpec>(initialRuntimeWorkflow);
@@ -144,11 +151,15 @@ export function App() {
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [historyQuery, setHistoryQuery] = useState("");
   const [historyStatusFilter, setHistoryStatusFilter] = useState("all");
+  const [newAgentRoleCard, setNewAgentRoleCard] = useState("do_work");
+  const [newAgentName, setNewAgentName] = useState("");
+  const [runtimeProfiles, setRuntimeProfiles] = useState<Record<string, unknown>[] | null>(null);
   const {
     capabilities,
     runHistory,
     liveRuns,
     health,
+    roleCards,
     refreshRuntimeInfo
   } = useRuntimeInfo(setStatus);
   const {
@@ -187,6 +198,10 @@ export function App() {
     const edgeIndex = agentEdgeIndexFromId(selectedAgentWorkflowEdgeId);
     return edgeIndex === null ? null : agentWorkflow.edges[edgeIndex] ?? null;
   }, [selectedAgentWorkflowEdgeId, agentWorkflow.edges]);
+  const primaryPlannerAgent = useMemo(
+    () => agentWorkflow.agents.find((agent) => agent.id === agentWorkflow.primary_planner_id) ?? null,
+    [agentWorkflow.agents, agentWorkflow.primary_planner_id]
+  );
   const filteredRunHistory = useMemo(
     () => filterRunHistory(runHistory, historyQuery, historyStatusFilter),
     [runHistory, historyQuery, historyStatusFilter]
@@ -296,6 +311,7 @@ export function App() {
     const clean = cloneAgentWorkflow(next);
     setAgentWorkflow(clean);
     setJsonText(formatJson(clean));
+    setRuntimeProfiles(null);
     if (runtime) {
       setWorkflow(runtime);
       setRuntimeJsonText(formatJson(runtime));
@@ -320,9 +336,31 @@ export function App() {
     setAgentWorkflow(next);
     setJsonText(formatJson(next));
     setAgentWorkflowValidation(null);
+    setRuntimeProfiles(null);
     setRuntimePreviewDirty(true);
     if (!showAdvancedRuntime) {
       renderWorkflowCanvas(next, workflow, false);
+    }
+  }
+
+  function updatePlannerStrength(strength: PlannerStrength) {
+    const modelTier = modelTierForPlannerStrength(strength);
+    updateAgentWorkflow((current) => ({
+      ...current,
+      agents: current.agents.map((agent) =>
+        agent.id === current.primary_planner_id ? { ...agent, model_tier: modelTier } : agent
+      )
+    }));
+  }
+
+  async function refreshRuntimeProfiles() {
+    setStatus("Compiling runtime profiles...");
+    try {
+      const profiles = await getAgentRuntimeProfiles(agentWorkflow);
+      setRuntimeProfiles(profiles);
+      setStatus(`Compiled ${profiles.length} runtime profile(s).`);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -601,14 +639,20 @@ export function App() {
   }
 
   function addAgentWorkflowAgent() {
+    const roleCard = roleCards.find((card) => card.id === newAgentRoleCard) ?? roleCards[0];
+    if (!roleCard) {
+      setStatus("Role cards are unavailable.");
+      return;
+    }
     const id = uniqueAgentWorkflowAgentId(agentWorkflow);
     const agent: AgentWorkflowAgent = {
       id,
-      name: "New Agent",
-      role: "worker",
+      name: newAgentName.trim() || roleCard.label,
+      role: roleCard.role,
+      role_card: roleCard.id,
       model_tier: "standard",
       can_talk_to_human: false,
-      capabilities: []
+      capabilities: [...roleCard.default_capabilities]
     };
     updateAgentWorkflow((current) => {
       const layout = { ...(current.ui?.layout ?? {}) };
@@ -622,7 +666,8 @@ export function App() {
     });
     setSelectedAgentWorkflowId(id);
     setSelectedAgentWorkflowEdgeId(null);
-    setStatus("Added Agent. Select capabilities before saving.");
+    setNewAgentName("");
+    setStatus(`Added ${roleCard.label} Agent.`);
   }
 
   function removeAgentWorkflowAgent(agentId = selectedAgentWorkflowId) {
@@ -1001,9 +1046,22 @@ export function App() {
           <div className="eyebrow">{t.app.eyebrow}</div>
           <h1>{t.app.title}</h1>
         </div>
+        <nav className="top-nav" aria-label="Primary">
+          {appSections.map((section) => (
+            <button
+              className={activeSection === section ? "selected" : ""}
+              key={section}
+              onClick={() => setActiveSection(section)}
+            >
+              {sectionLabel(section)}
+            </button>
+          ))}
+        </nav>
         <div className="status">{status}</div>
       </header>
 
+      {activeSection === "workflows" ? (
+      <>
       <aside className="sidebar">
         <section className="panel">
           <div className="panel-title">{t.templates.title}</div>
@@ -1232,6 +1290,17 @@ export function App() {
                 }
               />
             </label>
+            <label>
+              Planner Strength
+              <select
+                value={plannerStrengthFromTier(primaryPlannerAgent?.model_tier ?? "best")}
+                onChange={(event) => updatePlannerStrength(event.target.value as PlannerStrength)}
+              >
+                <option value="fast">Fast</option>
+                <option value="balanced">Balanced</option>
+                <option value="strong">Strong</option>
+              </select>
+            </label>
             <label className="checkbox-row">
               <input
                 type="checkbox"
@@ -1261,6 +1330,17 @@ export function App() {
             <span>{runtimePreviewDirty ? "Legacy runtime preview needs compile" : `${workflow.nodes.length} legacy runtime nodes`}</span>
           </div>
           <AgentWorkflowValidationPanel result={agentWorkflowValidation} />
+          <details className="json-details">
+            <summary>Runtime Profiles (Advanced)</summary>
+            <div className="button-row">
+              <button onClick={() => void refreshRuntimeProfiles()}>Compile Runtime Profiles</button>
+            </div>
+            {runtimeProfiles ? (
+              <pre>{JSON.stringify(runtimeProfiles, null, 2)}</pre>
+            ) : (
+              <div className="muted">No runtime profiles loaded.</div>
+            )}
+          </details>
           <details className="json-details">
             <summary>AgentWorkflowSpec JSON (Advanced)</summary>
             <div className="button-row">
@@ -1310,6 +1390,8 @@ export function App() {
             <AgentWorkflowAgentInspector
               agent={selectedAgentWorkflowAgent}
               capabilities={capabilities}
+              roleCards={roleCards}
+              isPrimaryPlanner={selectedAgentWorkflowAgent.id === agentWorkflow.primary_planner_id}
               onChange={updateSelectedAgentWorkflowAgent}
             />
           ) : selectedAgentWorkflowEdge ? (
@@ -1364,8 +1446,24 @@ export function App() {
           ) : (
             <>
               <div className="panel-title">Agent Topology</div>
+              <div className="add-agent-card">
+                <label>
+                  Role
+                  <select value={newAgentRoleCard} onChange={(event) => setNewAgentRoleCard(event.target.value)}>
+                    {roleCards.map((roleCard) => (
+                      <option key={roleCard.id} value={roleCard.id}>
+                        {roleCard.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Name
+                  <input value={newAgentName} onChange={(event) => setNewAgentName(event.target.value)} />
+                </label>
+              </div>
               <div className="button-row">
-                <button onClick={addAgentWorkflowAgent}>Add Agent</button>
+                <button disabled={roleCards.length === 0} onClick={addAgentWorkflowAgent}>Add Agent</button>
                 <button disabled={!selectedAgentWorkflowAgent} onClick={() => removeAgentWorkflowAgent()}>
                   Delete Agent
                 </button>
@@ -1381,7 +1479,7 @@ export function App() {
                     }}
                   >
                     <span>{agent.name}</span>
-                    <small>{agent.role} · {agent.model_tier}</small>
+                    <small>{agent.role_card ?? agent.role}</small>
                   </button>
                 ))}
               </div>
@@ -1396,7 +1494,7 @@ export function App() {
                       setSelectedAgentWorkflowId(null);
                     }}
                   >
-                    <span>{edge.from} → {edge.to}</span>
+                    <span>{edge.from} -&gt; {edge.to}</span>
                     <small>{edge.loop ? "loop" : "handoff inferred"}</small>
                   </button>
                 ))}
@@ -1445,6 +1543,115 @@ export function App() {
           )}
         </section>
       </aside>
+      </>
+      ) : activeSection === "skills" ? (
+        <main className="page-main">
+          <SkillsPanel onStatus={setStatus} />
+        </main>
+      ) : activeSection === "runs" ? (
+        <main className="page-main page-grid">
+          <section className="panel">
+            <div className="panel-title">{t.runtime.title}</div>
+            <button onClick={refreshRuntimeInfo}>{t.runtime.refresh}</button>
+            <div className="summary-grid">
+              <span>{health?.status ?? t.runtime.unknown}</span>
+              <span>{t.runtime.tools(health?.tools.length ?? 0)}</span>
+              <span>{t.runtime.liveRuns(liveRuns.length)}</span>
+              <span>{t.runtime.storedRuns(runHistory.length)}</span>
+            </div>
+            <div className="panel-subtitle">Live</div>
+            <div className="list compact-list">
+              {liveRuns.map((run) => (
+                <button className="list-item" key={run.id} onClick={() => openLiveRun(run.id)}>
+                  <span>{run.workflow_id}</span>
+                  <small>{run.status} / {run.events} events</small>
+                </button>
+              ))}
+              {liveRuns.length === 0 && <div className="muted">{t.runtime.noLiveRuns}</div>}
+            </div>
+            <div className="panel-subtitle">{t.runtime.storedHistory}</div>
+            <div className="history-filters">
+              <input
+                placeholder="Search runs"
+                value={historyQuery}
+                onChange={(event) => setHistoryQuery(event.target.value)}
+              />
+              <select value={historyStatusFilter} onChange={(event) => setHistoryStatusFilter(event.target.value)}>
+                <option value="all">All statuses</option>
+                <option value="completed">Completed</option>
+                <option value="blocked">Blocked</option>
+                <option value="failed">Failed</option>
+              </select>
+            </div>
+            <div className="list compact-list">
+              {filteredRunHistory.map((run) => (
+                <button className="list-item" key={run.id} onClick={() => openStoredRun(run.id)}>
+                  <span>{run.workflow_id}</span>
+                  <small>
+                    {run.status}
+                    {run.status_code ? `:${run.status_code}` : ""} / {run.events} events
+                  </small>
+                </button>
+              ))}
+              {runHistory.length === 0 && <div className="muted">{t.runtime.noStoredRuns}</div>}
+              {runHistory.length > 0 && filteredRunHistory.length === 0 && <div className="muted">No runs match the filter.</div>}
+            </div>
+          </section>
+          <section className="panel events-panel">
+            <div className="panel-title">{t.events.title}</div>
+            <RunDetailCard
+              detail={selectedRunDetail}
+              kind={selectedRunKind}
+              activeRunId={activeRunId}
+              onAttach={(runId) => openLiveRun(runId, true)}
+              onOpenStored={(runId) => openStoredRun(runId)}
+              onRetryCurrentNode={(runId) => retryBlockedNode(runId)}
+              onDeleteStored={(runId) => deleteStoredRun(runId)}
+            />
+            <RunSummary
+              events={events}
+              canRetryCurrentNode={Boolean(activeRunId)}
+              onApprovalDecision={approveAndResumeRun}
+              onRetryCurrentNode={() => retryBlockedNode()}
+            />
+            <PatchPanel
+              events={events}
+              runId={selectedRunKind === "stored" ? selectedRunDetail?.id ?? null : null}
+              repo={repo}
+              scopes={linesToList(scopesText)}
+              onStatus={setStatus}
+            />
+            {events.length === 0 ? (
+              <div className="muted">{t.events.empty}</div>
+            ) : (
+              <EventReplayList
+                events={events}
+                runId={selectedRunKind === "stored" ? selectedRunDetail?.id ?? null : null}
+              />
+            )}
+            {selectedRunKind === "stored" && eventHasMore && (
+              <button onClick={loadMoreStoredEvents} disabled={eventsLoadingMore}>
+                {eventsLoadingMore ? "Loading events..." : "Load more events"}
+              </button>
+            )}
+          </section>
+        </main>
+      ) : (
+        <main className="page-main page-grid">
+          <section className="panel">
+            <div className="panel-title">Provider Settings</div>
+            <ProviderSettingsPanel
+              form={providerForm}
+              settings={providerSettings}
+              status={providerStatus}
+              onChange={updateProviderForm}
+              onSave={persistProviderSettings}
+              onRefresh={refreshProviderInfo}
+              onTest={runProviderTest}
+            />
+          </section>
+        </main>
+      )}
       {pendingPreflight && (
         <PreflightModal
           pending={pendingPreflight}
@@ -1454,6 +1661,25 @@ export function App() {
       )}
     </div>
   );
+}
+
+function sectionLabel(section: AppSection): string {
+  if (section === "workflows") return "Workflows";
+  if (section === "skills") return "Skills";
+  if (section === "runs") return "Runs";
+  return "Settings";
+}
+
+function plannerStrengthFromTier(tier: AgentModelTier | string): PlannerStrength {
+  if (tier === "economy") return "fast";
+  if (tier === "standard") return "balanced";
+  return "strong";
+}
+
+function modelTierForPlannerStrength(strength: PlannerStrength): AgentModelTier {
+  if (strength === "fast") return "economy";
+  if (strength === "balanced") return "standard";
+  return "best";
 }
 
 function PreflightModal({
@@ -1936,6 +2162,7 @@ function RunDetailCard({
   const status = kind === "stored" ? result?.status : (detail as LiveRunDetail).status;
   const events = kind === "stored" ? result?.events.length ?? 0 : (detail as LiveRunDetail).events.length;
   const liveDetail = kind === "live" ? (detail as LiveRunDetail) : null;
+  const resultData = objectValue(result?.data);
   const canAttach = liveDetail?.status === "queued" || liveDetail?.status === "running" || liveDetail?.status === "blocked";
   const canApprove = liveDetail?.status === "blocked" && Boolean(liveDetail.approval_required);
   const canRetry = liveDetail?.status === "blocked" && !liveDetail.approval_required && Boolean(result?.resume_checkpoint);
@@ -1971,7 +2198,51 @@ function RunDetailCard({
       {canRetry && <button onClick={() => onRetryCurrentNode(detail.id)}>Retry current node</button>}
       {kind === "stored" && <button onClick={() => onDeleteStored(detail.id)}>Delete stored run</button>}
       {liveDetail?.error && <div className="muted">Error: {liveDetail.error}</div>}
+      {resultData && <RunDiagnostics data={resultData} />}
     </div>
+  );
+}
+
+function RunDiagnostics({ data }: { data: Record<string, unknown> }) {
+  const graphCache = objectValue(data.graph_run_cache);
+  const skillRoutes = objectValue(graphCache?.skill_routes);
+  const contextPackets = objectValue(graphCache?.context_packets_v2);
+  const tokenLedger = objectList(data.token_ledger);
+  const agentReports = objectList(data.agent_evaluation_reports);
+  const skillReports = objectList(data.skill_evaluation_reports);
+  const hasDiagnostics =
+    tokenLedger.length > 0 ||
+    agentReports.length > 0 ||
+    skillReports.length > 0 ||
+    Boolean(skillRoutes && Object.keys(skillRoutes).length > 0) ||
+    Boolean(contextPackets && Object.keys(contextPackets).length > 0);
+
+  if (!hasDiagnostics) return null;
+
+  return (
+    <details className="json-details run-diagnostics">
+      <summary>Advanced Run Diagnostics</summary>
+      <div className="summary-grid">
+        <span>{tokenLedger.length} token entries</span>
+        <span>{contextPackets ? Object.keys(contextPackets).length : 0} context packets</span>
+        <span>{skillRoutes ? Object.keys(skillRoutes).length : 0} skill routes</span>
+        <span>{agentReports.length} agent reports</span>
+        <span>{skillReports.length} skill reports</span>
+      </div>
+      <pre>
+        {JSON.stringify(
+          {
+            token_ledger: tokenLedger,
+            context_packets_v2: contextPackets ?? {},
+            skill_routes: skillRoutes ?? {},
+            agent_evaluation_reports: agentReports,
+            skill_evaluation_reports: skillReports
+          },
+          null,
+          2
+        )}
+      </pre>
+    </details>
   );
 }
 

@@ -7,14 +7,18 @@ import type {
   CapabilitySpec,
   ContextPacketDetail,
   HealthStatus,
+  DiscoverSkillsPayload,
+  InstalledSkillsPayload,
   LibraryIndex,
   LiveRunDetail,
   PreflightResult,
   ProviderSettings,
   ProviderStatus,
+  RoleCardSpec,
   RunEvent,
   RunEventsPage,
   RunSummaryItem,
+  SkillUpdateInfo,
   StoredRunDetail,
   ToolResultDetail,
   WorkflowSpec
@@ -44,6 +48,106 @@ export function getHealth(): Promise<HealthStatus> {
 export async function getCapabilities(): Promise<CapabilitySpec[]> {
   const payload = await requestJson<{ capabilities: CapabilitySpec[] }>("/api/v2/capabilities");
   return payload.capabilities;
+}
+
+export async function getAgentRoleCards(): Promise<RoleCardSpec[]> {
+  const payload = await requestJson<{ role_cards: RoleCardSpec[] }>("/api/v2/agent-role-cards");
+  return payload.role_cards;
+}
+
+export function getInstalledSkills(): Promise<InstalledSkillsPayload> {
+  return requestJson<InstalledSkillsPayload>("/api/v2/skills/installed");
+}
+
+export function discoverSkills(registryUrl: string): Promise<DiscoverSkillsPayload> {
+  return requestJson<DiscoverSkillsPayload>(`/api/v2/skills/discover?registry_url=${encodeURIComponent(registryUrl)}`);
+}
+
+export function getSkillUpdates(registryUrl: string): Promise<{ updates: SkillUpdateInfo[] }> {
+  return requestJson<{ updates: SkillUpdateInfo[] }>(`/api/v2/skills/updates?registry_url=${encodeURIComponent(registryUrl)}`);
+}
+
+export function installSkill(skillId: string, registryUrl: string): Promise<Record<string, unknown>> {
+  return requestJson("/api/v2/skills/install", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ skill_id: skillId, registry_url: registryUrl })
+  });
+}
+
+export function updateSkill(skillId: string, registryUrl: string): Promise<Record<string, unknown>> {
+  return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/update`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ registry_url: registryUrl })
+  });
+}
+
+export function autoUpdateSkills(registryUrl: string): Promise<Record<string, unknown>> {
+  return requestJson("/api/v2/skills/auto-update", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ registry_url: registryUrl })
+  });
+}
+
+export function enableSkill(skillId: string): Promise<Record<string, unknown>> {
+  return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/enable`, {
+    method: "POST",
+    headers: jsonHeaders
+  });
+}
+
+export function disableSkill(skillId: string): Promise<Record<string, unknown>> {
+  return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/disable`, {
+    method: "POST",
+    headers: jsonHeaders
+  });
+}
+
+export function removeSkill(skillId: string): Promise<Record<string, unknown>> {
+  return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}`, {
+    method: "DELETE"
+  });
+}
+
+export function pinSkill(skillId: string): Promise<Record<string, unknown>> {
+  return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/pin`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({})
+  });
+}
+
+export function unpinSkill(skillId: string): Promise<Record<string, unknown>> {
+  return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/unpin`, {
+    method: "POST",
+    headers: jsonHeaders
+  });
+}
+
+export function rollbackSkill(skillId: string): Promise<Record<string, unknown>> {
+  return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/rollback`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({})
+  });
+}
+
+export function setSkillUpdatePolicy(skillId: string, updatePolicy: "manual" | "auto_official_low_risk"): Promise<Record<string, unknown>> {
+  return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/update-policy`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ update_policy: updatePolicy })
+  });
+}
+
+export function importDeveloperSkill(path: string): Promise<Record<string, unknown>> {
+  return requestJson("/api/v2/skills/developer-import", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ path })
+  });
 }
 
 export async function getProviderSettings(): Promise<ProviderSettings> {
@@ -139,6 +243,15 @@ export function validateAgentWorkflow(agentWorkflow: AgentWorkflowSpec): Promise
     headers: jsonHeaders,
     body: JSON.stringify(agentWorkflow)
   });
+}
+
+export async function getAgentRuntimeProfiles(agentWorkflow: AgentWorkflowSpec): Promise<Record<string, unknown>[]> {
+  const payload = await requestJson<{ profiles: Record<string, unknown>[] }>("/api/v2/agent-workflows/runtime-profiles", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify(agentWorkflow)
+  });
+  return payload.profiles;
 }
 
 export async function getAgentWorkflow(workflowId: string): Promise<AgentWorkflowSpec> {

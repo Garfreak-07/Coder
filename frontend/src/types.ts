@@ -38,10 +38,20 @@ export interface CapabilitySpec {
   runtime_effects: string[];
 }
 
+export interface RoleCardSpec {
+  id: string;
+  label: string;
+  archetype: string;
+  role: AgentWorkflowRole;
+  default_capabilities: AgentCapability[];
+  description: string;
+}
+
 export interface AgentWorkflowAgent {
   id: string;
   name: string;
   role: AgentWorkflowRole;
+  role_card?: string | null;
   model_tier: AgentModelTier;
   can_talk_to_human: boolean;
   capabilities: AgentCapability[];
@@ -353,4 +363,85 @@ export interface LiveRunDetail {
 export interface HealthStatus {
   status: string;
   tools: string[];
+}
+
+export interface SkillSummary {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  category: string;
+  risk_level: "low" | "medium" | "high" | string;
+  publisher: string;
+  requires: string[];
+  produces: string[];
+  connectors: string[];
+  trust_level: "official" | "verified" | "community" | "local" | "untrusted" | string;
+  enabled: boolean;
+  external_effect: boolean;
+  when_to_use: string[];
+}
+
+export interface SkillIndexEntry {
+  id: string;
+  name: string;
+  description: string;
+  when_to_use: string[];
+  category: string;
+  risk_level: string;
+  produces: string[];
+  requires: string[];
+  connectors: string[];
+  trust_level: string;
+  enabled: boolean;
+  max_skill_tokens: number;
+}
+
+export interface SkillIndexPayload {
+  skills: SkillIndexEntry[];
+}
+
+export interface InstalledSkillsPayload {
+  skills: SkillSummary[];
+  index: SkillIndexPayload;
+}
+
+export interface RemoteSkillEntry {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  category: string;
+  publisher: string;
+  package_url: string;
+  manifest_url?: string | null;
+  sha256: string;
+  signature?: string | null;
+  risk_level: string;
+  external_effect: boolean;
+  requires_connectors: string[];
+  trust_level: string;
+}
+
+export interface DiscoverSkillsPayload {
+  registry: {
+    registry_version: string;
+    generated_at: string;
+    skills: RemoteSkillEntry[];
+  };
+  skills: Array<RemoteSkillEntry & { installed: boolean }>;
+}
+
+export interface SkillUpdateInfo {
+  skill_id: string;
+  installed_version: string;
+  available_version?: string | null;
+  update_available: boolean;
+  auto_update_eligible: boolean;
+  pinned_version?: string | null;
+  update_policy: "manual" | "auto_official_low_risk" | string;
+  reason?: string;
+  risk_level?: string;
+  trust_level?: string;
+  external_effect?: boolean;
 }
