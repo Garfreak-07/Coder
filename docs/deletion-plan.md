@@ -15,7 +15,7 @@ removed only after product references are gone and tests protect the boundary.
 7. Move or delete legacy modules once no product tests or endpoints depend on
    them.
 
-## Current v0.9.3 Boundary
+## Current v0.9.5 Boundary
 
 `compile_agent_workflow_legacy_preview()` is the explicit compiler for advanced
 preview and migration/debug only. `compile_agent_workflow()` remains a
@@ -30,6 +30,7 @@ AgentWorkflowSpec
 -> AgentRun
 -> AgentEngineRegistry
 -> ActionGateway
+-> plugin / MCP / repo intelligence action boundary
 -> PlannerDecision
 ```
 
@@ -65,13 +66,16 @@ The next deletion pass should migrate tests that still intentionally exercise
 legacy artifacts, then remove legacy artifact production from non-preview
 paths.
 
-## v0.9.3 Boundary Rules
+## v0.9.5 Boundary Rules
 
 - Ordinary user workflows remain AgentGraph-first.
 - `RunController` replaces inline PlannerDecision loop handling.
 - `BudgetBroker` replaces ad hoc pre-execution resource checks.
 - `ActionGateway` replaces direct product calls to context, patch, command,
-  sandbox, artifact validation, and repair services.
+  sandbox, plugin, MCP, repo intelligence, artifact validation, and repair
+  services.
+- Declared `ActionSpec` action types must be implemented by `ActionGateway`;
+  direct `load_skill` is not a product runtime action.
 - `AgentRun` and `AgentEngineRegistry` own product Agent execution;
   `AgentGraphExecutor` is a compatibility adapter only.
 - Coding auto-loop effects keep patch preview, sandbox apply, check result, and

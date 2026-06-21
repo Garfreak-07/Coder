@@ -18,6 +18,7 @@ from coder_workbench.agent_graph.evaluation import (
 from coder_workbench.agent_graph.interruption import build_graph_interrupt, should_interrupt_execution
 from coder_workbench.agent_graph.memory import PlannerMemoryStore
 from coder_workbench.agent_graph.merge import build_planner_input_bundle, build_round_summary
+from coder_workbench.agent_graph.round_budget import evaluate_round_budget_preflight
 from coder_workbench.agent_graph.scheduler import AgentGraphScheduler, ReadyWave
 from coder_workbench.agent_graph.schema import (
     FinalTestRecord,
@@ -457,7 +458,9 @@ class AgentGraphRunner:
             round=round_number,
             work_items=len(plan_cache.work_items),
         )
-        preflight_report = self.budget_broker.preflight_round(
+        preflight_payload, preflight_decision = evaluate_round_budget_preflight(
+            broker=self.budget_broker,
+            controller=controller,
             run_id=str(data.get("run_id") or self.agent_workflow.id),
             planner_order=planner_order,
             estimated_model_calls=_round_preflight_model_calls(
@@ -468,21 +471,19 @@ class AgentGraphRunner:
             estimated_tool_calls=_round_preflight_tool_calls(data),
             estimated_context_tokens_per_call=_round_preflight_context_tokens_per_call(data),
         )
-        preflight_payload = preflight_report.as_dict()
         data.setdefault("budget_preflight", []).append(preflight_payload)
         data["budget_preflight_latest"] = preflight_payload
         emit(
             "budget.preflight.checked",
             "Round budget preflight checked",
             round=round_number,
-            approved=preflight_report.approved,
-            reason=preflight_report.reason,
-            estimated_contexts=preflight_report.estimated_contexts,
-            estimated_model_calls=preflight_report.estimated_model_calls,
-            estimated_tool_calls=preflight_report.estimated_tool_calls,
-            remaining=preflight_report.remaining,
+            approved=bool(preflight_payload.get("approved")),
+            reason=str(preflight_payload.get("reason") or ""),
+            estimated_contexts=preflight_payload.get("estimated_contexts"),
+            estimated_model_calls=preflight_payload.get("estimated_model_calls"),
+            estimated_tool_calls=preflight_payload.get("estimated_tool_calls"),
+            remaining=preflight_payload.get("remaining"),
         )
-        preflight_decision = controller.evaluate_budget_preflight(preflight_report)
         if preflight_decision.action == "blocked":
             status_code = preflight_decision.status_code or "round_budget_preflight_denied"
             emit(

@@ -229,7 +229,9 @@ def _run_check(args: dict[str, Any], runtime_context: dict[str, Any]) -> dict[st
     from coder_workbench.coding.command_service import CommandService
 
     command = str(args.get("command") or "").strip()
-    if not command:
+    argv_input = args.get("argv")
+    argv = [str(item) for item in argv_input] if isinstance(argv_input, list) else None
+    if not command and not argv:
         return {"passed": True, "output": "No check command configured.", "skipped": True}
     repo_root = Path(runtime_context["repo_root"]).resolve()
     scopes = _list_value(runtime_context.get("scopes"))
@@ -240,8 +242,12 @@ def _run_check(args: dict[str, Any], runtime_context: dict[str, Any]) -> dict[st
         data=runtime_context.get("data") if isinstance(runtime_context.get("data"), dict) else {},
     ).run_check(
         command,
+        argv=argv,
         cwd=str(args.get("cwd") or default_cwd),
         timeout_seconds=int(args.get("timeout_seconds", 120)),
+        shell=args.get("shell"),
+        source=str(args.get("source") or "model"),
+        sandbox=bool(args.get("sandbox")),
     )
 
 

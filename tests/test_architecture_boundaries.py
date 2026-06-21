@@ -11,6 +11,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from coder_workbench.actions import ActionGateway, ActionResult
+from coder_workbench.actions.schema import ACTION_TYPES
 from coder_workbench.agent_engine import CodeWorkerEngine, HarnessBlock, HarnessGraph, HarnessValidator, default_agent_engine_registry
 from coder_workbench.agent_engine.schema import AgentEngineSpec
 from coder_workbench.agent_graph.cache import GraphRunCache
@@ -69,6 +70,15 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         self.assertNotIn("PatchService", effects_source)
         self.assertNotIn("CommandService", effects_source)
         self.assertIn("ActionGateway", effects_source)
+
+    def test_product_action_types_are_gateway_closed(self) -> None:
+        gateway_source = inspect.getsource(ActionGateway.run)
+
+        self.assertNotIn("load_skill", ACTION_TYPES)
+        for action_type in ACTION_TYPES:
+            expected = "run_command" if action_type in {"run_command", "run_command_sandbox"} else action_type
+            with self.subTest(action_type=action_type):
+                self.assertIn(expected, gateway_source)
 
     def test_agent_run_uses_runtime_profile_cache(self) -> None:
         source = inspect.getsource(__import__("coder_workbench.agent_graph.agent_run", fromlist=["_"]))

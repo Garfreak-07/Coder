@@ -7,13 +7,16 @@ from typing import Any, Callable
 from coder_workbench.actions.schema import ACTION_TYPES, ActionResult, ActionSpec
 from coder_workbench.budget import BudgetBroker, BudgetLimit
 from coder_workbench.core.artifacts import ArtifactValidationError, validate_artifact
+from coder_workbench.coding import build_repo_intelligence
 from coder_workbench.coding.command_service import CommandService
 from coder_workbench.coding.patch_service import PatchService
+from coder_workbench.extensions import ExtensionRuntime
 from coder_workbench.skills import SkillIndex, estimate_tokens
 
 
 PatchServiceFactory = Callable[[str | Path, list[str], dict[str, Any]], PatchService]
 CommandServiceFactory = Callable[[str | Path, list[str], dict[str, Any]], CommandService]
+ExtensionRuntimeFactory = Callable[[], ExtensionRuntime]
 
 
 @dataclass
@@ -58,6 +61,7 @@ class ActionGateway:
         repair_service: Any | None = None,
         patch_service_factory: PatchServiceFactory | None = None,
         command_service_factory: CommandServiceFactory | None = None,
+        extension_runtime_factory: ExtensionRuntimeFactory | None = None,
     ) -> None:
         self.budget_broker = budget_broker or BudgetBroker(BudgetLimit())
         if context_service is None:
@@ -76,6 +80,7 @@ class ActionGateway:
         self.command_service_factory = command_service_factory or (
             lambda repo_root, scopes, data: CommandService(repo_root, scopes=scopes, data=data)
         )
+        self.extension_runtime_factory = extension_runtime_factory or ExtensionRuntime
 
     def run(self, spec: ActionSpec, *, run_context: RunContext) -> ActionResult:
         if spec.action_type not in ACTION_TYPES:
@@ -93,6 +98,12 @@ class ActionGateway:
                 return self._apply_patch_sandbox(spec, run_context)
             if spec.action_type in {"run_command", "run_command_sandbox"}:
                 return self._run_command(spec, run_context)
+            if spec.action_type == "repo_index":
+                return self._repo_index(spec, run_context)
+            if spec.action_type == "call_plugin":
+                return self._call_plugin(spec, run_context)
+            if spec.action_type == "call_mcp":
+                return self._call_mcp(spec, run_context)
             if spec.action_type == "validate_artifact":
                 return self._validate_artifact(spec)
             if spec.action_type == "repair_artifact":
@@ -245,15 +256,23 @@ class ActionGateway:
             require_approval = bool(spec.input.get("require_approval"))
         else:
             require_approval = not (sandbox and not sandbox_unavailable)
+        argv_input = spec.input.get("argv")
+        argv = None
+        if isinstance(argv_input, list):
+            argv = [str(item) for item in argv_input if str(item)]
         result = self.command_service_factory(
             action_root,
             run_context.active_scopes,
             run_context.mutable_data,
         ).run_check(
             command,
+            argv=argv,
             cwd=str(spec.input.get("cwd") or "."),
             timeout_seconds=int(spec.input.get("timeout_seconds") or 120),
             require_approval=require_approval,
+            shell=spec.input.get("shell"),
+            source=str(spec.input.get("source") or "model"),
+            sandbox=sandbox and not sandbox_unavailable,
         )
         self.budget_broker.commit(reservation.reservation_id, actual_tool_calls=1)
         return ActionResult(
@@ -267,6 +286,118 @@ class ActionGateway:
                 "sandbox_unavailable": sandbox_unavailable if sandbox else False,
             },
         )
+
+    def _repo_index(self, spec: ActionSpec, run_context: RunContext) -> ActionResult:
+        reservation = self.budget_broker.reserve_tool_call(
+            run_id=run_context.run_id,
+            agent_id=_agent_id(run_context),
+            action_type=spec.action_type,
+            estimated_tokens=spec.estimated_tokens,
+        )
+        if not reservation.approved:
+            return _budget_blocked(reservation)
+
+        intelligence = build_repo_intelligence(str(run_context.repo_root))
+        run_context.mutable_data["repo_intelligence"] = intelligence
+        self.budget_broker.commit(reservation.reservation_id, actual_tool_calls=1)
+        return ActionResult(
+            status="ok",
+            summary="Repository intelligence built.",
+            payload={
+                "reservation": reservation.model_dump(mode="json"),
+                "repo_intelligence": intelligence,
+            },
+        )
+
+    def _call_plugin(self, spec: ActionSpec, run_context: RunContext) -> ActionResult:
+        operation_id = str(
+            spec.input.get("operation_id")
+            or spec.input.get("plugin_operation_id")
+            or ""
+        ).strip()
+        if not operation_id:
+            return ActionResult(
+                status="failed",
+                summary="Plugin operation_id is required.",
+                error_code="plugin_operation_id_required",
+            )
+
+        reservation = self.budget_broker.reserve_tool_call(
+            run_id=run_context.run_id,
+            agent_id=_agent_id(run_context),
+            action_type=spec.action_type,
+            estimated_tokens=spec.estimated_tokens,
+        )
+        if not reservation.approved:
+            return _budget_blocked(reservation)
+
+        if _requires_action_approval(spec) and not _action_is_approved(spec, run_context, operation_id):
+            released = self.budget_broker.release(reservation.reservation_id)
+            return ActionResult(
+                status="blocked",
+                summary="Plugin operation requires approval.",
+                error_code="plugin_requires_approval",
+                payload={
+                    "reservation": released.model_dump(mode="json"),
+                    "operation_id": operation_id,
+                    "approval_key": _approval_key(spec, operation_id),
+                },
+            )
+
+        runtime = self.extension_runtime_factory()
+        result = runtime.execute_plugin_operation(
+            operation_id,
+            dict(spec.input.get("args") or {}),
+            {
+                "run_id": run_context.run_id,
+                "repo_root": str(run_context.repo_root),
+                "scopes": run_context.active_scopes,
+                "data": run_context.mutable_data,
+            },
+        )
+        self.budget_broker.commit(reservation.reservation_id, actual_tool_calls=1)
+
+        status_value = str(result.get("status") or "")
+        if status_value == "blocked":
+            status = "blocked"
+        elif status_value in {"failed", "error"}:
+            status = "failed"
+        else:
+            status = "ok"
+        return ActionResult(
+            status=status,
+            summary=f"Plugin operation {operation_id} completed with status {status_value or status}.",
+            error_code=None if status == "ok" else f"plugin_{status}",
+            payload={
+                "reservation": reservation.model_dump(mode="json"),
+                "operation": result,
+            },
+        )
+
+    def _call_mcp(self, spec: ActionSpec, run_context: RunContext) -> ActionResult:
+        mcp_spec = spec.model_copy(
+            update={
+                "action_type": "call_plugin",
+                "input": {
+                    **spec.input,
+                    "operation_id": str(
+                        spec.input.get("operation_id")
+                        or spec.input.get("mcp_operation_id")
+                        or ""
+                    ),
+                    "requires_permission": spec.input.get("requires_permission", True),
+                },
+            }
+        )
+        result = self._call_plugin(mcp_spec, run_context)
+        if result.error_code == "plugin_operation_id_required":
+            return result.model_copy(
+                update={
+                    "summary": "MCP operation_id is required.",
+                    "error_code": "mcp_operation_id_required",
+                }
+            )
+        return result
 
     def _validate_artifact(self, spec: ActionSpec) -> ActionResult:
         artifact_type = str(spec.input.get("expected_type") or spec.input.get("artifact_type") or "")
@@ -312,6 +443,29 @@ def _action_root(run_context: RunContext, *, sandbox: bool) -> tuple[Path, bool]
     if sandbox and run_context.sandbox_root is not None:
         return Path(run_context.sandbox_root), False
     return Path(run_context.repo_root), bool(sandbox)
+
+
+def _requires_action_approval(spec: ActionSpec) -> bool:
+    return bool(
+        spec.requires_permission
+        or spec.risk_level in {"medium", "high"}
+        or spec.input.get("requires_permission")
+        or spec.input.get("requires_approval")
+    )
+
+
+def _action_is_approved(spec: ActionSpec, run_context: RunContext, operation_id: str) -> bool:
+    if bool(spec.input.get("approved")):
+        return True
+    data = run_context.mutable_data
+    if data.get("preapprove_all"):
+        return True
+    approvals = data.get("plugin_approvals", {})
+    return isinstance(approvals, dict) and approvals.get(_approval_key(spec, operation_id)) is True
+
+
+def _approval_key(spec: ActionSpec, operation_id: str) -> str:
+    return str(spec.input.get("approval_key") or f"plugin:{operation_id}:{spec.risk_level}")
 
 
 def _estimate_context_tokens(spec: ActionSpec, run_context: RunContext, skill_index: SkillIndex) -> int:

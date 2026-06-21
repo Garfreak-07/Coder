@@ -13,6 +13,7 @@ def run_check_command(
     *,
     cwd: str = ".",
     timeout_seconds: int = 120,
+    sandbox: bool = False,
 ) -> CheckResultArtifact:
     root = Path(repo_root).resolve()
     workdir = (root / cwd).resolve()
@@ -37,6 +38,8 @@ def run_check_command(
         cwd=cwd,
         timeout_seconds=timeout_seconds,
         require_approval=False,
+        source="discovered",
+        sandbox=sandbox,
     )
     if result.get("status") == "blocked":
         return CheckResultArtifact(

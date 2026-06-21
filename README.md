@@ -6,7 +6,7 @@ Coder is built around an AgentGraph runtime where Planner owns global decisions,
 Code Worker performs bounded implementation work, Tester returns evidence, and
 the runtime passes compact structured artifacts instead of transcripts.
 
-The current architecture target is v0.9.4 local planning and budget preflight:
+The current architecture target is v0.9.5 runtime closure and safe local effects:
 
 ```text
 Ordinary Agent workflow UI
@@ -15,6 +15,7 @@ Ordinary Agent workflow UI
 -> RunController / RunGuard
 -> AgentGraphRunner / AgentGraphScheduler
 -> ActionGateway
+-> plugin / MCP / repo intelligence action boundary
 -> BudgetBroker round preflight + reservations
 -> ContextService
 -> AgentRun
@@ -119,10 +120,15 @@ retained only for old `WorkflowSpec` flows.
   waves, then reserves model, tool, and context budgets before execution.
   Preflight, reservation, and usage diagnostics are written to run results.
 - `ActionGateway` is the runtime entry point for context construction, patch
-  preview, sandbox patch apply, sandbox command checks, and artifact
-  repair/validation.
+  preview, sandbox patch apply, sandbox command checks, plugin, MCP, repo
+  intelligence, and artifact repair/validation actions. Declared `ActionSpec`
+  types must either be implemented by `ActionGateway` or absent from
+  `ACTION_TYPES`.
 - `RuntimeProfileCompiler` converts ordinary Agent roles into internal engine,
   context, token, artifact, plugin, skill, memory, repair, and tool policies.
+  Research and draft Agent roles use the knowledge-worker `SynthesizerEngine`
+  fallback until dedicated ResearchWorkerEngine and DraftWorkerEngine packages
+  are installed.
 - `RuntimeProfileCache` avoids recompiling identical workflow/extension/profile
   combinations.
 - `AgentRun` dispatches PlannerOrder, Worker, Tester, FinalReview, Synthesizer,
@@ -134,8 +140,10 @@ retained only for old `WorkflowSpec` flows.
   by the product `AgentGraphRunner`.
 - `PatchService` owns proposed change validation, risk path blocking, patch
   preview, apply, and rollback behind `ActionGateway`.
-- `CommandService` owns scoped cwd validation, command approval, timeouts, and
-  output capture behind `ActionGateway`.
+- `CommandService` owns scoped cwd validation, argv-based checks, shell command
+  policy, command approval, timeouts, and output capture behind
+  `ActionGateway`. Shell commands remain supported for compatibility but
+  require approval outside sandboxed execution.
 - Model-output validation and repair enter through `ActionGateway` actions;
   the repair service remains behind that gateway boundary.
 - `ExtensionRouter` routes globally installed plugins and skills per work item.

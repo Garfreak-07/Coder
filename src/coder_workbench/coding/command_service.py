@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from coder_workbench.coding.command_policy import evaluate_command_policy
+
 
 class CommandService:
     def __init__(self, repo_root: str | Path, *, scopes: list[str] | None = None, data: dict[str, Any] | None = None) -> None:
@@ -14,41 +16,81 @@ class CommandService:
 
     def run_check(
         self,
-        command: str,
+        command: str = "",
         *,
+        argv: list[str] | None = None,
         cwd: str = ".",
         timeout_seconds: int = 120,
         require_approval: bool = True,
+        shell: bool | None = None,
+        source: str = "model",
+        sandbox: bool = False,
     ) -> dict[str, Any]:
         command = command.strip()
-        if not command:
+        argv = [str(item) for item in (argv or []) if str(item)]
+        command_text = command or " ".join(argv)
+        if not command_text:
             return {"passed": True, "output": "No check command configured.", "skipped": True}
         default_cwd = self.scopes[0] if self.scopes else "."
         workdir = resolve_scoped_path(self.repo_root, cwd or default_cwd, self.scopes)
         cwd_relative = workdir.relative_to(self.repo_root).as_posix() if workdir != self.repo_root else "."
-        approval_key = command_approval_key(command, cwd_relative)
-        if require_approval and not self.command_is_approved(approval_key):
+        active_shell = True if shell is None and not argv else bool(shell)
+        policy = evaluate_command_policy(
+            command=command,
+            argv=argv,
+            shell=active_shell,
+            source=source,
+            sandbox=sandbox,
+        )
+        if not policy.allowed:
             return {
                 "passed": False,
                 "status": "blocked",
-                "output": f"Check command requires explicit approval: {command}",
+                "output": policy.reason or "Command blocked by policy.",
+                "blocked": True,
+                "requires_approval": False,
+                "approval_type": "command",
+                "command": command_text,
+                "cwd": cwd_relative,
+                "message": policy.reason or "Command blocked by policy.",
+                "policy": policy.as_dict(),
+            }
+
+        effective_require_approval = require_approval or policy.requires_approval
+        approval_key = command_approval_key(command_text, cwd_relative)
+        if effective_require_approval and not self.command_is_approved(approval_key):
+            return {
+                "passed": False,
+                "status": "blocked",
+                "output": f"Check command requires explicit approval: {command_text}",
                 "blocked": True,
                 "requires_approval": True,
                 "approval_type": "command",
                 "approval_key": approval_key,
-                "command": command,
+                "command": command_text,
                 "cwd": cwd_relative,
-                "message": f"Approve command before running: {command}",
+                "message": f"Approve command before running: {command_text}",
+                "policy": policy.as_dict(),
             }
         try:
-            completed = subprocess.run(
-                command,
-                cwd=workdir,
-                shell=True,
-                text=True,
-                capture_output=True,
-                timeout=timeout_seconds,
-            )
+            if argv:
+                completed = subprocess.run(
+                    argv,
+                    cwd=workdir,
+                    shell=False,
+                    text=True,
+                    capture_output=True,
+                    timeout=timeout_seconds,
+                )
+            else:
+                completed = subprocess.run(
+                    command,
+                    cwd=workdir,
+                    shell=active_shell,
+                    text=True,
+                    capture_output=True,
+                    timeout=timeout_seconds,
+                )
         except subprocess.TimeoutExpired as exc:
             output = ((exc.stdout or "") + (exc.stderr or ""))[-8000:]
             return {
@@ -56,18 +98,20 @@ class CommandService:
                 "status": "blocked",
                 "returncode": None,
                 "cwd": cwd_relative,
-                "command": command,
+                "command": command_text,
                 "approval_key": approval_key,
                 "output": output,
                 "message": f"Check timed out after {timeout_seconds} seconds.",
+                "policy": policy.as_dict(),
             }
         return {
             "passed": completed.returncode == 0,
             "returncode": completed.returncode,
             "cwd": cwd_relative,
-            "command": command,
+            "command": command_text,
             "approval_key": approval_key,
             "output": (completed.stdout + completed.stderr)[-8000:],
+            "policy": policy.as_dict(),
         }
 
     def command_is_approved(self, approval_key: str) -> bool:

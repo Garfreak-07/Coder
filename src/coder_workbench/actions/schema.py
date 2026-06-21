@@ -7,7 +7,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 ACTION_TYPES = {
     "build_context",
-    "load_skill",
     "call_plugin",
     "call_mcp",
     "repo_index",

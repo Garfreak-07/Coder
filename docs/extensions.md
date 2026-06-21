@@ -21,6 +21,10 @@ External-effect operations require preview and approval metadata. Runtime
 execution should enter through `ActionGateway`, which reserves with
 `BudgetBroker` before dispatching to services or extension runtimes.
 
+`call_plugin` and `call_mcp` enter through `ActionGateway`. Permissioned or
+medium/high-risk extension operations are blocked before execution unless an
+approval is present.
+
 ## Skills
 
 Skills provide knowledge and procedures:
@@ -33,6 +37,7 @@ Skills provide knowledge and procedures:
 `ExtensionRouter` routes relevant skills per work item. `ContextService`
 constructs the packet and records loaded and omitted skill tokens, but
 `BudgetBroker` performs the pre-execution context reservation.
+Direct `load_skill` is intentionally not a public runtime action.
 
 ## API
 
@@ -47,7 +52,7 @@ New product endpoints:
 Existing `/api/v2/skills/*` endpoints remain temporary compatibility aliases.
 Legacy `WorkflowSpec` paths must not become new extension integration points.
 
-## v0.9.3 Boundary
+## v0.9.5 Boundary
 
 - Ordinary users still manage Agents, workflows, plugins, and skills.
 - `RunController` owns Planner loop continuation; extensions do not decide

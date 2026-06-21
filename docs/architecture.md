@@ -31,7 +31,7 @@ PlannerInputBundle -> PlannerDecision -> RunController
 Legacy `WorkflowSpec` remains only as a compatibility and advanced preview
 boundary. Product live Agent workflows use `AgentGraphRunner`.
 
-## v0.9.3 Control Plane
+## v0.9.5 Control Plane
 
 `RunController` owns global continuation decisions after each
 `PlannerDecision`. It enforces max rounds and plan fingerprint loop guards
@@ -41,10 +41,18 @@ run result data.
 `ActionGateway` is the entry point for low-level runtime actions:
 
 - context construction
+- plugin operation dispatch
+- MCP operation dispatch
+- repo intelligence construction
 - patch preview
 - sandbox patch apply
 - sandbox/local command checks
 - artifact validation and repair
+
+v0.9.5 closes declared runtime actions. `ActionGateway` handlers cover every
+`ActionSpec` action type in the product runtime. Skills continue to load through
+`ContextService` / `build_context`; direct `load_skill` is intentionally not a
+public runtime action.
 
 `BudgetBroker` reserves model, tool, and context budgets before those actions
 run. Reservation diagnostics are written alongside `TokenLedger`, which remains

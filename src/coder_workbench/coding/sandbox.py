@@ -80,6 +80,7 @@ def sandbox_apply_and_check(
                         str(command.get("command") or ""),
                         cwd=str(command.get("cwd") or "."),
                         timeout_seconds=int(command.get("timeout_seconds") or 120),
+                        sandbox=True,
                     )
                 )
         return {

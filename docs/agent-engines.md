@@ -26,6 +26,11 @@ Registered default engines:
 - `synthesizer-engine`: creates `synthesis_artifact` output for organizer-style
   Agents.
 
+Research and draft roles currently compile to the knowledge-worker
+`synthesizer-engine` fallback. Dedicated research or draft engines may be added
+later as installable AgentEngine packages, but compiled default profiles must
+always resolve to a registered engine.
+
 Agent engines receive prepared envelopes. They should not call `ContextService`,
 `PatchService`, `CommandService`, artifact validation, or repair services
 directly. New low-level work enters through `ActionGateway`, which reserves
@@ -47,7 +52,7 @@ Model calls inside the default AgentGraph engines reserve model budget before
 invocation when a real model is configured. Mock-mode execution does not consume
 model-call budget.
 
-## v0.9.3 Boundary
+## v0.9.5 Boundary
 
 - Ordinary users choose Agents; engine graphs remain hidden runtime internals.
 - `RunController` controls whether engine output can lead to another round.

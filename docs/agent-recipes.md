@@ -24,6 +24,8 @@ Supported recipe roles:
 `AgentRuntimeProfile` with engine id, context profile, token budget, artifact
 policy, plugin policy, skill policy, memory policy, repair policy, and tool
 policy.
+Research and draft recipes currently compile to the registered
+`synthesizer-engine` knowledge-worker fallback.
 
 `RuntimeProfileCache` keys compiled profiles by workflow shape, installed
 extension versions, and planner settings. The ordinary user model stays the same;
@@ -37,7 +39,7 @@ Planner remains the only Agent that can ask the user or decide global
 `continue`, `ask_human`, `finish`, and `stop` outcomes. `RunController` enforces
 that loop boundary after each `PlannerDecision`.
 
-## v0.9.3 Boundary
+## v0.9.5 Boundary
 
 - Ordinary users define Agent intent; runtime profiles remain internal.
 - `RunController` owns round continuation after Planner decisions.

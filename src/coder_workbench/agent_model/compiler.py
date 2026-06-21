@@ -58,8 +58,8 @@ def _engine_id(role: str) -> str:
         "do_work": "code-worker-engine",
         "check_result": "tester-engine",
         "organize": "synthesizer-engine",
-        "research": "research-worker-engine",
-        "write_draft": "draft-worker-engine",
+        "research": "synthesizer-engine",
+        "write_draft": "synthesizer-engine",
     }.get(role, "code-worker-engine")
 
 
@@ -92,7 +92,7 @@ def _allowed_artifacts(role: str) -> list[str]:
         return ["run_contract", "planner_order", "planner_decision", "round_summary"]
     if role == "check_result":
         return ["test_result"]
-    if role == "organize":
+    if role in {"organize", "research", "write_draft"}:
         return ["synthesis_artifact", "execution_result"]
     return ["execution_result"]
 

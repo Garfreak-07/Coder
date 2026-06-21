@@ -8,12 +8,13 @@ Current services:
   context packets, and token ledger entries.
 - `PatchService`: validates proposed changes, guards risk paths, creates patch
   previews, applies approved patches, and rolls back snapshots.
-- `CommandService`: validates cwd/scope, enforces approval for product checks,
-  runs sandbox/local checks, and captures output.
+- `CommandService`: validates cwd/scope, supports argv-based checks, enforces
+  shell command policy and approval for product checks, runs sandbox/local
+  checks, and captures output.
 - `ArtifactRepairService`: one-shot JSON artifact repair implementation kept
   behind `ActionGateway`.
 
-In v0.9.3 these services sit behind `ActionGateway`:
+In v0.9.5 these services sit behind `ActionGateway`:
 
 ```text
 AgentGraphRunner / AgentEngine
@@ -29,6 +30,10 @@ remain behind runtime services and are no longer direct Runner calls.
 `TokenLedger` is still the audit record after context construction.
 `BudgetBroker` is the pre-execution control path and writes reservation
 diagnostics into run data.
+
+`CommandService` accepts argv-based command execution and keeps string shell
+commands for compatibility. Shell commands and model-generated commands require
+approval outside sandboxed checks.
 
 ## Coding Auto-Loop
 
@@ -52,7 +57,7 @@ time and converted into Planner interrupts. Sandbox actions use `sandbox_root`
 when provided; otherwise they are marked `sandbox_unavailable` and fall back to
 the repo-root compatibility path with normal approval behavior.
 
-## v0.9.3 Boundary
+## v0.9.5 Boundary
 
 - Ordinary users see coding capabilities through Agents and workflow edges, not
   kernel services.
