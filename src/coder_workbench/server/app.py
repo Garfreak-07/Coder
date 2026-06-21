@@ -41,6 +41,7 @@ from coder_workbench.skills import (
     SkillTrustLevel,
     build_skill_index,
     is_auto_update_allowed,
+    skill_auto_update_block_reason,
 )
 from coder_workbench.tools import default_tool_registry
 from coder_workbench.tools.filesystem import normalize_scope_paths, resolve_existing_dir
@@ -825,18 +826,24 @@ def _skill_update_report(skill_store: InstalledSkillStore, entries: list[Any]) -
             )
             continue
         update_available = entry.version != record.manifest.version or entry.sha256 != record.package_sha256
+        auto_update_eligible = is_auto_update_allowed(record, entry)
         updates.append(
             {
                 "skill_id": record.id,
                 "installed_version": record.manifest.version,
                 "available_version": entry.version,
                 "update_available": update_available,
-                "auto_update_eligible": is_auto_update_allowed(record, entry),
+                "auto_update_eligible": auto_update_eligible,
                 "pinned_version": record.pinned_version,
                 "update_policy": record.update_policy,
                 "risk_level": entry.risk_level,
                 "trust_level": entry.trust_level,
                 "external_effect": entry.external_effect,
+                "reason": (
+                    None
+                    if auto_update_eligible
+                    else skill_auto_update_block_reason(record, entry)
+                ),
             }
         )
     return updates

@@ -7,7 +7,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from coder_workbench.skills.registry_client import RegistryClient
-from coder_workbench.skills.schema import InstalledSkillRecord, RemoteSkillEntry, SkillTrustLevel
+from coder_workbench.skills.schema import ConnectorOperation, InstalledSkillRecord, RemoteSkillEntry, SkillTrustLevel
 from coder_workbench.skills.store import InstalledSkillStore
 from coder_workbench.skills.verifier import (
     SkillPackageVerification,
@@ -87,6 +87,8 @@ class SkillInstaller:
                 require_verified_signature=self.require_verified_signatures,
             )
             _assert_manifest_matches_registry(entry, verification)
+            if existing is not None:
+                _assert_connector_operation_update_allowed(existing, verification, force=force)
             record = self.store.install_from_directory(
                 skill_root,
                 manifest=verification.manifest,
@@ -197,23 +199,34 @@ def _assert_manifest_matches_registry(entry: RemoteSkillEntry, verification: Ski
         raise SkillVerificationError("manifest external_effect does not match registry metadata")
     if manifest.risk_level != entry.risk_level:
         raise SkillVerificationError("manifest risk_level does not match registry metadata")
+    if entry.connector_operations:
+        _assert_connector_operations_match(
+            entry.connector_operations,
+            manifest.connector_operations,
+            "manifest connector_operations do not match registry metadata",
+        )
 
 
 def is_auto_update_allowed(record: InstalledSkillRecord, entry: RemoteSkillEntry) -> bool:
-    if record.pinned_version:
-        return False
-    if record.update_policy != "auto_official_low_risk":
-        return False
+    return skill_auto_update_block_reason(record, entry) is None
+
+
+def skill_auto_update_block_reason(record: InstalledSkillRecord, entry: RemoteSkillEntry) -> str | None:
     if entry.version == record.manifest.version and entry.sha256 == record.package_sha256:
-        return False
-    return (
-        entry.trust_level == "official"
-        and entry.risk_level == "low"
-        and not entry.external_effect
-        and record.trust_level == "official"
-        and record.manifest.risk_level == "low"
-        and not record.manifest.external_effect
-    )
+        return "current"
+    if record.pinned_version:
+        return "pinned"
+    if record.update_policy != "auto_official_low_risk":
+        return "manual update policy"
+    if _connector_operation_locks_changed(record, entry):
+        return "connector operation lock changed"
+    if entry.trust_level != "official" or record.trust_level != "official":
+        return "not official"
+    if entry.risk_level != "low" or record.manifest.risk_level != "low":
+        return "not low risk"
+    if entry.external_effect or record.manifest.external_effect:
+        return "external effect"
+    return None
 
 
 def _get_existing(store: InstalledSkillStore, skill_id: str) -> InstalledSkillRecord | None:
@@ -223,10 +236,87 @@ def _get_existing(store: InstalledSkillStore, skill_id: str) -> InstalledSkillRe
         return None
 
 
+def _assert_connector_operation_update_allowed(
+    existing: InstalledSkillRecord,
+    verification: SkillPackageVerification,
+    *,
+    force: bool,
+) -> None:
+    if force:
+        return
+    current = _connector_operation_locks(
+        existing.manifest.connector_operations,
+        package_sha256=existing.package_sha256,
+    )
+    updated = _connector_operation_locks(
+        verification.manifest.connector_operations,
+        package_sha256=verification.sha256,
+    )
+    if current != updated and (current or updated):
+        raise SkillVerificationError(
+            "connector operation locks changed; force update requires Planner-owned re-approval"
+        )
+
+
+def _assert_connector_operations_match(
+    registry_operations: list[ConnectorOperation],
+    manifest_operations: list[ConnectorOperation],
+    message: str,
+) -> None:
+    registry_locks = _connector_operation_descriptor_locks(registry_operations)
+    manifest_locks = _connector_operation_descriptor_locks(manifest_operations)
+    if registry_locks != manifest_locks:
+        raise SkillVerificationError(message)
+
+
+def _connector_operation_locks_changed(record: InstalledSkillRecord, entry: RemoteSkillEntry) -> bool:
+    current = _connector_operation_locks(
+        record.manifest.connector_operations,
+        package_sha256=record.package_sha256,
+    )
+    if not entry.connector_operations:
+        return bool(current) and entry.sha256 != record.package_sha256
+    available = _connector_operation_locks(entry.connector_operations, package_sha256=entry.sha256)
+    return current != available
+
+
+def _connector_operation_locks(
+    operations: list[ConnectorOperation],
+    *,
+    package_sha256: str,
+) -> list[tuple[str, str, str, str]]:
+    package_lock = _normalize_lock_digest(package_sha256)
+    return [
+        (*lock, package_lock)
+        for lock in _connector_operation_descriptor_locks(operations)
+    ]
+
+
+def _connector_operation_descriptor_locks(
+    operations: list[ConnectorOperation],
+) -> list[tuple[str, str, str]]:
+    return sorted(
+        (
+            operation.connector_id,
+            operation.operation_id,
+            _normalize_lock_digest(operation.descriptor_sha256 or ""),
+        )
+        for operation in operations
+    )
+
+
+def _normalize_lock_digest(value: str) -> str:
+    return value.strip().lower().removeprefix("sha256:")
+
+
 def _assert_update_allowed(existing: InstalledSkillRecord, entry: RemoteSkillEntry) -> None:
     if existing.pinned_version and entry.version != existing.pinned_version:
         raise SkillVerificationError(
             f"skill {existing.id!r} is pinned to version {existing.pinned_version!r}; unpin before updating"
+        )
+    if _connector_operation_locks_changed(existing, entry):
+        raise SkillVerificationError(
+            "connector operation locks changed; force update requires Planner-owned re-approval"
         )
 
 

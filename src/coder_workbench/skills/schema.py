@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import datetime, timezone
 from typing import Any, Literal
@@ -34,6 +36,54 @@ class SkillCompatibility(BaseModel):
     agent_graph_runtime: bool = True
 
 
+class ConnectorOperation(BaseModel):
+    """Locked connector operation metadata imported from a SkillPack."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    connector_id: str
+    operation_id: str
+    description: str = ""
+    input_schema: dict[str, Any] = Field(default_factory=dict)
+    risk_level: SkillRiskLevel = "low"
+    external_effect: bool = False
+    requires_preview: bool = False
+    requires_human_approval: bool = False
+    descriptor_sha256: str | None = None
+
+    @field_validator("connector_id", "operation_id")
+    @classmethod
+    def require_identifier(cls, value: str, info: Any) -> str:
+        return _non_empty(value, info.field_name)
+
+    @model_validator(mode="after")
+    def lock_descriptor(self) -> "ConnectorOperation":
+        if self.external_effect and not self.requires_preview:
+            raise ValueError("external-effect connector operations must require preview")
+        if self.external_effect and not self.requires_human_approval:
+            raise ValueError("external-effect connector operations must require human approval")
+        expected = _connector_operation_sha256(self)
+        if self.descriptor_sha256 is None:
+            self.descriptor_sha256 = expected
+        elif self.descriptor_sha256.lower().removeprefix("sha256:") != expected:
+            raise ValueError("connector operation descriptor_sha256 does not match locked metadata")
+        return self
+
+    def summary(self, *, package_sha256: str | None = None) -> dict[str, Any]:
+        summary = {
+            "connector_id": self.connector_id,
+            "operation_id": self.operation_id,
+            "risk_level": self.risk_level,
+            "external_effect": self.external_effect,
+            "requires_preview": self.requires_preview,
+            "requires_human_approval": self.requires_human_approval,
+            "descriptor_sha256": self.descriptor_sha256,
+        }
+        if package_sha256 is not None:
+            summary["package_sha256"] = package_sha256
+        return summary
+
+
 class SkillPackageManifest(BaseModel):
     """Validated SkillPack manifest stored as skill.json."""
 
@@ -51,6 +101,7 @@ class SkillPackageManifest(BaseModel):
     requires: list[str] = Field(default_factory=list)
     produces: list[str] = Field(default_factory=list)
     connectors: list[str] = Field(default_factory=list)
+    connector_operations: list[ConnectorOperation] = Field(default_factory=list)
     external_effect: bool = False
     requires_preview: bool = False
     requires_human_approval: bool = False
@@ -89,9 +140,21 @@ class SkillPackageManifest(BaseModel):
             raise ValueError("external_effect skills must require preview")
         if self.external_effect and not self.requires_human_approval:
             raise ValueError("external_effect skills must require human approval")
+        connector_ids = set(self.connectors)
+        for operation in self.connector_operations:
+            if operation.connector_id not in connector_ids:
+                raise ValueError("connector_operations must reference declared connectors")
+            if operation.external_effect and not self.external_effect:
+                raise ValueError("external-effect connector operations require manifest external_effect=true")
         return self
 
-    def summary(self, *, trust_level: SkillTrustLevel, enabled: bool = True) -> "SkillSummary":
+    def summary(
+        self,
+        *,
+        trust_level: SkillTrustLevel,
+        enabled: bool = True,
+        package_sha256: str | None = None,
+    ) -> "SkillSummary":
         return SkillSummary(
             id=self.id,
             name=self.name,
@@ -103,6 +166,10 @@ class SkillPackageManifest(BaseModel):
             requires=self.requires,
             produces=self.produces,
             connectors=self.connectors,
+            connector_operations=[
+                operation.summary(package_sha256=package_sha256)
+                for operation in self.connector_operations
+            ],
             trust_level=trust_level,
             enabled=enabled,
             external_effect=self.external_effect,
@@ -126,6 +193,7 @@ class RemoteSkillEntry(BaseModel):
     risk_level: SkillRiskLevel
     external_effect: bool = False
     requires_connectors: list[str] = Field(default_factory=list)
+    connector_operations: list[ConnectorOperation] = Field(default_factory=list)
     trust_level: SkillTrustLevel = "community"
 
     @model_validator(mode="before")
@@ -157,6 +225,16 @@ class RemoteSkillEntry(BaseModel):
     def clean_connectors(cls, value: list[str]) -> list[str]:
         return _dedupe([item.strip() for item in value if str(item).strip()])
 
+    @model_validator(mode="after")
+    def enforce_connector_operation_policy(self) -> "RemoteSkillEntry":
+        connector_ids = set(self.requires_connectors)
+        for operation in self.connector_operations:
+            if operation.connector_id not in connector_ids:
+                raise ValueError("connector_operations must reference declared requires_connectors")
+            if operation.external_effect and not self.external_effect:
+                raise ValueError("external-effect connector operations require registry external_effect=true")
+        return self
+
     def summary(self, *, installed: bool = False) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -169,6 +247,10 @@ class RemoteSkillEntry(BaseModel):
             "trust_level": self.trust_level,
             "requires_connectors": self.requires_connectors,
             "external_effect": self.external_effect,
+            "connector_operations": [
+                operation.summary(package_sha256=self.sha256)
+                for operation in self.connector_operations
+            ],
             "installed": installed,
         }
 
@@ -210,7 +292,11 @@ class InstalledSkillRecord(BaseModel):
         return self.manifest.id
 
     def summary(self) -> "SkillSummary":
-        return self.manifest.summary(trust_level=self.trust_level, enabled=self.enabled)
+        return self.manifest.summary(
+            trust_level=self.trust_level,
+            enabled=self.enabled,
+            package_sha256=self.package_sha256,
+        )
 
 
 class SkillSummary(BaseModel):
@@ -226,6 +312,7 @@ class SkillSummary(BaseModel):
     requires: list[str] = Field(default_factory=list)
     produces: list[str] = Field(default_factory=list)
     connectors: list[str] = Field(default_factory=list)
+    connector_operations: list[dict[str, Any]] = Field(default_factory=list)
     trust_level: SkillTrustLevel
     enabled: bool = True
     external_effect: bool = False
@@ -248,3 +335,18 @@ def _dedupe(items: list[Any]) -> list[Any]:
         seen.add(item)
         output.append(item)
     return output
+
+
+def _connector_operation_sha256(operation: ConnectorOperation) -> str:
+    payload = {
+        "connector_id": operation.connector_id,
+        "operation_id": operation.operation_id,
+        "description": operation.description,
+        "input_schema": operation.input_schema,
+        "risk_level": operation.risk_level,
+        "external_effect": operation.external_effect,
+        "requires_preview": operation.requires_preview,
+        "requires_human_approval": operation.requires_human_approval,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()

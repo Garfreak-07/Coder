@@ -45,6 +45,60 @@ class SkillStoreSchemaTests(unittest.TestCase):
         with self.assertRaises(Exception):
             SkillPackageManifest.model_validate(unsafe_effect)
 
+    def test_connector_operation_descriptor_lock_is_generated_and_summarized(self) -> None:
+        manifest = SkillPackageManifest.model_validate(
+            _manifest(connector_operations=[_connector_operation()])
+        )
+
+        operation = manifest.connector_operations[0]
+        self.assertIsNotNone(operation.descriptor_sha256)
+        self.assertEqual(len(operation.descriptor_sha256 or ""), 64)
+
+        summary = manifest.summary(trust_level="official", package_sha256="a" * 64)
+        self.assertEqual(summary.connector_operations[0]["descriptor_sha256"], operation.descriptor_sha256)
+        self.assertEqual(summary.connector_operations[0]["package_sha256"], "a" * 64)
+
+    def test_connector_operation_rejects_mismatched_descriptor_and_unknown_connector(self) -> None:
+        with self.assertRaises(Exception):
+            SkillPackageManifest.model_validate(
+                _manifest(connector_operations=[_connector_operation(descriptor_sha256="0" * 64)])
+            )
+
+        with self.assertRaises(Exception):
+            SkillPackageManifest.model_validate(
+                _manifest(connector_operations=[_connector_operation(connector_id="slack_readonly")])
+            )
+
+    def test_external_effect_connector_operation_requires_preview_and_manifest_external_effect(self) -> None:
+        with self.assertRaises(Exception):
+            SkillPackageManifest.model_validate(
+                _manifest(
+                    external_effect=True,
+                    requires_preview=True,
+                    requires_human_approval=True,
+                    connector_operations=[
+                        _connector_operation(
+                            external_effect=True,
+                            requires_preview=False,
+                            requires_human_approval=True,
+                        )
+                    ],
+                )
+            )
+
+        with self.assertRaises(Exception):
+            SkillPackageManifest.model_validate(
+                _manifest(
+                    connector_operations=[
+                        _connector_operation(
+                            external_effect=True,
+                            requires_preview=True,
+                            requires_human_approval=True,
+                        )
+                    ]
+                )
+            )
+
     def test_checksum_verifier_rejects_mismatch(self) -> None:
         with self.assertRaises(SkillVerificationError):
             verify_sha256(b"package", "0" * 64)
@@ -113,6 +167,102 @@ class SkillInstallerTests(unittest.TestCase):
             store = InstalledSkillStore(root / ".coder")
             with self.assertRaises(SkillVerificationError):
                 SkillInstaller(client=RegistryClient(str(registry_path)), store=store).install("github-research")
+
+    def test_skill_index_includes_connector_operation_locks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            operation = _connector_operation()
+            package_path, digest = _write_skill_package(
+                root,
+                manifest=_manifest(connector_operations=[operation]),
+            )
+            registry_path = _write_registry(
+                root,
+                package_path,
+                digest,
+                connector_operations=[operation],
+            )
+            store = InstalledSkillStore(root / ".coder")
+            SkillInstaller(client=RegistryClient(str(registry_path)), store=store).install("github-research")
+
+            skill_index = build_skill_index(store.list_installed())
+            locks = skill_index.skills[0].connector_operations
+
+            self.assertEqual(locks[0]["connector_id"], "github_readonly")
+            self.assertEqual(locks[0]["operation_id"], "search_repositories")
+            self.assertEqual(locks[0]["package_sha256"], digest)
+            self.assertEqual(len(locks[0]["descriptor_sha256"]), 64)
+
+    def test_installer_rejects_registry_connector_operation_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package_path, digest = _write_skill_package(
+                root,
+                manifest=_manifest(connector_operations=[_connector_operation()]),
+            )
+            registry_path = _write_registry(
+                root,
+                package_path,
+                digest,
+                connector_operations=[
+                    _connector_operation(
+                        input_schema={
+                            "type": "object",
+                            "properties": {"topic": {"type": "string"}},
+                            "required": ["topic"],
+                        }
+                    )
+                ],
+            )
+
+            store = InstalledSkillStore(root / ".coder")
+            with self.assertRaises(SkillVerificationError):
+                SkillInstaller(client=RegistryClient(str(registry_path)), store=store).install("github-research")
+
+    def test_auto_update_skips_connector_operation_lock_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            operation_v1 = _connector_operation()
+            package_v1, digest_v1 = _write_skill_package(
+                root,
+                manifest=_manifest(connector_operations=[operation_v1]),
+                package_name="github-research-0.1.0.zip",
+            )
+            registry_v1 = _write_registry(
+                root,
+                package_v1,
+                digest_v1,
+                connector_operations=[operation_v1],
+            )
+            store = InstalledSkillStore(root / ".coder")
+            SkillInstaller(client=RegistryClient(str(registry_v1)), store=store).install("github-research")
+            store.set_update_policy("github-research", "auto_official_low_risk")
+
+            operation_v2 = _connector_operation(
+                input_schema={
+                    "type": "object",
+                    "properties": {"topic": {"type": "string"}},
+                    "required": ["topic"],
+                }
+            )
+            package_v2, digest_v2 = _write_skill_package(
+                root,
+                manifest=_manifest(version="0.2.0", connector_operations=[operation_v2]),
+                package_name="github-research-0.2.0.zip",
+            )
+            registry_v2 = _write_registry(
+                root,
+                package_v2,
+                digest_v2,
+                version="0.2.0",
+                connector_operations=[operation_v2],
+            )
+
+            result = SkillInstaller(client=RegistryClient(str(registry_v2)), store=store).auto_update()
+
+            self.assertEqual(result.updated, [])
+            self.assertEqual(result.skipped, [{"skill_id": "github-research", "reason": "not eligible"}])
+            self.assertEqual(store.get_skill("github-research").manifest.version, "0.1.0")
 
     def test_skill_router_selects_matching_installed_skill(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -258,6 +408,25 @@ class SkillApiTests(unittest.TestCase):
             self.assertTrue(removed.json()["removed"])
 
 
+def _connector_operation(**overrides: object) -> dict[str, object]:
+    operation: dict[str, object] = {
+        "connector_id": "github_readonly",
+        "operation_id": "search_repositories",
+        "description": "Search repositories.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+        "risk_level": "low",
+        "external_effect": False,
+        "requires_preview": False,
+        "requires_human_approval": False,
+    }
+    operation.update(overrides)
+    return operation
+
+
 def _manifest(**overrides: object) -> dict[str, object]:
     manifest: dict[str, object] = {
         "id": "github-research",
@@ -310,6 +479,7 @@ def _write_registry(
     *,
     version: str = "0.1.0",
     signature: str | None = "sig-placeholder",
+    connector_operations: list[dict[str, object]] | None = None,
 ) -> Path:
     registry_path = root / "registry.json"
     registry = {
@@ -330,6 +500,7 @@ def _write_registry(
                 "risk_level": "low",
                 "external_effect": False,
                 "requires_connectors": ["github_readonly"],
+                "connector_operations": connector_operations or [],
             }
         ],
     }

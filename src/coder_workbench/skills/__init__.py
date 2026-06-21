@@ -6,11 +6,18 @@ from .context import (
     load_selected_skill_contexts,
 )
 from .index import SkillIndex, SkillIndexEntry, build_skill_index
-from .installer import SkillAutoUpdateResult, SkillInstallResult, SkillInstaller, is_auto_update_allowed
+from .installer import (
+    SkillAutoUpdateResult,
+    SkillInstallResult,
+    SkillInstaller,
+    is_auto_update_allowed,
+    skill_auto_update_block_reason,
+)
 from .ledger import TokenLedgerEntry, estimate_tokens
 from .registry_client import RegistryClient, RegistryClientError
 from .router import SkillRouteDecision, SkillRouter, select_skills_for_work_item
 from .schema import (
+    ConnectorOperation,
     InstalledSkillRecord,
     RemoteSkillEntry,
     RemoteSkillIndex,
@@ -30,6 +37,7 @@ from .verifier import (
 )
 
 __all__ = [
+    "ConnectorOperation",
     "ContextPacketV2",
     "InstalledSkillRecord",
     "InstalledSkillStore",
@@ -59,6 +67,7 @@ __all__ = [
     "load_selected_skill_contexts",
     "select_skills_for_work_item",
     "is_auto_update_allowed",
+    "skill_auto_update_block_reason",
     "sha256_digest",
     "sign_package_sha256",
     "verify_package_signature",
