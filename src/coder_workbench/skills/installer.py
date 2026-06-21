@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -36,9 +37,26 @@ class SkillAutoUpdateResult(BaseModel):
 
 
 class SkillInstaller:
-    def __init__(self, *, client: RegistryClient, store: InstalledSkillStore) -> None:
+    def __init__(
+        self,
+        *,
+        client: RegistryClient,
+        store: InstalledSkillStore,
+        trusted_signature_keys: dict[str, str] | None = None,
+        require_verified_signatures: bool | None = None,
+    ) -> None:
         self.client = client
         self.store = store
+        self.trusted_signature_keys = (
+            trusted_signature_keys
+            if trusted_signature_keys is not None
+            else _trusted_signature_keys_from_env()
+        )
+        self.require_verified_signatures = (
+            _require_verified_signatures_from_env()
+            if require_verified_signatures is None
+            else require_verified_signatures
+        )
 
     def install(self, skill_id: str, *, allow_untrusted: bool = False, force: bool = False) -> SkillInstallResult:
         index = self.client.fetch_index()
@@ -64,7 +82,9 @@ class SkillInstaller:
             verification = verify_extracted_package(
                 skill_root,
                 package_sha256=package_sha256,
-                signature_present=entry.signature is not None,
+                signature=entry.signature,
+                trusted_signature_keys=self.trusted_signature_keys,
+                require_verified_signature=self.require_verified_signatures,
             )
             _assert_manifest_matches_registry(entry, verification)
             record = self.store.install_from_directory(
@@ -80,7 +100,7 @@ class SkillInstaller:
         return SkillInstallResult(
             record=record,
             verification=verification,
-            warnings=[*warnings, *verification.warnings],
+            warnings=[*warnings, *_signature_policy_warnings(entry, verification), *verification.warnings],
         )
 
     def import_local(
@@ -108,7 +128,7 @@ class SkillInstaller:
             verification = verify_extracted_package(
                 skill_root,
                 package_sha256=package_sha256,
-                signature_present=False,
+                signature=None,
             )
             if trust_level == "untrusted" and verification.manifest.risk_level == "high":
                 raise SkillVerificationError("high-risk untrusted skills cannot be installed")
@@ -155,6 +175,16 @@ def _install_policy_warnings(entry: RemoteSkillEntry, *, allow_untrusted: bool) 
     return warnings
 
 
+def _signature_policy_warnings(entry: RemoteSkillEntry, verification: SkillPackageVerification) -> list[str]:
+    if entry.trust_level not in {"official", "verified"}:
+        return []
+    if verification.signature_status == "verified":
+        return []
+    if verification.signature_status == "missing":
+        return ["official or verified skill does not declare a package signature"]
+    return ["official or verified skill signature is present but was not verified"]
+
+
 def _assert_manifest_matches_registry(entry: RemoteSkillEntry, verification: SkillPackageVerification) -> None:
     manifest = verification.manifest
     if manifest.id != entry.id:
@@ -198,3 +228,28 @@ def _assert_update_allowed(existing: InstalledSkillRecord, entry: RemoteSkillEnt
         raise SkillVerificationError(
             f"skill {existing.id!r} is pinned to version {existing.pinned_version!r}; unpin before updating"
         )
+
+
+def _trusted_signature_keys_from_env() -> dict[str, str]:
+    raw = os.getenv("CODER_SKILL_SIGNATURE_KEYS", "").strip()
+    if not raw:
+        return {}
+    keys: dict[str, str] = {}
+    for item in raw.split(";"):
+        if not item.strip() or "=" not in item:
+            continue
+        key_id, secret = item.split("=", 1)
+        key_id = key_id.strip()
+        secret = secret.strip()
+        if key_id and secret:
+            keys[key_id] = secret
+    return keys
+
+
+def _require_verified_signatures_from_env() -> bool:
+    return os.getenv("CODER_SKILL_REQUIRE_SIGNATURES", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }

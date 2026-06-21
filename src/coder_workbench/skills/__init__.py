@@ -21,7 +21,13 @@ from .schema import (
     SkillUpdatePolicy,
 )
 from .store import InstalledSkillStore
-from .verifier import SkillVerificationError, sha256_digest, verify_sha256
+from .verifier import (
+    SkillVerificationError,
+    sha256_digest,
+    sign_package_sha256,
+    verify_package_signature,
+    verify_sha256,
+)
 
 __all__ = [
     "ContextPacketV2",
@@ -54,5 +60,7 @@ __all__ = [
     "select_skills_for_work_item",
     "is_auto_update_allowed",
     "sha256_digest",
+    "sign_package_sha256",
+    "verify_package_signature",
     "verify_sha256",
 ]

@@ -17,6 +17,7 @@ from coder_workbench.skills import (
     build_skill_index,
     select_skills_for_work_item,
     sha256_digest,
+    sign_package_sha256,
     verify_sha256,
 )
 from coder_workbench.skills.schema import SkillPackageManifest
@@ -67,6 +68,41 @@ class SkillInstallerTests(unittest.TestCase):
             loaded = store.get_skill("github-research")
             self.assertTrue(loaded.enabled)
             self.assertEqual(loaded.package_sha256, digest)
+
+    def test_installer_verifies_configured_package_signature(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package_path, digest = _write_skill_package(root)
+            signature = sign_package_sha256(digest, key_id="coder-official", secret="test-secret")
+            registry_path = _write_registry(root, package_path, digest, signature=signature)
+
+            store = InstalledSkillStore(root / ".coder")
+            result = SkillInstaller(
+                client=RegistryClient(str(registry_path)),
+                store=store,
+                trusted_signature_keys={"coder-official": "test-secret"},
+                require_verified_signatures=True,
+            ).install("github-research")
+
+            self.assertEqual(result.verification.signature_status, "verified")
+            self.assertEqual(result.verification.signature_key_id, "coder-official")
+            self.assertFalse(any("signature" in warning for warning in result.warnings))
+
+    def test_installer_rejects_signature_mismatch_when_required(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package_path, digest = _write_skill_package(root)
+            signature = sign_package_sha256(digest, key_id="coder-official", secret="wrong-secret")
+            registry_path = _write_registry(root, package_path, digest, signature=signature)
+
+            store = InstalledSkillStore(root / ".coder")
+            with self.assertRaises(SkillVerificationError):
+                SkillInstaller(
+                    client=RegistryClient(str(registry_path)),
+                    store=store,
+                    trusted_signature_keys={"coder-official": "test-secret"},
+                    require_verified_signatures=True,
+                ).install("github-research")
 
     def test_installer_rejects_checksum_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -267,7 +303,14 @@ def _write_skill_package(
     return package_path, sha256_digest(data)
 
 
-def _write_registry(root: Path, package_path: Path, digest: str, *, version: str = "0.1.0") -> Path:
+def _write_registry(
+    root: Path,
+    package_path: Path,
+    digest: str,
+    *,
+    version: str = "0.1.0",
+    signature: str | None = "sig-placeholder",
+) -> Path:
     registry_path = root / "registry.json"
     registry = {
         "registry_version": "0.1",
@@ -283,7 +326,7 @@ def _write_registry(root: Path, package_path: Path, digest: str, *, version: str
                 "package_url": package_path.name,
                 "manifest_url": None,
                 "sha256": digest,
-                "signature": "sig-placeholder",
+                "signature": signature,
                 "risk_level": "low",
                 "external_effect": False,
                 "requires_connectors": ["github_readonly"],

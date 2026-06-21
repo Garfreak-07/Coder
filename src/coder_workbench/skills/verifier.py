@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import io
 import json
 import re
 import zipfile
 from pathlib import Path, PurePosixPath
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -23,6 +25,9 @@ class SkillPackageVerification(BaseModel):
     manifest: SkillPackageManifest
     warnings: list[str] = Field(default_factory=list)
     signature_present: bool = False
+    signature_status: Literal["missing", "verified", "unverified"] = "missing"
+    signature_key_id: str | None = None
+    signature_error: str | None = None
 
 
 def sha256_digest(data: bytes) -> str:
@@ -49,6 +54,43 @@ def verify_sha256(data: bytes, expected: str) -> str:
     if actual != expected_digest:
         raise SkillVerificationError(f"checksum mismatch: expected {expected_digest}, got {actual}")
     return actual
+
+
+def sign_package_sha256(package_sha256: str, *, key_id: str, secret: str) -> str:
+    digest = _hmac_signature(package_sha256, secret)
+    return f"hmac-sha256:{key_id}:{digest}"
+
+
+def verify_package_signature(
+    *,
+    package_sha256: str,
+    signature: str | None,
+    trusted_keys: dict[str, str] | None = None,
+    require_verified: bool = False,
+) -> dict[str, str | None]:
+    if not signature:
+        if require_verified:
+            raise SkillVerificationError("package signature is required")
+        return {"status": "missing", "key_id": None, "error": None}
+
+    trusted_keys = trusted_keys or {}
+    parts = signature.strip().split(":")
+    if len(parts) != 3 or parts[0] != "hmac-sha256":
+        if require_verified:
+            raise SkillVerificationError("unsupported package signature format")
+        return {"status": "unverified", "key_id": None, "error": "unsupported signature format"}
+
+    _scheme, key_id, expected = parts
+    secret = trusted_keys.get(key_id)
+    if not secret:
+        if require_verified:
+            raise SkillVerificationError(f"no trusted key configured for signature key {key_id!r}")
+        return {"status": "unverified", "key_id": key_id, "error": "trusted key not configured"}
+
+    actual = _hmac_signature(package_sha256, secret)
+    if not hmac.compare_digest(actual, expected.lower()):
+        raise SkillVerificationError("package signature mismatch")
+    return {"status": "verified", "key_id": key_id, "error": None}
 
 
 def safe_extract_zip(data: bytes, destination: str | Path) -> Path:
@@ -103,15 +145,28 @@ def verify_extracted_package(
     skill_root: str | Path,
     *,
     package_sha256: str,
-    signature_present: bool = False,
+    signature: str | None = None,
+    trusted_signature_keys: dict[str, str] | None = None,
+    require_verified_signature: bool = False,
 ) -> SkillPackageVerification:
     manifest = read_skill_manifest(skill_root)
     warnings = verify_package_layout(skill_root)
+    signature_result = verify_package_signature(
+        package_sha256=package_sha256,
+        signature=signature,
+        trusted_keys=trusted_signature_keys,
+        require_verified=require_verified_signature,
+    )
+    if signature_result["status"] == "unverified":
+        warnings.append(f"package signature could not be verified: {signature_result['error']}")
     return SkillPackageVerification(
         sha256=package_sha256,
         manifest=manifest,
         warnings=warnings,
-        signature_present=signature_present,
+        signature_present=signature is not None,
+        signature_status=str(signature_result["status"]),
+        signature_key_id=signature_result["key_id"],
+        signature_error=signature_result["error"],
     )
 
 
@@ -122,6 +177,11 @@ def _normalize_sha256(value: str) -> str:
     if len(text) != 64 or any(char not in "0123456789abcdef" for char in text):
         raise SkillVerificationError("expected sha256 must be a 64-character hex digest")
     return text
+
+
+def _hmac_signature(package_sha256: str, secret: str) -> str:
+    digest = _normalize_sha256(package_sha256)
+    return hmac.new(secret.encode("utf-8"), digest.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _validate_zip_member(name: str, dest_resolved: Path) -> None:
