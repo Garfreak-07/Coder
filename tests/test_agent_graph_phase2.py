@@ -120,11 +120,16 @@ class AgentGraphRunnerPhase2Tests(unittest.TestCase):
 
         self.assertEqual(result.status, "completed")
         self.assertIn("graph_run_cache", result.data)
+        self.assertIn("run_controller", result.data)
+        self.assertIn("budget_reservations", result.data)
         cache = result.data["graph_run_cache"]
         self.assertEqual(cache["planner_order"]["plan_graph"]["work_items"][0]["work_item_id"], "executor-work")
         self.assertEqual(cache["agent_tasks"]["executor-work"]["assigned_agent_id"], "executor")
         self.assertEqual(cache["execution_cache"]["executor-work"]["status"], "completed")
         self.assertEqual(cache["test_cache"]["executor-work"][0]["tester_agent_id"], "tester")
+        self.assertEqual(result.data["run_controller"]["rounds"][0]["round"], 1)
+        self.assertTrue(result.data["run_controller"]["rounds"][0]["plan_fingerprint"])
+        self.assertGreaterEqual(len(result.data["budget_reservations"]), 1)
         self.assertIn("agent_evaluation_reports", result.data)
         runtime_profiles = result.data["runtime_profiles"]
         executor_profile = next(profile for profile in runtime_profiles if profile["agent_id"] == "executor")

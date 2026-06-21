@@ -65,6 +65,9 @@ def build_planner_order_prompt(
         )
     if previous_bundle:
         parts.extend(["Previous PlannerInputBundle JSON:", _compact_json(previous_bundle.model_dump(mode="json", exclude_none=True))])
+        debug_findings = _debug_findings_from_effects(previous_bundle.effects)
+        if debug_findings:
+            parts.extend(["Debug findings from previous round:", _debug_findings_text(debug_findings)])
     if previous_round_summary:
         parts.extend(["Previous RoundSummary JSON:", _compact_json(previous_round_summary)])
     if planner_human_response:
@@ -191,6 +194,16 @@ def build_planner_decision_prompt(
         "PlannerInputBundle JSON:",
         _compact_json(bundle.model_dump(mode="json", exclude_none=True)),
     ]
+    debug_findings = _debug_findings_from_effects(bundle.effects)
+    if debug_findings:
+        parts.extend(
+            [
+                "Debug findings from previous round:",
+                _debug_findings_text(debug_findings),
+                "If debug finding is within RunContract, prefer continue/replan instead of ask_human.",
+                "Ask human only if the fix exceeds boundary or the same error repeated.",
+            ]
+        )
     if planner_human_response:
         parts.extend(["Planner human response JSON:", _compact_json(planner_human_response)])
     return "\n\n".join(parts)
@@ -292,6 +305,29 @@ def _agent_summary(agent: AgentWorkflowAgent) -> dict[str, Any]:
 
 def _compact_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2)[:8000]
+
+
+def _debug_findings_from_effects(effects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        effect
+        for effect in effects
+        if isinstance(effect, dict) and effect.get("effect_type") == "debug_finding"
+    ]
+
+
+def _debug_findings_text(findings: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for finding in findings[:8]:
+        likely_files = finding.get("likely_files")
+        lines.append(
+            "- work_item_id={work_item_id}; failure_summary={failure_summary}; likely_files={likely_files}; raw_output_ref={raw_output_ref}".format(
+                work_item_id=str(finding.get("work_item_id") or ""),
+                failure_summary=str(finding.get("failure_summary") or ""),
+                likely_files=", ".join(str(item) for item in likely_files) if isinstance(likely_files, list) else "",
+                raw_output_ref=str(finding.get("raw_output_ref") or finding.get("output_ref") or ""),
+            )
+        )
+    return "\n".join(lines)
 
 
 def _symbol_index_summary(value: Any) -> dict[str, Any]:

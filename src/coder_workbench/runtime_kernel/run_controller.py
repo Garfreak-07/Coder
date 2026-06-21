@@ -147,6 +147,16 @@ class RunController:
             count += 1
         return count
 
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "guard": self.guard.model_dump(mode="json"),
+            "rounds": [round_state.model_dump(mode="json") for round_state in self.rounds],
+            "recent_plan_fingerprints": self.recent_plan_fingerprints[-5:],
+            "agent_calls": self.agent_calls,
+            "tool_calls": self.tool_calls,
+            "estimated_tokens": self.estimated_tokens,
+        }
+
 
 def fingerprint_planner_order(order: PlannerOrder) -> str:
     work_items = [

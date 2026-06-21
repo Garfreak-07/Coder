@@ -20,6 +20,7 @@ CommandServiceFactory = Callable[[str | Path, list[str], dict[str, Any]], Comman
 class RunContext:
     run_id: str
     repo_root: str | Path
+    sandbox_root: str | Path | None = None
     scopes: list[str] | None = None
     data: dict[str, Any] | None = None
     cache: Any | None = None
@@ -88,6 +89,8 @@ class ActionGateway:
                 return self._build_context(spec, run_context)
             if spec.action_type == "propose_patch":
                 return self._propose_patch(spec, run_context)
+            if spec.action_type == "apply_patch_sandbox":
+                return self._apply_patch_sandbox(spec, run_context)
             if spec.action_type in {"run_command", "run_command_sandbox"}:
                 return self._run_command(spec, run_context)
             if spec.action_type == "validate_artifact":
@@ -187,6 +190,45 @@ class ActionGateway:
             payload={"reservation": reservation.model_dump(mode="json"), "preview": preview},
         )
 
+    def _apply_patch_sandbox(self, spec: ActionSpec, run_context: RunContext) -> ActionResult:
+        reservation = self.budget_broker.reserve_tool_call(
+            run_id=run_context.run_id,
+            agent_id=_agent_id(run_context),
+            action_type=spec.action_type,
+            estimated_tokens=spec.estimated_tokens,
+        )
+        if not reservation.approved:
+            return _budget_blocked(reservation)
+        action_root, sandbox_unavailable = _action_root(run_context, sandbox=True)
+        patch = spec.input.get("patch", spec.input.get("changes", spec.input.get("proposed_changes", spec.input)))
+        result = self.patch_service_factory(
+            action_root,
+            run_context.active_scopes,
+            run_context.mutable_data,
+        ).apply(
+            patch,
+            approved=bool(spec.input.get("approved")) or not sandbox_unavailable,
+        )
+        self.budget_broker.commit(reservation.reservation_id, actual_tool_calls=1)
+        if result.get("blocked") or result.get("status") == "blocked":
+            status = "blocked"
+        elif result.get("status") in {"rejected", "failed"}:
+            status = "failed"
+        else:
+            status = "ok"
+        payload = {
+            "reservation": reservation.model_dump(mode="json"),
+            "result": result,
+            "sandbox_root": str(action_root),
+            "sandbox_unavailable": sandbox_unavailable,
+        }
+        return ActionResult(
+            status=status,
+            summary=str(result.get("message") or "Sandbox patch apply completed."),
+            error_code=result.get("error_code") if status != "ok" else None,
+            payload=payload,
+        )
+
     def _run_command(self, spec: ActionSpec, run_context: RunContext) -> ActionResult:
         reservation = self.budget_broker.reserve_tool_call(
             run_id=run_context.run_id,
@@ -197,22 +239,33 @@ class ActionGateway:
         if not reservation.approved:
             return _budget_blocked(reservation)
         command = str(spec.input.get("command") or "")
+        sandbox = spec.action_type == "run_command_sandbox"
+        action_root, sandbox_unavailable = _action_root(run_context, sandbox=sandbox)
+        if "require_approval" in spec.input:
+            require_approval = bool(spec.input.get("require_approval"))
+        else:
+            require_approval = not (sandbox and not sandbox_unavailable)
         result = self.command_service_factory(
-            run_context.repo_root,
+            action_root,
             run_context.active_scopes,
             run_context.mutable_data,
         ).run_check(
             command,
             cwd=str(spec.input.get("cwd") or "."),
             timeout_seconds=int(spec.input.get("timeout_seconds") or 120),
-            require_approval=bool(spec.input.get("require_approval", True)),
+            require_approval=require_approval,
         )
         self.budget_broker.commit(reservation.reservation_id, actual_tool_calls=1)
         return ActionResult(
             status="blocked" if result.get("blocked") else "ok",
             summary=str(result.get("message") or result.get("output") or "Command completed."),
             error_code="command_requires_approval" if result.get("blocked") else None,
-            payload={"reservation": reservation.model_dump(mode="json"), "result": result},
+            payload={
+                "reservation": reservation.model_dump(mode="json"),
+                "result": result,
+                "sandbox_root": str(action_root) if sandbox else None,
+                "sandbox_unavailable": sandbox_unavailable if sandbox else False,
+            },
         )
 
     def _validate_artifact(self, spec: ActionSpec) -> ActionResult:
@@ -253,6 +306,12 @@ def _budget_blocked(reservation: Any) -> ActionResult:
 def _agent_id(run_context: RunContext) -> str | None:
     item = run_context.item
     return str(getattr(item, "assignee_agent_id", "") or "") or None
+
+
+def _action_root(run_context: RunContext, *, sandbox: bool) -> tuple[Path, bool]:
+    if sandbox and run_context.sandbox_root is not None:
+        return Path(run_context.sandbox_root), False
+    return Path(run_context.repo_root), bool(sandbox)
 
 
 def _estimate_context_tokens(spec: ActionSpec, run_context: RunContext, skill_index: SkillIndex) -> int:

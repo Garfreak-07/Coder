@@ -73,6 +73,25 @@ class RunControllerTests(unittest.TestCase):
         self.assertEqual(over.action, "blocked")
         self.assertEqual(over.status_code, "repeated_plan_fingerprint")
 
+    def test_diagnostics_include_guard_rounds_and_counters(self) -> None:
+        controller = RunController(guard=RunGuard(max_rounds=3))
+        controller.record_round(
+            round_number=1,
+            planner_order=_planner_order(),
+            agent_calls=2,
+            tool_calls=1,
+            estimated_tokens=30,
+        )
+
+        diagnostics = controller.diagnostics()
+
+        self.assertEqual(diagnostics["guard"]["max_rounds"], 3)
+        self.assertEqual(diagnostics["agent_calls"], 2)
+        self.assertEqual(diagnostics["tool_calls"], 1)
+        self.assertEqual(diagnostics["estimated_tokens"], 30)
+        self.assertEqual(diagnostics["rounds"][0]["round"], 1)
+        self.assertTrue(diagnostics["rounds"][0]["plan_fingerprint"])
+
 
 if __name__ == "__main__":
     unittest.main()

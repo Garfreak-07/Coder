@@ -19,8 +19,8 @@ def apply_hidden_effects(
 ) -> list[dict[str, Any]]:
     gateway = action_gateway or ActionGateway()
     records: list[dict[str, Any]] = []
-    records.extend(_handle_optional_check_commands(agent_workflow, cache, repo_root, scopes, data, gateway))
     records.extend(_handle_patch_previews(agent_workflow, cache, repo_root, scopes, data, gateway))
+    records.extend(_handle_optional_check_commands(agent_workflow, cache, repo_root, scopes, data, gateway))
     return records
 
 
@@ -53,6 +53,7 @@ def _handle_optional_check_commands(
             run_context=RunContext(
                 run_id=str(data.get("run_id") or "agent-graph"),
                 repo_root=repo_root,
+                sandbox_root=_sandbox_root_from_data(data),
                 scopes=scopes,
                 data=data,
             ),
@@ -161,7 +162,37 @@ def _handle_patch_previews(
         "requires_approval": True,
     }
     cache.record_hidden_effect(record, output=preview)
-    return [record]
+    records = [record]
+    sandbox_root = _sandbox_root_from_data(data)
+    if sandbox_root is not None:
+        action = action_gateway.run(
+            ActionSpec(
+                action_id=f"apply_patch_sandbox:{cache.round}",
+                action_type="apply_patch_sandbox",
+                input={"patch": preview},
+            ),
+            run_context=RunContext(
+                run_id=str(data.get("run_id") or "agent-graph"),
+                repo_root=repo_root,
+                sandbox_root=sandbox_root,
+                scopes=scopes,
+                data=data,
+            ),
+        )
+        result = dict(action.payload.get("result") or {})
+        apply_ref = graph_artifact_id("sandbox_apply", cache.round)
+        apply_record = {
+            "effect_type": "sandbox_apply",
+            "status": "applied" if result.get("status") == "applied" else action.status,
+            "patch_ref": patch_ref,
+            "output_ref": apply_ref,
+            "sandbox_root": action.payload.get("sandbox_root"),
+            "sandbox_unavailable": action.payload.get("sandbox_unavailable", False),
+            "reason": action.summary,
+        }
+        cache.record_hidden_effect(apply_record, output=result)
+        records.append(apply_record)
+    return records
 
 
 def _requested_check_commands_from_artifacts(cache: GraphRunCache) -> list[dict[str, Any]]:
@@ -214,3 +245,10 @@ def _requested_patch_changes(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, list):
         return [dict(item) for item in value if isinstance(item, dict)]
     return []
+
+
+def _sandbox_root_from_data(data: dict[str, Any]) -> str | None:
+    value = data.get("sandbox_root")
+    if isinstance(value, str) and value.strip():
+        return value
+    return None

@@ -41,6 +41,20 @@ class BudgetBrokerTests(unittest.TestCase):
         self.assertEqual(broker.usage("run").actual_tokens_committed, 3)
         self.assertEqual(broker.usage("run").tool_calls_committed, 1)
 
+    def test_diagnostics_groups_reservations_by_state(self) -> None:
+        broker = BudgetBroker(BudgetLimit(max_estimated_tokens=10, max_model_calls=1))
+        approved = broker.reserve_model_call(run_id="run", agent_id="planner", estimated_tokens=5)
+        denied = broker.reserve_model_call(run_id="run", agent_id="planner", estimated_tokens=1)
+
+        broker.commit(approved.reservation_id, actual_tokens=4)
+        diagnostics = broker.diagnostics("run")
+
+        self.assertEqual(diagnostics["usage"]["actual_tokens_committed"], 4)
+        self.assertEqual(len(diagnostics["reservations"]), 2)
+        self.assertEqual(diagnostics["committed"][0]["reservation_id"], approved.reservation_id)
+        self.assertEqual(diagnostics["denied"][0]["reservation_id"], denied.reservation_id)
+        self.assertEqual(diagnostics["denied"][0]["reason"], "model_call_budget_exceeded")
+
 
 if __name__ == "__main__":
     unittest.main()

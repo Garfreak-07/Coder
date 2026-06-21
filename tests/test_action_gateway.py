@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -113,6 +114,93 @@ class ActionGatewayTests(unittest.TestCase):
         self.assertEqual(result.status, "ok")
         self.assertEqual(result.payload["preview"]["status"], "proposed")
         self.assertEqual(result.payload["preview"]["change_count"], 1)
+
+    def test_denied_tool_budget_blocks_patch_action(self) -> None:
+        gateway = ActionGateway(budget_broker=BudgetBroker(BudgetLimit(max_tool_calls=0)))
+
+        result = gateway.run(
+            ActionSpec(
+                action_id="patch-1",
+                action_type="propose_patch",
+                input={"changes": [{"path": "src/example.txt", "action": "update", "content": "after\n"}]},
+            ),
+            run_context=RunContext(run_id="run", repo_root="."),
+        )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.error_code, "tool_call_budget_exceeded")
+        self.assertEqual(result.payload["reservation"]["reason"], "tool_call_budget_exceeded")
+
+    def test_apply_patch_sandbox_does_not_modify_real_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            sandbox = root / "sandbox"
+            repo.mkdir()
+            sandbox.mkdir()
+            (repo / "sample.py").write_text("value = 1\n", encoding="utf-8")
+            (sandbox / "sample.py").write_text("value = 1\n", encoding="utf-8")
+
+            result = ActionGateway().run(
+                ActionSpec(
+                    action_id="sandbox-apply",
+                    action_type="apply_patch_sandbox",
+                    input={
+                        "changes": [
+                            {
+                                "path": "sample.py",
+                                "action": "update",
+                                "expected_before": "value = 1\n",
+                                "content": "value = 2\n",
+                            }
+                        ]
+                    },
+                ),
+                run_context=RunContext(run_id="run", repo_root=repo, sandbox_root=sandbox),
+            )
+
+            self.assertEqual(result.status, "ok")
+            self.assertFalse(result.payload["sandbox_unavailable"])
+            self.assertEqual((repo / "sample.py").read_text(encoding="utf-8"), "value = 1\n")
+            self.assertEqual((sandbox / "sample.py").read_text(encoding="utf-8"), "value = 2\n")
+
+    def test_run_command_sandbox_uses_sandbox_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            sandbox = root / "sandbox"
+            repo.mkdir()
+            sandbox.mkdir()
+
+            result = ActionGateway().run(
+                ActionSpec(
+                    action_id="sandbox-check",
+                    action_type="run_command_sandbox",
+                    input={
+                        "command": f'"{sys.executable}" -c "import pathlib; print(pathlib.Path.cwd())"',
+                        "cwd": ".",
+                    },
+                ),
+                run_context=RunContext(run_id="run", repo_root=repo, sandbox_root=sandbox),
+            )
+
+            self.assertEqual(result.status, "ok")
+            self.assertFalse(result.payload["sandbox_unavailable"])
+            self.assertIn(str(sandbox), result.payload["result"]["output"])
+
+    def test_run_command_sandbox_marks_unavailable_without_sandbox_root(self) -> None:
+        result = ActionGateway().run(
+            ActionSpec(
+                action_id="sandbox-check",
+                action_type="run_command_sandbox",
+                input={"command": f'"{sys.executable}" -c "print(1)"'},
+            ),
+            run_context=RunContext(run_id="run", repo_root="."),
+        )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertTrue(result.payload["sandbox_unavailable"])
+        self.assertEqual(result.error_code, "command_requires_approval")
 
     def test_unknown_action_type_fails_cleanly(self) -> None:
         result = ActionGateway().run(

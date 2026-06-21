@@ -232,6 +232,8 @@ export function getLiveRun(runId: string): Promise<LiveRunDetail> {
 export async function getDefaultAgentWorkflow(): Promise<{
   agent_workflow: AgentWorkflowSpec;
   runtime_boundary: "legacy_runtime_preview";
+  runtime_type: "legacy_preview";
+  deprecated: boolean;
   workflow: WorkflowSpec;
 }> {
   return requestJson("/api/v2/agent-workflows/default");
@@ -240,6 +242,8 @@ export async function getDefaultAgentWorkflow(): Promise<{
 export async function compileLegacyRuntimePreview(agentWorkflow: AgentWorkflowSpec): Promise<{
   agent_workflow: AgentWorkflowSpec;
   runtime_boundary: "legacy_runtime_preview";
+  runtime_type: "legacy_preview";
+  deprecated: boolean;
   workflow: WorkflowSpec;
 }> {
   return requestJson("/api/v2/agent-workflows/compile", {

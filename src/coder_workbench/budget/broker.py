@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import asdict
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -182,6 +183,25 @@ class BudgetBroker:
             tool_calls_reserved=current.tool_calls_reserved,
             tool_calls_committed=current.tool_calls_committed,
         )
+
+    def reservations(self, run_id: str | None = None) -> list[dict[str, object]]:
+        records = [
+            reservation.model_dump(mode="json")
+            for reservation in self._reservations.values()
+            if run_id is None or reservation.run_id == run_id
+        ]
+        return sorted(records, key=lambda item: str(item["reservation_id"]))
+
+    def diagnostics(self, run_id: str) -> dict[str, object]:
+        reservations = self.reservations(run_id)
+        return {
+            "usage": asdict(self.usage(run_id)),
+            "approved": [item for item in reservations if item.get("approved") is True],
+            "denied": [item for item in reservations if item.get("approved") is False],
+            "committed": [item for item in reservations if item.get("committed") is True],
+            "released": [item for item in reservations if item.get("released") is True],
+            "reservations": reservations,
+        }
 
     def _denied(
         self,

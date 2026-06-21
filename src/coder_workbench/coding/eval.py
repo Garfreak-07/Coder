@@ -46,6 +46,7 @@ def build_run_coding_eval(data: dict[str, Any], events: list[Any] | None = None)
     hidden_effects = graph_run_cache.get("hidden_effects") if isinstance(graph_run_cache.get("hidden_effects"), list) else []
     token_ledger = data.get("token_ledger") if isinstance(data.get("token_ledger"), list) else []
     rounds = data.get("rounds") if isinstance(data.get("rounds"), list) else []
+    debug_findings = data.get("debug_findings") if isinstance(data.get("debug_findings"), list) else []
 
     total_items = max(1, len(execution_cache))
     patch_created = sum(1 for effect in hidden_effects if effect.get("effect_type") == "modify_files" and effect.get("status") == "patch_preview_created")
@@ -76,6 +77,8 @@ def build_run_coding_eval(data: dict[str, Any], events: list[Any] | None = None)
         details={
             "patch_created": bool(patch_created),
             "sandbox_tests_passed": bool(check_effects and checks_passed == len(check_effects)),
+            "sandbox_checks_passed": bool(check_effects and checks_passed == len(check_effects)),
+            "debug_findings": len(debug_findings),
             "forbidden_change": False,
             "worker_interrupts": len(interrupts),
             "human_prompts": len(human_prompts),

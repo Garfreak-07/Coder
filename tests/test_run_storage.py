@@ -24,6 +24,14 @@ class RunStoreTests(unittest.TestCase):
             self.assertTrue((run_dir / "events.jsonl").exists())
             self.assertTrue((root / "runs" / "index.sqlite").exists())
             self.assertFalse((root / "runs" / f"{stored.id}.json").exists())
+            self.assertEqual(store.partitions.events.read(stored.id)[0].type, "run.started")
+            self.assertEqual(
+                store.partitions.artifacts.read(stored.id, "execution_result_1")["summary"],
+                "done",
+            )
+            ledgers = store.partitions.ledgers.list(stored.id)
+            self.assertTrue(any(entry.get("work_item_id") == "worker" for entry in ledgers))
+            self.assertTrue(any(entry.get("ledger_kind") == "trace_span" for entry in ledgers))
 
             loaded = store.get(stored.id)
             self.assertEqual(loaded.result.status, "completed")
@@ -171,8 +179,19 @@ class RunStoreTests(unittest.TestCase):
 def _result() -> RunResult:
     return RunResult(
         status="completed",
-        data={"answer": "done"},
+        data={
+            "answer": "done",
+            "token_ledger": [{"ledger_id": "token_1", "work_item_id": "worker", "estimated_input_tokens": 12}],
+            "trace_spans": [{"span_id": "span_1", "name": "run", "kind": "run"}],
+        },
         summaries={"answer": "done"},
+        artifacts={
+            "execution_result_1": {
+                "artifact_type": "execution_result",
+                "status": "completed",
+                "summary": "done",
+            }
+        },
         events=[
             RunEvent(type="run.started", message="started"),
             RunEvent(type="node.started", node_id="start", message="start"),

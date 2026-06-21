@@ -6,7 +6,7 @@ Coder is built around an AgentGraph runtime where Planner owns global decisions,
 Code Worker performs bounded implementation work, Tester returns evidence, and
 the runtime passes compact structured artifacts instead of transcripts.
 
-The current architecture target is v0.9.1:
+The current architecture target is v0.9.2:
 
 ```text
 Ordinary Agent workflow UI
@@ -19,7 +19,8 @@ Ordinary Agent workflow UI
 -> ContextService
 -> AgentRun
 -> AgentEngineRegistry
--> CodeWorkerEngine / Tester / Planner paths
+-> PlannerEngine / CodeWorkerEngine / TesterEngine / FinalReviewEngine / SynthesizerEngine
+-> patch preview / sandbox apply / sandbox check / DebugFinding replan
 -> TraceSpan, partitioned stores, structured artifacts, PlannerDecision
 ```
 
@@ -76,6 +77,8 @@ AgentWorkflowSpec
 
 `WorkflowSpec` and `WorkflowRunner` are legacy compatibility paths for old saved
 workflows and advanced preview only. Do not add new product behavior there.
+Legacy live-run and compile-preview endpoints are explicitly marked deprecated
+or `runtime_type=legacy_preview`; normal product execution uses AgentGraph.
 
 ## Core Artifacts
 
@@ -108,15 +111,18 @@ retained only for old `WorkflowSpec` flows.
 - `ContextService` builds `ContextPacketV2`, selects skill context, prepares
   coding context packets, and writes token ledger entries.
 - `RunController` owns PlannerDecision loop control, max rounds, and repeated
-  plan fingerprint guards.
+  plan fingerprint guards, and writes run diagnostics.
 - `BudgetBroker` reserves model, tool, and context budgets before execution.
+  Reservation diagnostics are written to run results.
 - `ActionGateway` is the runtime entry point for context construction, patch
-  preview, command checks, and artifact repair/validation.
+  preview, sandbox patch apply, sandbox command checks, and artifact
+  repair/validation.
 - `RuntimeProfileCompiler` converts ordinary Agent roles into internal engine,
   context, token, artifact, plugin, skill, memory, repair, and tool policies.
 - `RuntimeProfileCache` avoids recompiling identical workflow/extension/profile
   combinations.
 - `AgentRun` dispatches work through `AgentEngineRegistry`.
+- `AgentGraphExecutor` is a compatibility adapter over the registered engines.
 - `PatchService` owns proposed change validation, risk path blocking, patch
   preview, apply, and rollback behind `ActionGateway`.
 - `CommandService` owns scoped cwd validation, command approval, timeouts, and
@@ -125,8 +131,8 @@ retained only for old `WorkflowSpec` flows.
 - `ExtensionRouter` routes globally installed plugins and skills per work item.
 - `TraceContext` attaches `trace_id`, `span_id`, and `parent_span_id` to run
   events.
-- `PartitionedRunStores` provides logical event, artifact, blob, ledger,
-  extension, and cache stores over the `.coder` layout.
+- `PartitionedRunStores` provides the event, artifact, blob, ledger, extension,
+  and cache write path over the `.coder` layout.
 
 ## Install
 
@@ -203,7 +209,8 @@ Common development endpoints:
 - `GET /api/v2/extensions/search`
 
 Legacy `/api/v2/skills/*`, `/api/v2/live-runs`, and `WorkflowSpec` endpoints
-remain for compatibility. New Agent product behavior should use the AgentGraph
+remain for compatibility and are marked deprecated where they overlap the
+AgentGraph product path. New Agent product behavior should use the AgentGraph
 and Extensions endpoints.
 
 `compile_agent_workflow_legacy_preview()` is the explicit compatibility
@@ -243,6 +250,11 @@ Focused architecture boundary tests:
   and `CommandService` stay behind that boundary.
 - Budget-affecting work should reserve through `BudgetBroker` before execution.
 - New model-output repair behavior should go through `ArtifactRepairService`.
+- New Planner, Tester, FinalReview, Synthesizer, and Worker execution behavior
+  should enter through `AgentEngineRegistry`; keep `AgentGraphExecutor` as an
+  adapter only.
+- Coding auto-loop behavior should preserve the path:
+  `proposed_changes -> patch preview -> sandbox apply/check -> DebugFinding -> PlannerDecision`.
 - Extensions are globally installed and routed per work item.
 - Ordinary UI should not expose runtime JSON, harness graphs, context policies,
   token budgets, or manual capability checklists.

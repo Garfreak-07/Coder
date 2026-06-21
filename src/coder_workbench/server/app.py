@@ -435,6 +435,8 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
         return {
             "agent_workflow": agent_workflow.model_dump(mode="json", by_alias=True, exclude_none=True),
             "runtime_boundary": LEGACY_RUNTIME_PREVIEW_BOUNDARY,
+            "runtime_type": "legacy_preview",
+            "deprecated": True,
             "workflow": workflow.model_dump(mode="json", by_alias=True),
         }
 
@@ -457,6 +459,8 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
         return {
             "agent_workflow": spec.model_dump(mode="json", by_alias=True, exclude_none=True),
             "runtime_boundary": LEGACY_RUNTIME_PREVIEW_BOUNDARY,
+            "runtime_type": "legacy_preview",
+            "deprecated": True,
             "workflow": workflow.model_dump(mode="json", by_alias=True),
         }
 
@@ -497,7 +501,7 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
 
     @app.get("/api/v2/live-runs")
     def list_live_runs() -> dict[str, Any]:
-        return {"runs": [*agent_manager.list(), *manager.list()]}
+        return {"deprecated": True, "runs": [*agent_manager.list(), *manager.list()]}
 
     @app.post("/api/v2/runs")
     def create_run(body: RunRequest) -> dict[str, Any]:
@@ -540,6 +544,8 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
         return {
             "run_id": live.id,
             "status": live.status,
+            "runtime_type": "legacy_workflow",
+            "deprecated": True,
             "events_url": f"/api/v2/live-runs/{live.id}/events",
             "result_url": f"/api/v2/live-runs/{live.id}",
         }
@@ -636,6 +642,8 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
             return {
                 "id": live.id,
                 "workflow_id": live.workflow.id,
+                "runtime_type": "legacy_workflow",
+                "deprecated": True,
                 "repo_root": live.repo_root,
                 "request": live.request,
                 "status": live.status,
@@ -655,6 +663,7 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
             "id": live.id,
             "workflow_id": live.agent_workflow.id,
             "runtime_type": "agent_graph",
+            "deprecated": True,
             "repo_root": live.repo_root,
             "request": live.request,
             "status": live.status,

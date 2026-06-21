@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 import sqlite3
@@ -99,12 +98,17 @@ class RunStore:
             self._upsert_index(metadata, updated_at=time.time())
             result_payload = result.model_dump(mode="json")
             result_payload["events"] = []
-            result_payload["artifacts"] = self._write_artifacts(run_dir, result.artifacts)
-            self._write_ledgers(run_dir, result_payload.get("data", {}).get("token_ledger"))
+            result_payload["artifacts"] = self._write_artifacts(stored.id, result.artifacts)
+            result_data = result_payload.get("data", {})
+            self._write_ledgers(
+                stored.id,
+                result_data.get("token_ledger") if isinstance(result_data, dict) else None,
+                result_data.get("trace_spans") if isinstance(result_data, dict) else None,
+            )
             (run_dir / "result.json").write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
             events = self._externalize_context_packets(run_dir, result.events)
             events = self._externalize_tool_results(run_dir, events)
-            self._write_events(run_dir / "events.jsonl", events)
+            self._write_events(stored.id, events)
         return stored
 
     def get(self, run_id: str, *, include_events: bool = True) -> StoredRun:
@@ -459,9 +463,7 @@ class RunStore:
             result=RunResult.model_validate(result_payload),
         )
 
-    def _write_artifacts(self, run_dir: Path, artifacts: dict[str, Any]) -> dict[str, Any]:
-        artifact_dir = run_dir / "artifacts"
-        artifact_dir.mkdir(parents=True, exist_ok=True)
+    def _write_artifacts(self, run_id: str, artifacts: dict[str, Any]) -> dict[str, Any]:
         refs: dict[str, Any] = {}
         for raw_artifact_id, artifact in artifacts.items():
             try:
@@ -471,8 +473,7 @@ class RunStore:
             if not isinstance(artifact, dict):
                 continue
             stored_artifact = self._externalize_large_values(artifact)
-            artifact_json = json.dumps(stored_artifact, ensure_ascii=False, indent=2)
-            (artifact_dir / f"{artifact_id}.json").write_text(artifact_json, encoding="utf-8")
+            self.partitions.artifacts.write(run_id, artifact_id, stored_artifact)
             summary = artifact_summary(artifact)
             refs[artifact_id] = {
                 "artifact_id": artifact_id,
@@ -482,31 +483,25 @@ class RunStore:
             }
         return refs
 
-    def _write_ledgers(self, run_dir: Path, ledger_entries: Any) -> None:
+    def _write_ledgers(self, run_id: str, ledger_entries: Any, trace_spans: Any = None) -> None:
         if not isinstance(ledger_entries, list):
-            return
-        ledger_dir = run_dir / "ledgers"
-        ledger_dir.mkdir(parents=True, exist_ok=True)
+            ledger_entries = []
         for index, entry in enumerate(ledger_entries, start=1):
-            if not isinstance(entry, dict):
-                continue
-            ledger_id = self._safe_object_id(str(entry.get("ledger_id") or f"token_ledger_{index}"))
-            (ledger_dir / f"{ledger_id}.json").write_text(
-                json.dumps(entry, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            if isinstance(entry, dict):
+                ledger_id = self._safe_object_id(str(entry.get("ledger_id") or f"token_ledger_{index}"))
+                self.partitions.ledgers.write(run_id, ledger_id, entry)
+        if isinstance(trace_spans, list):
+            for index, span in enumerate(trace_spans, start=1):
+                if not isinstance(span, dict):
+                    continue
+                ledger_id = self._safe_object_id(str(span.get("span_id") or f"trace_span_{index}"))
+                self.partitions.ledgers.write(run_id, f"trace_{ledger_id}", {"ledger_kind": "trace_span", **span})
 
     def _externalize_large_values(self, value: Any) -> Any:
         return externalize_large_values(value, write_blob=self._write_blob, threshold=BLOB_STRING_THRESHOLD)
 
     def _write_blob(self, content: str) -> str:
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        blob_id = f"sha256:{digest}"
-        path = self._blob_path(blob_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists():
-            path.write_text(content, encoding="utf-8")
-        return blob_id
+        return self.partitions.blobs.write_text(content)
 
     def _blob_path(self, blob_id: str) -> Path:
         digest = self._safe_blob_id(blob_id)
@@ -573,9 +568,14 @@ class RunStore:
                 break
             current = current.parent
 
-    def _write_events(self, path: Path, events: list[RunEvent]) -> None:
-        lines = [json.dumps(event.model_dump(mode="json"), ensure_ascii=False) for event in events]
-        path.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
+    def _write_events(self, run_id: str, events: list[RunEvent]) -> None:
+        path = self._run_dir(run_id) / "events.jsonl"
+        if path.exists():
+            path.unlink()
+        for event in events:
+            self.partitions.events.append(run_id, event)
+        if not events:
+            path.write_text("", encoding="utf-8")
 
     def _externalize_context_packets(self, run_dir: Path, events: list[RunEvent]) -> list[RunEvent]:
         context_dir = run_dir / "contexts"

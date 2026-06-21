@@ -353,6 +353,8 @@ export interface BlobDetail {
 export interface LiveRunDetail {
   id: string;
   workflow_id: string;
+  runtime_type?: "agent_graph" | "legacy_workflow";
+  deprecated?: boolean;
   repo_root: string;
   request: string;
   status: string;

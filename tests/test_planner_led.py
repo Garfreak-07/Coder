@@ -378,6 +378,8 @@ class AgentWorkflowApiTests(unittest.TestCase):
             payload = response.json()
             self.assertEqual(payload["agent_workflow"]["id"], "default-planner-led")
             self.assertEqual(payload["runtime_boundary"], "legacy_runtime_preview")
+            self.assertEqual(payload["runtime_type"], "legacy_preview")
+            self.assertTrue(payload["deprecated"])
             self.assertEqual(payload["workflow"]["max_tool_calls"], 0)
             self.assertIn("planner_loop", {node["id"] for node in payload["workflow"]["nodes"]})
 
@@ -391,6 +393,8 @@ class AgentWorkflowApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             payload = response.json()
             self.assertEqual(payload["runtime_boundary"], "legacy_runtime_preview")
+            self.assertEqual(payload["runtime_type"], "legacy_preview")
+            self.assertTrue(payload["deprecated"])
             self.assertEqual(payload["workflow"]["id"], "default-planner-led-runtime")
             self.assertEqual(
                 [agent["artifact_type"] for agent in payload["workflow"]["agents"]],

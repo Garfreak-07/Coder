@@ -123,6 +123,7 @@ class AgentGraphRunner:
             run_id=run_id,
         )
         data["trace_id"] = trace.trace_id
+        controller: RunController | None = None
         self.budget_broker = BudgetBroker(_budget_limit_from_data(data))
         self.action_gateway = ActionGateway(budget_broker=self.budget_broker)
         if hasattr(self.executor, "budget_broker"):
@@ -151,6 +152,10 @@ class AgentGraphRunner:
             trace.finish_span(run_span, trace_status)  # type: ignore[arg-type]
             data["trace_spans"] = trace.spans_payload()
             data["budget_usage"] = self.budget_broker.usage(run_id).__dict__
+            data["budget_reservations"] = self.budget_broker.reservations(run_id)
+            data["budget_diagnostics"] = self.budget_broker.diagnostics(run_id)
+            if controller is not None:
+                data["run_controller"] = controller.diagnostics()
             return self._result(
                 status=final_status,
                 data=data,
@@ -1213,6 +1218,7 @@ class AgentGraphRunner:
             "debug_finding_ref": ref,
             "failure_summary": finding.get("failure_summary"),
             "likely_files": finding.get("likely_files", []),
+            "raw_output_ref": finding.get("raw_output_ref"),
         }
         cache.record_hidden_effect(record)
         emit(

@@ -31,21 +31,36 @@ PlannerInputBundle -> PlannerDecision -> RunController
 Legacy `WorkflowSpec` remains only as a compatibility and advanced preview
 boundary. Product live Agent workflows use `AgentGraphRunner`.
 
-## v0.9.1 Control Plane
+## v0.9.2 Control Plane
 
 `RunController` owns global continuation decisions after each
 `PlannerDecision`. It enforces max rounds and plan fingerprint loop guards
-before another Planner round can start.
+before another Planner round can start, and writes explicit diagnostics into
+run result data.
 
 `ActionGateway` is the entry point for low-level runtime actions:
 
 - context construction
 - patch preview
+- sandbox patch apply
 - sandbox/local command checks
 - artifact validation and repair
 
 `BudgetBroker` reserves model, tool, and context budgets before those actions
-run. `TokenLedger` remains the diagnostic/audit record after context is built.
+run. Reservation diagnostics are written alongside `TokenLedger`, which remains
+the audit record after context is built.
+
+`AgentEngineRegistry` owns agent execution. It registers Planner, Code Worker,
+Tester, Final Review, and Synthesizer engines. `AgentGraphExecutor` remains as
+a compatibility adapter for older call sites and must not own prompt, repair, or
+artifact-specific execution logic.
+
+Coding work follows the controlled auto-loop path:
+
+```text
+proposed_changes -> patch preview -> sandbox apply/check -> DebugFinding
+-> PlannerInputBundle -> PlannerDecision -> next RunController decision
+```
 
 Run events carry trace fields in their payloads:
 
@@ -55,5 +70,9 @@ span_id
 parent_span_id
 ```
 
-The first partitioned store façade keeps the existing `.coder` layout but gives
-the code explicit event, artifact, blob, ledger, extension, and cache stores.
+Partitioned run stores keep the existing `.coder` layout while providing the
+explicit event, artifact, blob, ledger, extension, and cache write path.
+
+Legacy `WorkflowSpec` endpoints remain compatibility-only. Preview compilers
+return `runtime_type=legacy_preview`, and `/api/v2/live-runs` is deprecated in
+favor of `/api/v2/live-agent-runs` for product AgentGraph execution.

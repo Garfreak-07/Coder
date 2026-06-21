@@ -10,10 +10,12 @@ removed only after product references are gone and tests protect the boundary.
 3. Keep `WorkflowSpec` / `WorkflowRunner` only for compatibility preview.
 4. Migrate product UI away from runtime JSON editing.
 5. Migrate patch/check/repair/context code behind `ActionGateway`.
-6. Move or delete legacy modules once no product tests or endpoints depend on
+6. Move Planner/Tester/FinalReview/Synthesizer execution behind
+   `AgentEngineRegistry`.
+7. Move or delete legacy modules once no product tests or endpoints depend on
    them.
 
-## Current v0.9.1 Boundary
+## Current v0.9.2 Boundary
 
 `compile_agent_workflow_legacy_preview()` is the explicit compiler for advanced
 preview and migration/debug only. `compile_agent_workflow()` remains a
@@ -25,11 +27,23 @@ Product live Agent runs use:
 AgentWorkflowSpec
 -> RunController
 -> AgentGraphRunner
+-> AgentEngineRegistry
 -> ActionGateway
 -> PlannerDecision
 ```
 
 They must not compile into `WorkflowSpec` or run through `WorkflowRunner`.
+
+Legacy preview responses include:
+
+```text
+runtime_boundary=legacy_runtime_preview
+runtime_type=legacy_preview
+deprecated=true
+```
+
+`/api/v2/live-runs` remains as a compatibility endpoint and is marked
+`deprecated=true`. Product AgentGraph runs should use `/api/v2/live-agent-runs`.
 
 ## Legacy Artifacts
 
@@ -48,14 +62,16 @@ The next deletion pass should migrate tests that still intentionally exercise
 legacy artifacts, then remove legacy artifact production from non-preview
 paths.
 
-## v0.9.1 Boundary
+## v0.9.2 Boundary Rules
 
 - Ordinary user workflows remain AgentGraph-first.
 - `RunController` replaces inline PlannerDecision loop handling.
 - `BudgetBroker` replaces ad hoc pre-execution resource checks.
-- `ActionGateway` replaces direct product calls to context, patch, command, and
-  repair services.
-- Partitioned stores make it possible to delete old mixed run layouts in staged
-  passes.
+- `ActionGateway` replaces direct product calls to context, patch, command,
+  sandbox, and repair services.
+- `AgentEngineRegistry` owns agent execution; `AgentGraphExecutor` is an
+  adapter only.
+- Partitioned stores are the explicit write path for events, artifacts, blobs,
+  ledgers, and cache data.
 - Legacy preview is explicit; new product behavior must not depend on
   `WorkflowRunner`.
