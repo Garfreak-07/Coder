@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  addEdge,
   Background,
   Controls,
   MiniMap,
@@ -14,32 +13,22 @@ import {
   type NodeChange
 } from "@xyflow/react";
 import {
-  approveLiveRun,
-  compileLegacyRuntimePreview,
   deleteRun,
-  getAgent,
   getAgentRuntimeProfiles,
   getAgentWorkflow,
   getDefaultAgentWorkflow,
   getLibrary,
   getLiveAgentRun,
-  getLiveRun,
   getRun,
   getRunEvents,
   getToolResult,
-  getWorkflow,
   rollbackPatch,
-  saveAgent,
   saveAgentWorkflow,
-  saveWorkflow,
-  startLiveRun,
   startLiveAgentRun,
   subscribeRunEvents,
-  retryCurrentNode,
-  validateAgentWorkflow,
-  validateWorkflow
+  validateAgentWorkflow
 } from "./api";
-import { codingWorkbenchWorkflow, defaultPlannerLedAgentWorkflow } from "./examples";
+import { defaultPlannerLedAgentWorkflow } from "./examples";
 import { ProviderSettingsPanel } from "./components/ProviderSettingsPanel";
 import { AgentWorkflowAgentInspector } from "./features/agent-workflow/AgentWorkflowAgentInspector";
 import { AgentWorkflowEdgeInspector } from "./features/agent-workflow/AgentWorkflowEdgeInspector";
@@ -47,97 +36,49 @@ import { AgentWorkflowValidationPanel } from "./features/agent-workflow/AgentWor
 import { SkillsPanel } from "./features/skills/SkillsPanel";
 import { useProviderSettings } from "./hooks/useProviderSettings";
 import { useRuntimeInfo } from "./hooks/useRuntimeInfo";
-import { enUS, nodeTypeDescriptions, nodeTypeLabels } from "./i18n";
+import { enUS } from "./i18n";
 import { EventReplayList, hydrateBlobRefs, objectList, objectValue, stringList } from "./runEvents";
 import { agentWorkflowTemplateCards, instantiateAgentWorkflowTemplate, type AgentWorkflowTemplateCard } from "./template";
 import {
   agentEdgeIdFromIndex,
   agentEdgeIndexFromId,
-  cleanAgent,
   cleanAgentWorkflowEdge,
   cloneAgentWorkflow,
-  cleanEdge,
-  cleanNode,
-  createDefaultAgent,
-  csvToList,
   downloadJson,
-  edgeIdFromIndex,
-  edgeIndexFromId,
   formatJson,
-  fromFlowEdges,
   linesToList,
   toAgentFlowEdges,
-  toAgentFlowNodes,
-  toFlowEdges,
-  toFlowNodes,
-  uniqueAgentId,
-  uniqueNodeId,
-  upsertAgent
+  toAgentFlowNodes
 } from "./workflowGraph";
 import type {
-  AgentSpec,
   AgentModelTier,
   AgentWorkflowAgent,
   AgentWorkflowEdge,
   AgentWorkflowValidationResult,
   AgentWorkflowSpec,
-  EdgeSpec,
   LibraryIndex,
   LiveRunDetail,
-  LoopMode,
-  NodeSpec,
-  NodeType,
-  PreflightResult,
-  ProviderStatusItem,
   RunEvent,
   RunSummaryItem,
-  StoredRunDetail,
-  WorkflowSpec
+  StoredRunDetail
 } from "./types";
 
-const primaryNodeTypes: NodeType[] = ["agent", "loop"];
-const advancedNodeTypes: NodeType[] = ["start", "tool", "mcp_tool", "condition", "human_gate", "end"];
-const nodeTypes: NodeType[] = [...primaryNodeTypes, ...advancedNodeTypes];
-const loopModes: LoopMode[] = ["retry_until", "while", "for_each"];
 const t = enUS;
 const initialAgentWorkflow = cloneAgentWorkflow(defaultPlannerLedAgentWorkflow);
-const initialRuntimeWorkflow = codingWorkbenchWorkflow;
 const appSections = ["workflows", "skills", "runs", "settings"] as const;
 type AppSection = (typeof appSections)[number];
 type PlannerStrength = "fast" | "balanced" | "strong";
 
-interface PendingPreflightRun {
-  repo: string;
-  request: string;
-  workflow: WorkflowSpec;
-  approved: boolean;
-  scopes: string[];
-  result: PreflightResult;
-}
-
-interface PreflightToolFact {
-  nodeId: string;
-  name: string;
-  risk: string;
-  permissions: string[];
-  requiresApproval: boolean;
-}
-
 export function App() {
   const [activeSection, setActiveSection] = useState<AppSection>("workflows");
-  const [library, setLibrary] = useState<LibraryIndex>({ agents: [], agent_workflows: [], workflows: [] });
+  const [library, setLibrary] = useState<LibraryIndex>({ agents: [], agent_workflows: [] });
   const [agentWorkflow, setAgentWorkflow] = useState<AgentWorkflowSpec>(() => cloneAgentWorkflow(initialAgentWorkflow));
-  const [workflow, setWorkflow] = useState<WorkflowSpec>(initialRuntimeWorkflow);
   const [jsonText, setJsonText] = useState(() => formatJson(initialAgentWorkflow));
-  const [runtimeJsonText, setRuntimeJsonText] = useState(() => formatJson(initialRuntimeWorkflow));
-  const [showAdvancedRuntime, setShowAdvancedRuntime] = useState(false);
-  const [runtimePreviewDirty, setRuntimePreviewDirty] = useState(false);
   const [agentWorkflowValidation, setAgentWorkflowValidation] = useState<AgentWorkflowValidationResult | null>(null);
   const [nodes, setNodes] = useState<FlowNode[]>(() => toAgentFlowNodes(initialAgentWorkflow));
   const [edges, setEdges] = useState<FlowEdge[]>(() => toAgentFlowEdges(initialAgentWorkflow));
   const [selectedAgentWorkflowId, setSelectedAgentWorkflowId] = useState<string | null>("planner");
   const [selectedAgentWorkflowEdgeId, setSelectedAgentWorkflowEdgeId] = useState<string | null>(null);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>("start");
   const [status, setStatus] = useState(t.app.defaultStatus);
   const [repo, setRepo] = useState(".");
   const [scopesText, setScopesText] = useState("");
@@ -148,8 +89,6 @@ export function App() {
   const [eventHasMore, setEventHasMore] = useState(false);
   const [eventsLoadingMore, setEventsLoadingMore] = useState(false);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
-  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
-  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [historyQuery, setHistoryQuery] = useState("");
   const [historyStatusFilter, setHistoryStatusFilter] = useState("all");
   const [newAgentRoleCard, setNewAgentRoleCard] = useState("do_work");
@@ -174,22 +113,7 @@ export function App() {
   } = useProviderSettings(setStatus);
   const [selectedRunDetail, setSelectedRunDetail] = useState<StoredRunDetail | LiveRunDetail | null>(null);
   const [selectedRunKind, setSelectedRunKind] = useState<"live" | "stored" | null>(null);
-  const [pendingPreflight, setPendingPreflight] = useState<PendingPreflightRun | null>(null);
-  const [preflightLoading, setPreflightLoading] = useState(false);
-
-  const selectedNode = useMemo(
-    () => workflow.nodes.find((node) => node.id === selectedNodeId) ?? null,
-    [selectedNodeId, workflow.nodes]
-  );
-  const selectedEdge = useMemo(() => {
-    if (!selectedEdgeId) return null;
-    const edgeIndex = edgeIndexFromId(selectedEdgeId);
-    return edgeIndex === null ? null : workflow.edges[edgeIndex] ?? null;
-  }, [selectedEdgeId, workflow.edges]);
-  const selectedAgent = useMemo(
-    () => workflow.agents.find((agent) => agent.id === selectedAgentId) ?? null,
-    [selectedAgentId, workflow.agents]
-  );
+  const [runLoading, setRunLoading] = useState(false);
   const selectedAgentWorkflowAgent = useMemo(
     () => agentWorkflow.agents.find((agent) => agent.id === selectedAgentWorkflowId) ?? null,
     [selectedAgentWorkflowId, agentWorkflow.agents]
@@ -281,13 +205,10 @@ export function App() {
     }
   }
 
-  async function openLiveRun(runId: string, attach = false, runtimeType?: LiveRunDetail["runtime_type"]) {
+  async function openLiveRun(runId: string, attach = false) {
     setStatus(`Loading live run ${runId}...`);
     try {
-      let detail = runtimeType === "agent_graph" ? await getLiveAgentRun(runId) : await getLiveRun(runId);
-      if (detail.runtime_type === "agent_graph" && detail.deprecated) {
-        detail = await getLiveAgentRun(runId);
-      }
+      const detail = await getLiveAgentRun(runId);
       setSelectedRunKind("live");
       setSelectedRunDetail(detail);
       setActiveRunId(detail.id);
@@ -306,33 +227,19 @@ export function App() {
     }
   }
 
-  function renderWorkflowCanvas(nextAgentWorkflow: AgentWorkflowSpec, nextWorkflow: WorkflowSpec, advanced = showAdvancedRuntime) {
-    setNodes(advanced ? toFlowNodes(nextWorkflow) : toAgentFlowNodes(nextAgentWorkflow));
-    setEdges(advanced ? toFlowEdges(nextWorkflow) : toAgentFlowEdges(nextAgentWorkflow));
+  function renderWorkflowCanvas(nextAgentWorkflow: AgentWorkflowSpec) {
+    setNodes(toAgentFlowNodes(nextAgentWorkflow));
+    setEdges(toAgentFlowEdges(nextAgentWorkflow));
   }
 
-  function setCurrentAgentWorkflow(next: AgentWorkflowSpec, runtime?: WorkflowSpec) {
+  function setCurrentAgentWorkflow(next: AgentWorkflowSpec) {
     const clean = cloneAgentWorkflow(next);
     setAgentWorkflow(clean);
     setJsonText(formatJson(clean));
     setRuntimeProfiles(null);
-    if (runtime) {
-      setWorkflow(runtime);
-      setRuntimeJsonText(formatJson(runtime));
-      setRuntimePreviewDirty(false);
-      renderWorkflowCanvas(clean, runtime);
-      setSelectedNodeId(runtime.nodes[0]?.id ?? null);
-      setSelectedAgentId(runtime.agents[0]?.id ?? null);
-    } else {
-      setRuntimePreviewDirty(true);
-      if (showAdvancedRuntime) {
-        setShowAdvancedRuntime(false);
-      }
-      renderWorkflowCanvas(clean, workflow, false);
-    }
+    renderWorkflowCanvas(clean);
     setSelectedAgentWorkflowId(clean.agents[0]?.id ?? null);
     setSelectedAgentWorkflowEdgeId(null);
-    setSelectedEdgeId(null);
   }
 
   function updateAgentWorkflow(mutator: (current: AgentWorkflowSpec) => AgentWorkflowSpec) {
@@ -341,10 +248,7 @@ export function App() {
     setJsonText(formatJson(next));
     setAgentWorkflowValidation(null);
     setRuntimeProfiles(null);
-    setRuntimePreviewDirty(true);
-    if (!showAdvancedRuntime) {
-      renderWorkflowCanvas(next, workflow, false);
-    }
+    renderWorkflowCanvas(next);
   }
 
   function updatePlannerStrength(strength: PlannerStrength) {
@@ -368,68 +272,6 @@ export function App() {
     }
   }
 
-  async function compileRuntimePreview(successStatus = "Legacy runtime preview compiled.") {
-    const parsed = JSON.parse(jsonText) as AgentWorkflowSpec;
-    const validation = await validateAgentWorkflow(parsed);
-    setAgentWorkflowValidation(validation);
-    const clean = cloneAgentWorkflow(parsed);
-    setAgentWorkflow(clean);
-    setJsonText(formatJson(clean));
-    setRuntimePreviewDirty(true);
-    if (!showAdvancedRuntime) {
-      renderWorkflowCanvas(clean, workflow, false);
-    }
-    if (validation.status === "error") {
-      setStatus("Cannot compile legacy runtime preview until Agent workflow validation errors are fixed.");
-      return null;
-    }
-    const payload = await compileLegacyRuntimePreview(parsed);
-    setCurrentAgentWorkflow(payload.agent_workflow, payload.workflow);
-    setStatus(successStatus);
-    return payload;
-  }
-
-  async function setAdvancedRuntimeMode(enabled: boolean) {
-    if (enabled && runtimePreviewDirty) {
-      setStatus("Compiling legacy runtime preview...");
-      try {
-        const payload = await compileRuntimePreview();
-        if (!payload) {
-          setShowAdvancedRuntime(false);
-          return;
-        }
-        setShowAdvancedRuntime(true);
-        setNodes(toFlowNodes(payload.workflow));
-        setEdges(toFlowEdges(payload.workflow));
-        setSelectedNodeId(payload.workflow.nodes[0]?.id ?? null);
-        setSelectedEdgeId(null);
-        setSelectedAgentId(payload.workflow.agents[0]?.id ?? null);
-        setSelectedAgentWorkflowEdgeId(null);
-        return;
-      } catch (error) {
-        setShowAdvancedRuntime(false);
-        setStatus(error instanceof Error ? error.message : String(error));
-        return;
-      }
-    }
-    setShowAdvancedRuntime(enabled);
-    setNodes(enabled ? toFlowNodes(workflow) : toAgentFlowNodes(agentWorkflow));
-    setEdges(enabled ? toFlowEdges(workflow) : toAgentFlowEdges(agentWorkflow));
-    setSelectedEdgeId(null);
-    setSelectedAgentWorkflowEdgeId(null);
-  }
-
-  function setCurrentWorkflow(next: WorkflowSpec) {
-    setWorkflow(next);
-    setRuntimeJsonText(formatJson(next));
-    setNodes(toFlowNodes(next));
-    setEdges(toFlowEdges(next));
-    setShowAdvancedRuntime(true);
-    setSelectedNodeId(next.nodes[0]?.id ?? null);
-    setSelectedEdgeId(null);
-    setSelectedAgentId(next.agents[0]?.id ?? null);
-  }
-
   function useTemplateCard(template: AgentWorkflowTemplateCard) {
     const next = instantiateAgentWorkflowTemplate(template);
     setCurrentAgentWorkflow(next);
@@ -440,7 +282,7 @@ export function App() {
     setStatus("Loading default Agent workflow...");
     try {
       const payload = await getDefaultAgentWorkflow();
-      setCurrentAgentWorkflow(payload.agent_workflow, payload.workflow);
+      setCurrentAgentWorkflow(payload.agent_workflow);
       setStatus(`Loaded ${payload.agent_workflow.name}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
@@ -451,19 +293,8 @@ export function App() {
     setStatus(`Loading Agent workflow ${workflowId}...`);
     try {
       const agentWorkflow = await getAgentWorkflow(workflowId);
-      const payload = await compileLegacyRuntimePreview(agentWorkflow);
-      setCurrentAgentWorkflow(payload.agent_workflow, payload.workflow);
+      setCurrentAgentWorkflow(agentWorkflow);
       setStatus(`Loaded Agent workflow ${workflowId}`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function loadWorkflow(workflowId: string) {
-    setStatus(`Loading legacy runtime workflow ${workflowId}...`);
-    try {
-      setCurrentWorkflow(await getWorkflow(workflowId));
-      setStatus(`Loaded legacy runtime workflow ${workflowId}`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
@@ -496,8 +327,7 @@ export function App() {
         return;
       }
       const saved = await saveAgentWorkflow(parsed);
-      const payload = await compileLegacyRuntimePreview(saved);
-      setCurrentAgentWorkflow(payload.agent_workflow, payload.workflow);
+      setCurrentAgentWorkflow(saved);
       refreshLibrary();
       setStatus(`Saved Agent workflow ${saved.id}`);
     } catch (error) {
@@ -531,104 +361,6 @@ export function App() {
         );
       })
       .catch((error) => setStatus(error instanceof Error ? `Import failed: ${error.message}` : "Import failed"));
-  }
-
-  function applyRuntimeJson() {
-    try {
-      const parsed = JSON.parse(runtimeJsonText) as WorkflowSpec;
-      setCurrentWorkflow(parsed);
-      setStatus("Legacy runtime JSON applied locally.");
-    } catch (error) {
-      setStatus(error instanceof Error ? `Invalid legacy runtime JSON: ${error.message}` : "Invalid legacy runtime JSON");
-    }
-  }
-
-  async function persistRuntimeWorkflow() {
-    try {
-      const parsed = JSON.parse(runtimeJsonText) as WorkflowSpec;
-      const saved = await saveWorkflow(parsed);
-      setCurrentWorkflow(saved);
-      refreshLibrary();
-      setStatus(`Saved legacy runtime preview workflow ${saved.id}`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  function exportRuntimeWorkflow() {
-    try {
-      const parsed = JSON.parse(runtimeJsonText) as WorkflowSpec;
-      downloadJson(`${parsed.id || "runtime-workflow"}.json`, parsed);
-      setStatus(`Exported legacy runtime preview ${parsed.id || "runtime-workflow"}`);
-    } catch (error) {
-      setStatus(
-        error instanceof Error
-          ? `Cannot export invalid legacy runtime JSON: ${error.message}`
-          : "Cannot export invalid legacy runtime JSON"
-      );
-    }
-  }
-
-  function updateWorkflow(mutator: (current: WorkflowSpec) => WorkflowSpec) {
-    const next = mutator(workflow);
-    setWorkflow(next);
-    setRuntimeJsonText(formatJson(next));
-    setNodes(toFlowNodes(next));
-    setEdges(toFlowEdges(next));
-  }
-
-  function addWorkflowNode(type: NodeType) {
-    const id = uniqueNodeId(workflow, type);
-    updateWorkflow((current) => ({
-      ...current,
-      nodes: [
-        ...current.nodes,
-        {
-          id,
-          type,
-          ...(type === "agent" ? { agent_id: current.agents[0]?.id ?? "agent_id" } : {}),
-          ...(type === "tool" ? { tool: "project_index" } : {}),
-          ...(type === "mcp_tool" ? { tool: "tool_name", input: { server_command: "" } } : {}),
-          ...(type === "condition" ? { condition: "state.value == True" } : {}),
-          ...(type === "loop" ? { loop_mode: "retry_until" as LoopMode, condition: "review.status == 'done'", max_iterations: 3 } : {})
-        }
-      ]
-    }));
-    setSelectedNodeId(id);
-  }
-
-  function updateSelectedNode(patch: Partial<NodeSpec>) {
-    if (!selectedNode) return;
-    updateWorkflow((current) => ({
-      ...current,
-      nodes: current.nodes.map((node) => (node.id === selectedNode.id ? cleanNode({ ...node, ...patch }) : node)),
-      edges: current.edges.map((edge) => ({
-        ...edge,
-        from: edge.from === selectedNode.id && patch.id ? patch.id : edge.from,
-        to: edge.to === selectedNode.id && patch.id ? patch.id : edge.to
-      }))
-    }));
-    if (patch.id) setSelectedNodeId(patch.id);
-  }
-
-  function updateSelectedEdge(patch: Partial<EdgeSpec>) {
-    if (!selectedEdgeId) return;
-    const edgeIndex = edgeIndexFromId(selectedEdgeId);
-    if (edgeIndex === null) return;
-    updateWorkflow((current) => ({
-      ...current,
-      edges: current.edges.map((edge, index) => (index === edgeIndex ? cleanEdge({ ...edge, ...patch }) : edge))
-    }));
-    setSelectedEdgeId(edgeIdFromIndex(edgeIndex));
-  }
-
-  function addAgent() {
-    const agent = createDefaultAgent(uniqueAgentId(workflow));
-    updateWorkflow((current) => ({
-      ...current,
-      agents: [...current.agents, agent]
-    }));
-    setSelectedAgentId(agent.id);
   }
 
   function uniqueAgentWorkflowAgentId(current: AgentWorkflowSpec) {
@@ -697,20 +429,6 @@ export function App() {
     setStatus(`Deleted Agent ${target.name}.`);
   }
 
-  function updateSelectedAgent(patch: Partial<AgentSpec>) {
-    if (!selectedAgent) return;
-    const nextId = patch.id;
-    updateWorkflow((current) => ({
-      ...current,
-      agents: current.agents.map((agent) => (agent.id === selectedAgent.id ? cleanAgent({ ...agent, ...patch }) : agent)),
-      nodes: current.nodes.map((node) => ({
-        ...node,
-        agent_id: node.agent_id === selectedAgent.id && nextId ? nextId : node.agent_id
-      }))
-    }));
-    if (nextId) setSelectedAgentId(nextId);
-  }
-
   function updateSelectedAgentWorkflowAgent(patch: Partial<AgentWorkflowAgent>) {
     if (!selectedAgentWorkflowAgent) return;
     updateAgentWorkflow((current) => ({
@@ -740,50 +458,6 @@ export function App() {
     }));
     setSelectedAgentWorkflowEdgeId(agentEdgeIdFromIndex(edgeIndex));
   }
-  async function persistSelectedAgent() {
-    if (!selectedAgent) return;
-    try {
-      const saved = await saveAgent(selectedAgent);
-      refreshLibrary();
-      setStatus(`Saved agent ${saved.id}`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function loadAgentIntoWorkflow(agentId: string) {
-    try {
-      const agent = await getAgent(agentId);
-      updateWorkflow((current) => ({
-        ...current,
-        agents: upsertAgent(current.agents, agent)
-      }));
-      setSelectedAgentId(agent.id);
-      setStatus(`Loaded agent ${agent.id}`);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  const onNodesChange = useCallback((changes: NodeChange[]) => {
-    const removedIds = changes.filter((change) => change.type === "remove").map((change) => change.id);
-    setNodes((current) => applyNodeChanges(changes, current));
-    if (removedIds.length > 0) {
-      setWorkflow((currentWorkflow) => {
-        const removed = new Set(removedIds);
-        const nextWorkflow = {
-          ...currentWorkflow,
-          nodes: currentWorkflow.nodes.filter((node) => !removed.has(node.id)),
-          edges: currentWorkflow.edges.filter((edge) => !removed.has(edge.from) && !removed.has(edge.to))
-        };
-        setRuntimeJsonText(formatJson(nextWorkflow));
-        setEdges(toFlowEdges(nextWorkflow));
-        setSelectedNodeId((current) => (current && removed.has(current) ? nextWorkflow.nodes[0]?.id ?? null : current));
-        return nextWorkflow;
-      });
-    }
-  }, []);
-
   const onAgentNodesChange = useCallback(
     (changes: NodeChange[]) => {
       const removedIds = changes.filter((change) => change.type === "remove").map((change) => change.id);
@@ -814,7 +488,6 @@ export function App() {
           };
           setJsonText(formatJson(nextWorkflow));
           setAgentWorkflowValidation(null);
-          setRuntimePreviewDirty(true);
           setSelectedAgentWorkflowId((current) =>
             current && removableIds.has(current) ? nextWorkflow.agents[0]?.id ?? null : current
           );
@@ -844,7 +517,6 @@ export function App() {
         setJsonText(formatJson(nextWorkflow));
         setEdges(toAgentFlowEdges(nextWorkflow));
         setAgentWorkflowValidation(null);
-        setRuntimePreviewDirty(true);
         setSelectedAgentWorkflowEdgeId(null);
         return nextWorkflow;
       });
@@ -871,40 +543,8 @@ export function App() {
     setSelectedAgentWorkflowId(null);
     setStatus(`Connected ${source} -> ${target}.`);
   }
-  const onEdgesChange = useCallback(
-    (changes: EdgeChange[]) => {
-      setEdges((current) => {
-        const nextEdges = applyEdgeChanges(changes, current);
-        const specEdges = fromFlowEdges(nextEdges, workflow);
-        setWorkflow((currentWorkflow) => {
-          const nextWorkflow = { ...currentWorkflow, edges: specEdges };
-          setRuntimeJsonText(formatJson(nextWorkflow));
-          return nextWorkflow;
-        });
-        return nextEdges;
-      });
-    },
-    [workflow]
-  );
-
-  const onConnect = useCallback(
-    (connection: Connection) => {
-      setEdges((current) => {
-        const nextEdges = addEdge(connection, current);
-        const specEdges = fromFlowEdges(nextEdges, workflow);
-        setWorkflow((currentWorkflow) => {
-          const nextWorkflow = { ...currentWorkflow, edges: specEdges };
-          setRuntimeJsonText(formatJson(nextWorkflow));
-          return nextWorkflow;
-        });
-        return nextEdges;
-      });
-    },
-    [workflow]
-  );
-
   async function runWorkflow(approvedOverride = approved) {
-    setPreflightLoading(true);
+    setRunLoading(true);
     setStatus("Validating Agent workflow...");
     try {
       const parsed = JSON.parse(jsonText) as AgentWorkflowSpec;
@@ -921,7 +561,6 @@ export function App() {
       setEventHasMore(false);
       setEventsLoadingMore(false);
       setActiveRunId(null);
-      setPendingPreflight(null);
       setStatus(approvedOverride ? "Starting approved Agent workflow run..." : "Starting Agent workflow run...");
       const run = await startLiveAgentRun({
         repo,
@@ -939,69 +578,7 @@ export function App() {
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
-      setPreflightLoading(false);
-    }
-  }
-
-  async function startWorkflowRun(input: PendingPreflightRun) {
-    setEvents([]);
-    setEventCursor(0);
-    setEventHasMore(false);
-    setEventsLoadingMore(false);
-    setActiveRunId(null);
-    setPendingPreflight(null);
-    setStatus(input.approved ? "Starting approved live run..." : "Starting live run...");
-    try {
-      const run = await startLiveRun({
-        repo: input.repo,
-        request: input.request,
-        workflow: input.workflow,
-        approved: input.approved,
-        scopes: input.scopes
-      });
-      setActiveRunId(run.run_id);
-      setSelectedRunKind("live");
-      setSelectedRunDetail(null);
-      setStatus(`Live run ${run.run_id}: ${run.status}`);
-      subscribeToRun(run.run_id, run.events_url);
-      refreshRuntimeInfo();
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function approveAndResumeRun(approvedValue = true, reason?: string) {
-    if (!activeRunId) {
-      setStatus("No blocked live run selected.");
-      return;
-    }
-    setStatus(`${approvedValue ? "Approving" : "Rejecting"} live run ${activeRunId}...`);
-    try {
-      const run = await approveLiveRun(activeRunId, { approved: approvedValue, reason });
-      setStatus(`Live run ${run.run_id}: ${run.status}`);
-      if (approvedValue) {
-        subscribeToRun(run.run_id, run.events_url);
-      }
-      refreshRuntimeInfo();
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async function retryBlockedNode(runId = activeRunId) {
-    if (!runId) {
-      setStatus("No blocked live run selected.");
-      return;
-    }
-    setStatus(`Retrying current node for live run ${runId}...`);
-    try {
-      const run = await retryCurrentNode(runId);
-      setActiveRunId(run.run_id);
-      setStatus(`Live run ${run.run_id}: ${run.status}`);
-      subscribeToRun(run.run_id, run.events_url);
-      refreshRuntimeInfo();
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      setRunLoading(false);
     }
   }
 
@@ -1044,9 +621,7 @@ export function App() {
   }
 
   function liveEventsUrl(detail: LiveRunDetail) {
-    return detail.runtime_type === "agent_graph"
-      ? `/api/v2/live-agent-runs/${detail.id}/events`
-      : `/api/v2/live-runs/${detail.id}/events`;
+    return `/api/v2/live-agent-runs/${detail.id}/events`;
   }
 
   return (
@@ -1123,8 +698,8 @@ export function App() {
             <input type="checkbox" checked={approved} onChange={(event) => setApproved(event.target.checked)} />
             {t.run.preApprove}
           </label>
-          <button onClick={() => runWorkflow()} disabled={preflightLoading}>
-            {preflightLoading ? t.preflight.running : t.run.start}
+          <button onClick={() => runWorkflow()} disabled={runLoading}>
+            {runLoading ? "Starting..." : t.run.start}
           </button>
         </section>
 
@@ -1152,7 +727,7 @@ export function App() {
           </div>
           <div className="list compact-list">
             {liveRuns.slice(0, 5).map((run) => (
-              <button className="list-item" key={run.id} onClick={() => openLiveRun(run.id, false, run.runtime_type)}>
+              <button className="list-item" key={run.id} onClick={() => openLiveRun(run.id)}>
                 <span>{run.workflow_id}</span>
                 <small>{run.status} / {run.events} events</small>
               </button>
@@ -1202,28 +777,18 @@ export function App() {
           <ReactFlow
             nodes={nodes}
             edges={edges}
-            onNodesChange={showAdvancedRuntime ? onNodesChange : onAgentNodesChange}
-            onEdgesChange={showAdvancedRuntime ? onEdgesChange : onAgentEdgesChange}
-            onConnect={showAdvancedRuntime ? onConnect : onAgentConnect}
+            onNodesChange={onAgentNodesChange}
+            onEdgesChange={onAgentEdgesChange}
+            onConnect={onAgentConnect}
             nodesConnectable
             deleteKeyCode="Backspace"
             onNodeClick={(_, node) => {
-              if (showAdvancedRuntime) {
-                setSelectedNodeId(node.id);
-                setSelectedEdgeId(null);
-              } else {
-                setSelectedAgentWorkflowId(node.id);
-                setSelectedAgentWorkflowEdgeId(null);
-              }
+              setSelectedAgentWorkflowId(node.id);
+              setSelectedAgentWorkflowEdgeId(null);
             }}
             onEdgeClick={(_, edge) => {
-              if (showAdvancedRuntime) {
-                setSelectedEdgeId(edge.id);
-                setSelectedNodeId(null);
-              } else {
-                setSelectedAgentWorkflowEdgeId(edge.id);
-                setSelectedAgentWorkflowId(null);
-              }
+              setSelectedAgentWorkflowEdgeId(edge.id);
+              setSelectedAgentWorkflowId(null);
             }}
             fitView
           >
@@ -1338,16 +903,8 @@ export function App() {
 
       <aside className="inspector">
         <section className="panel">
-          <div className="panel-title">{showAdvancedRuntime ? "Legacy Runtime Inspector" : "Agent Inspector"}</div>
-          {showAdvancedRuntime ? (
-            selectedNode ? (
-              <NodeInspector node={selectedNode} workflow={workflow} onChange={updateSelectedNode} />
-            ) : selectedEdge ? (
-              <EdgeInspector edge={selectedEdge} nodes={workflow.nodes} onChange={updateSelectedEdge} />
-            ) : (
-              <div className="muted">{t.inspector.empty}</div>
-            )
-          ) : selectedAgentWorkflowAgent ? (
+          <div className="panel-title">Agent Inspector</div>
+          {selectedAgentWorkflowAgent ? (
             <AgentWorkflowAgentInspector
               agent={selectedAgentWorkflowAgent}
               capabilities={capabilities}
@@ -1367,45 +924,7 @@ export function App() {
         </section>
 
         <section className="panel">
-          {showAdvancedRuntime ? (
-            <>
-              <div className="panel-title">Legacy Runtime Agents (Advanced)</div>
-              <div className="button-row">
-                <button onClick={addAgent}>{t.inspector.addAgent}</button>
-                <button disabled={!selectedAgent} onClick={persistSelectedAgent}>
-                  {t.inspector.saveAgent}
-                </button>
-              </div>
-              <div className="list compact-list">
-                {workflow.agents.map((agent) => (
-                  <button
-                    className={`list-item ${agent.id === selectedAgentId ? "selected" : ""}`}
-                    key={agent.id}
-                    onClick={() => setSelectedAgentId(agent.id)}
-                  >
-                    <span>{agent.name ?? agent.id}</span>
-                    <small>{agent.role}</small>
-                  </button>
-                ))}
-                {workflow.agents.length === 0 && <div className="muted">{t.inspector.noAgents}</div>}
-              </div>
-              {library.agents.length > 0 && (
-                <>
-                  <div className="panel-subtitle">{t.inspector.libraryAgents}</div>
-                  <div className="list compact-list">
-                    {library.agents.map((agent) => (
-                      <button className="list-item" key={agent.id} onClick={() => loadAgentIntoWorkflow(agent.id)}>
-                        <span>{agent.name ?? agent.id}</span>
-                        <small>{agent.role}</small>
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
-              {selectedAgent && <AgentInspector agent={selectedAgent} onChange={updateSelectedAgent} />}
-            </>
-          ) : (
-            <>
+          <>
               <div className="panel-title">Agent Topology</div>
               <div className="add-agent-card">
                 <label>
@@ -1461,8 +980,7 @@ export function App() {
                 ))}
                 {agentWorkflow.edges.length === 0 && <div className="muted">No edges yet.</div>}
               </div>
-            </>
-          )}
+          </>
         </section>
 
         <section className="panel events-panel">
@@ -1473,14 +991,10 @@ export function App() {
             activeRunId={activeRunId}
             onAttach={(runId) => openLiveRun(runId, true)}
             onOpenStored={(runId) => openStoredRun(runId)}
-            onRetryCurrentNode={(runId) => retryBlockedNode(runId)}
             onDeleteStored={(runId) => deleteStoredRun(runId)}
           />
           <RunSummary
             events={events}
-            canRetryCurrentNode={Boolean(activeRunId)}
-            onApprovalDecision={approveAndResumeRun}
-            onRetryCurrentNode={() => retryBlockedNode()}
           />
           <PatchPanel
             events={events}
@@ -1523,7 +1037,7 @@ export function App() {
             <div className="panel-subtitle">Live</div>
             <div className="list compact-list">
               {liveRuns.map((run) => (
-                <button className="list-item" key={run.id} onClick={() => openLiveRun(run.id, false, run.runtime_type)}>
+                <button className="list-item" key={run.id} onClick={() => openLiveRun(run.id)}>
                   <span>{run.workflow_id}</span>
                   <small>{run.status} / {run.events} events</small>
                 </button>
@@ -1566,14 +1080,10 @@ export function App() {
               activeRunId={activeRunId}
               onAttach={(runId) => openLiveRun(runId, true)}
               onOpenStored={(runId) => openStoredRun(runId)}
-              onRetryCurrentNode={(runId) => retryBlockedNode(runId)}
               onDeleteStored={(runId) => deleteStoredRun(runId)}
             />
             <RunSummary
               events={events}
-              canRetryCurrentNode={Boolean(activeRunId)}
-              onApprovalDecision={approveAndResumeRun}
-              onRetryCurrentNode={() => retryBlockedNode()}
             />
             <PatchPanel
               events={events}
@@ -1613,13 +1123,6 @@ export function App() {
           </section>
         </main>
       )}
-      {pendingPreflight && (
-        <PreflightModal
-          pending={pendingPreflight}
-          onCancel={() => setPendingPreflight(null)}
-          onConfirm={() => startWorkflowRun(pendingPreflight)}
-        />
-      )}
     </div>
   );
 }
@@ -1641,213 +1144,6 @@ function modelTierForPlannerStrength(strength: PlannerStrength): AgentModelTier 
   if (strength === "fast") return "economy";
   if (strength === "balanced") return "standard";
   return "best";
-}
-
-function PreflightModal({
-  pending,
-  onCancel,
-  onConfirm
-}: {
-  pending: PendingPreflightRun;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  const { result, workflow } = pending;
-  const facts = preflightFacts(workflow, pending.scopes, result);
-  const errors = result.issues.filter((issue) => issue.level === "error");
-  const warnings = result.issues.filter((issue) => issue.level === "warning");
-  const canStart = result.status !== "error";
-  const providerStatuses = preflightProviderStatuses(result);
-
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="modal-card preflight-modal" role="dialog" aria-modal="true" aria-labelledby="preflight-title">
-        <div className="modal-heading">
-          <div>
-            <div className="eyebrow">{t.preflight.eyebrow}</div>
-            <h2 id="preflight-title">{t.preflight.title}</h2>
-          </div>
-          <span className={`status-pill ${statusClass(result.status === "pass" ? "run.completed" : result.status === "error" ? "run.failed" : "run.blocked")}`}>
-            {preflightStatusLabel(result.status)}
-          </span>
-        </div>
-
-        <div className="summary-grid preflight-summary">
-          <span>{t.preflight.nodes(facts.nodes, facts.edges)}</span>
-          <span>{t.preflight.reachable(facts.reachableNodes)}</span>
-          <span>{t.preflight.agents(facts.agents)}</span>
-          <span>{t.preflight.tokenBudget(facts.tokenBudget)}</span>
-          <span>{t.preflight.stepBudget(facts.maxSteps)}</span>
-          <span>{t.preflight.toolBudget(facts.maxToolCalls)}</span>
-        </div>
-
-        <div className="preflight-section">
-          <div className="panel-subtitle">Provider</div>
-          {providerStatuses.length === 0 ? (
-            <div className="muted">No provider status returned.</div>
-          ) : (
-            <div className="provider-status-list">
-              {providerStatuses.map((provider) => (
-                <div className="tool-risk-row" key={provider.provider}>
-                  <span>{provider.provider}</span>
-                  <span>
-                    {provider.mode} · {provider.credential_source}
-                    {provider.base_url ? ` · ${provider.base_url}` : ""}
-                  </span>
-                  <span className={`status-pill ${provider.configured ? "good" : "warn"}`}>
-                    {provider.configured ? "ready" : "mock"}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="preflight-section">
-          <div className="panel-subtitle">{t.preflight.permissions}</div>
-          <div className="summary-grid">
-            <span>{t.preflight.editAgents(facts.editAgents)}</span>
-            <span>{t.preflight.commandAgents(facts.commandAgents)}</span>
-            <span>{t.preflight.networkAgents(facts.networkAgents)}</span>
-            <span>{t.preflight.approvalAgents(facts.approvalAgents)}</span>
-            <span>{t.preflight.approvalTools(facts.approvalRequiredTools)}</span>
-          </div>
-        </div>
-
-        <div className="preflight-section">
-          <div className="panel-subtitle">{t.preflight.scopes}</div>
-          <div className="chip-row">
-            {pending.scopes.length === 0 ? (
-              <span className="muted">{t.preflight.noScopes}</span>
-            ) : (
-              pending.scopes.map((scope) => <span className="chip" key={scope}>{scope}</span>)
-            )}
-          </div>
-        </div>
-
-        <div className="preflight-section">
-          <div className="panel-subtitle">{t.preflight.tools}</div>
-          {facts.tools.length === 0 ? (
-            <div className="muted">{t.preflight.noTools}</div>
-          ) : (
-            <div className="preflight-tool-list">
-              {facts.tools.map((tool) => (
-                <div className="tool-risk-row" key={`${tool.nodeId}-${tool.name}`}>
-                  <span>{tool.name}</span>
-                  <span>
-                    {tool.nodeId}
-                    {tool.permissions.length > 0 ? ` · ${tool.permissions.join(", ")}` : ""}
-                    {tool.requiresApproval ? " · approval" : ""}
-                  </span>
-                  <span className={`status-pill ${tool.risk === "high" ? "bad" : tool.risk === "medium" ? "warn" : "good"}`}>
-                    {tool.risk}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="preflight-section">
-          <div className="panel-subtitle">{t.preflight.issues}</div>
-          {result.issues.length === 0 ? (
-            <div className="muted">{t.preflight.noIssues}</div>
-          ) : (
-            <div className="preflight-issues">
-              {result.issues.map((issue, index) => (
-                <div className={`preflight-issue ${issue.level}`} key={`${issue.code}-${issue.target_id ?? index}`}>
-                  <strong>{issue.level.toUpperCase()} · {issue.code}</strong>
-                  <span>{issue.message}</span>
-                  <small>{issue.target_type}{issue.target_id ? `: ${issue.target_id}` : ""}</small>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {errors.length > 0 && <div className="muted">{t.preflight.errorsBlock(errors.length)}</div>}
-        {warnings.length > 0 && errors.length === 0 && <div className="muted">{t.preflight.warningsConfirm(warnings.length)}</div>}
-
-        <div className="button-row modal-actions">
-          <button onClick={onCancel}>{canStart ? t.preflight.cancel : t.preflight.close}</button>
-          <button onClick={onConfirm} disabled={!canStart}>{t.preflight.confirm}</button>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function preflightStatusLabel(status: string): string {
-  if (status === "pass") return t.preflight.pass;
-  if (status === "warning") return t.preflight.warning;
-  if (status === "error") return t.preflight.error;
-  return status;
-}
-
-function preflightFacts(workflow: WorkflowSpec, scopes: string[], result: PreflightResult) {
-  const summary = result.summary ?? {};
-  const toolNodes = workflow.nodes.filter((node) => node.type === "tool" || node.type === "mcp_tool");
-  const agents = workflow.agents;
-  const backendTools = objectList(summary.tools).map((tool): PreflightToolFact => {
-    const displayName = typeof tool.display_name === "string" ? tool.display_name : String(tool.tool ?? "unconfigured");
-    const rawTool = typeof tool.tool === "string" && tool.tool !== displayName ? ` (${tool.tool})` : "";
-    return {
-      nodeId: String(tool.node_id ?? "unknown"),
-      name: `${displayName}${rawTool}`,
-      risk: String(tool.risk_level ?? "unknown"),
-      permissions: stringList(tool.permissions),
-      requiresApproval: Boolean(tool.requires_approval)
-    };
-  });
-  const permissionSummary = objectValue(summary.permission_summary);
-  return {
-    nodes: numberFromSummary(summary.nodes, workflow.nodes.length),
-    edges: numberFromSummary(summary.edges, workflow.edges.length),
-    agents: numberFromSummary(summary.agents, workflow.agents.length),
-    reachableNodes: numberFromSummary(summary.reachable_nodes, 0),
-    maxSteps: numberFromSummary(summary.max_steps, workflow.max_steps),
-    maxToolCalls: numberFromSummary(summary.max_tool_calls, workflow.max_tool_calls),
-    tokenBudget: summary.token_budget == null ? "none" : String(summary.token_budget),
-    editAgents: agents.filter((agent) => agent.permissions.edit_files).length,
-    commandAgents: agents.filter((agent) => agent.permissions.run_commands).length,
-    networkAgents: agents.filter((agent) => agent.permissions.use_network).length,
-    approvalAgents: agents.filter((agent) => agent.permissions.requires_approval).length,
-    approvalRequiredTools: numberFromSummary(permissionSummary?.approval_required_tools, 0),
-    scopes,
-    tools: backendTools.length > 0
-      ? backendTools
-      : toolNodes.map((node) => ({
-          nodeId: node.id,
-          name: node.type === "mcp_tool" ? `MCP: ${node.tool ?? "unconfigured"}` : node.tool ?? "unconfigured",
-          risk: toolRisk(node),
-          permissions: [],
-          requiresApproval: false
-        }))
-  };
-}
-
-function preflightProviderStatuses(result: PreflightResult): ProviderStatusItem[] {
-  const providerStatus = objectValue(result.summary?.provider_status);
-  const providers = objectList(providerStatus?.providers);
-  return providers.map((provider) => ({
-    provider: String(provider.provider ?? "unknown"),
-    configured: Boolean(provider.configured),
-    credential_configured: Boolean(provider.credential_configured),
-    credential_source: String(provider.credential_source ?? "unknown"),
-    base_url: typeof provider.base_url === "string" ? provider.base_url : null,
-    mode: String(provider.mode ?? "unknown")
-  }));
-}
-
-function numberFromSummary(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
-
-function toolRisk(node: NodeSpec): "low" | "medium" | "high" {
-  if (node.type === "mcp_tool") return "high";
-  if (node.tool === "apply_patch" || node.tool === "rollback_patch") return "high";
-  if (node.tool === "run_check" || node.tool === "propose_patch") return "medium";
-  return "low";
 }
 
 function PatchPanel({
@@ -2107,7 +1403,6 @@ function RunDetailCard({
   activeRunId,
   onAttach,
   onOpenStored,
-  onRetryCurrentNode,
   onDeleteStored
 }: {
   detail: StoredRunDetail | LiveRunDetail | null;
@@ -2115,7 +1410,6 @@ function RunDetailCard({
   activeRunId: string | null;
   onAttach: (runId: string) => void;
   onOpenStored: (runId: string) => void;
-  onRetryCurrentNode: (runId: string) => void;
   onDeleteStored: (runId: string) => void;
 }) {
   if (!detail || !kind) return null;
@@ -2126,7 +1420,6 @@ function RunDetailCard({
   const resultData = objectValue(result?.data);
   const canAttach = liveDetail?.status === "queued" || liveDetail?.status === "running" || liveDetail?.status === "blocked";
   const canApprove = liveDetail?.status === "blocked" && Boolean(liveDetail.approval_required);
-  const canRetry = liveDetail?.status === "blocked" && !liveDetail.approval_required && Boolean(result?.resume_checkpoint);
 
   return (
     <div className="run-detail-card">
@@ -2153,10 +1446,9 @@ function RunDetailCard({
       )}
       {canAttach && (
         <button disabled={activeRunId === detail.id && canApprove} onClick={() => onAttach(detail.id)}>
-          {canApprove ? "Use this blocked run for approval" : "Reattach event stream"}
+          {canApprove ? "Reattach blocked run" : "Reattach event stream"}
         </button>
       )}
-      {canRetry && <button onClick={() => onRetryCurrentNode(detail.id)}>Retry current node</button>}
       {kind === "stored" && <button onClick={() => onDeleteStored(detail.id)}>Delete stored run</button>}
       {liveDetail?.error && <div className="muted">Error: {liveDetail.error}</div>}
       {resultData && <RunDiagnostics data={resultData} />}
@@ -2259,18 +1551,7 @@ function storedToolResultIds(events: RunEvent[]): string[] {
   return [...ids];
 }
 
-function RunSummary({
-  events,
-  canRetryCurrentNode,
-  onApprovalDecision,
-  onRetryCurrentNode
-}: {
-  events: RunEvent[];
-  canRetryCurrentNode: boolean;
-  onApprovalDecision: (approved: boolean, reason?: string) => void;
-  onRetryCurrentNode: () => void;
-}) {
-  const [reason, setReason] = useState("");
+function RunSummary({ events }: { events: RunEvent[] }) {
   const latest = events.at(-1);
   const agentCalls = events.filter((event) => event.type === "agent.called").length;
   const toolCalls = events.filter((event) => event.type === "tool.called").length;
@@ -2294,15 +1575,6 @@ function RunSummary({
         <span>{toolCalls} tool calls</span>
         <span>{selectedEdges} edges</span>
       </div>
-      {latestApproval && isBlocked && (
-        <div className="approval-actions">
-          <input placeholder="Optional approval/rejection reason" value={reason} onChange={(event) => setReason(event.target.value)} />
-          <div className="button-row">
-            <button onClick={() => onApprovalDecision(true, reason || undefined)}>Approve and resume</button>
-            <button onClick={() => onApprovalDecision(false, reason || "Rejected by local user")}>Reject</button>
-          </div>
-        </div>
-      )}
       {!latestApproval && isBlocked && (
         <div className="approval-card">
           <div className="panel-subtitle">Blocked</div>
@@ -2310,7 +1582,6 @@ function RunSummary({
             <span>{String(latestPayload?.code ?? "blocked")}</span>
             <span>{String(latestPayload?.reason ?? latest?.message ?? "")}</span>
           </div>
-          {canRetryCurrentNode && <button onClick={onRetryCurrentNode}>Retry current node</button>}
         </div>
       )}
       {latestApproval && isBlocked && (
@@ -2400,318 +1671,3 @@ function statusClass(type: string | undefined): string {
   return "";
 }
 
-function NodeInspector({
-  node,
-  workflow,
-  onChange
-}: {
-  node: NodeSpec;
-  workflow: WorkflowSpec;
-  onChange: (patch: Partial<NodeSpec>) => void;
-}) {
-  return (
-    <div className="form-stack">
-      <label>
-        {t.forms.id}
-        <input value={node.id} onChange={(event) => onChange({ id: event.target.value })} />
-      </label>
-      <label>
-        {t.forms.type}
-        <select value={node.type} onChange={(event) => onChange({ type: event.target.value as NodeType })}>
-          {nodeTypes.map((type) => (
-            <option key={type} value={type}>
-              {nodeTypeLabels[type]} ({type})
-            </option>
-          ))}
-        </select>
-        <span className="field-help">{nodeTypeDescriptions[node.type]}</span>
-      </label>
-      {node.type === "agent" && (
-        <label>
-          {t.forms.agent}
-          <select value={node.agent_id ?? ""} onChange={(event) => onChange({ agent_id: event.target.value })}>
-            <option value="">{t.forms.selectAgent}</option>
-            {workflow.agents.map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {agent.name ?? agent.id}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-      {(node.type === "tool" || node.type === "mcp_tool") && (
-        <label>
-          {node.type === "mcp_tool" ? t.forms.mcpToolName : t.forms.tool}
-          <input value={node.tool ?? ""} onChange={(event) => onChange({ tool: event.target.value })} />
-        </label>
-      )}
-      {(node.type === "tool" || node.type === "mcp_tool") && (
-        <label>
-          {t.forms.inputJson}
-          <textarea
-            defaultValue={formatJson(node.input ?? {})}
-            onBlur={(event) => {
-              try {
-                onChange({ input: JSON.parse(event.target.value) as Record<string, unknown> });
-              } catch {
-                event.currentTarget.value = formatJson(node.input ?? {});
-              }
-            }}
-            rows={5}
-          />
-        </label>
-      )}
-      {node.type === "condition" && (
-        <label>
-          {t.forms.condition}
-          <input value={node.condition ?? ""} onChange={(event) => onChange({ condition: event.target.value })} />
-        </label>
-      )}
-      {node.type === "loop" && (
-        <>
-          <label>
-            {t.forms.loopMode}
-            <select value={node.loop_mode ?? "retry_until"} onChange={(event) => onChange({ loop_mode: event.target.value as LoopMode })}>
-              {loopModes.map((mode) => (
-                <option key={mode} value={mode}>
-                  {mode}
-                </option>
-              ))}
-            </select>
-            <span className="field-help">
-              retry_until exits when the condition is true; while exits when the condition is false; for_each iterates
-              the items key. Edge conditions usually read loop_output.should_continue.
-            </span>
-          </label>
-          {(node.loop_mode ?? "retry_until") !== "for_each" && (
-            <label>
-              {t.forms.condition}
-              <input value={node.condition ?? ""} onChange={(event) => onChange({ condition: event.target.value })} />
-            </label>
-          )}
-          {(node.loop_mode ?? "retry_until") === "for_each" && (
-            <>
-              <label>
-                {t.forms.itemsKey}
-                <input value={node.items_key ?? ""} onChange={(event) => onChange({ items_key: event.target.value })} />
-              </label>
-              <label>
-                {t.forms.itemKey}
-                <input value={node.item_key ?? ""} onChange={(event) => onChange({ item_key: event.target.value })} />
-              </label>
-            </>
-          )}
-          <label>
-            {t.forms.maxIterations}
-            <input
-              type="number"
-              min={1}
-              max={50}
-              value={node.max_iterations ?? 3}
-              onChange={(event) => onChange({ max_iterations: Number(event.target.value) })}
-            />
-          </label>
-          <label>
-            {t.forms.iterationKey}
-            <input value={node.iteration_key ?? ""} onChange={(event) => onChange({ iteration_key: event.target.value })} />
-          </label>
-          <label>
-            {t.forms.collectKey}
-            <input value={node.collect_key ?? ""} onChange={(event) => onChange({ collect_key: event.target.value })} />
-          </label>
-          <label>
-            {t.forms.summaryKey}
-            <input value={node.summary_key ?? ""} onChange={(event) => onChange({ summary_key: event.target.value })} />
-          </label>
-        </>
-      )}
-      {node.type === "human_gate" && (
-        <label>
-          {t.forms.approvalReason}
-          <textarea
-            value={node.approval_reason ?? ""}
-            onChange={(event) => onChange({ approval_reason: event.target.value })}
-            rows={3}
-          />
-        </label>
-      )}
-      <label>
-        {t.forms.outputKey}
-        <input value={node.output_key ?? ""} onChange={(event) => onChange({ output_key: event.target.value })} />
-      </label>
-    </div>
-  );
-}
-
-function EdgeInspector({
-  edge,
-  nodes,
-  onChange
-}: {
-  edge: EdgeSpec;
-  nodes: NodeSpec[];
-  onChange: (patch: Partial<EdgeSpec>) => void;
-}) {
-  return (
-    <div className="form-stack">
-      <label>
-        {t.forms.from}
-        <select value={edge.from} onChange={(event) => onChange({ from: event.target.value })}>
-          {nodes.map((node) => (
-            <option key={node.id} value={node.id}>
-              {node.id}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        {t.forms.to}
-        <select value={edge.to} onChange={(event) => onChange({ to: event.target.value })}>
-          {nodes.map((node) => (
-            <option key={node.id} value={node.id}>
-              {node.id}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        {t.forms.condition}
-        <input
-          placeholder="Optional, for example approval.approved == True"
-          value={edge.when ?? ""}
-          onChange={(event) => onChange({ when: event.target.value })}
-        />
-      </label>
-      <label>
-        {t.forms.priority}
-        <input
-          type="number"
-          value={edge.priority ?? 0}
-          onChange={(event) => onChange({ priority: Number(event.target.value) })}
-        />
-      </label>
-      <label>
-        {t.forms.maxTraversals}
-        <input
-          type="number"
-          min={1}
-          value={edge.max_traversals ?? ""}
-          onChange={(event) =>
-            onChange({ max_traversals: event.target.value ? Number(event.target.value) : null })
-          }
-        />
-      </label>
-    </div>
-  );
-}
-
-function AgentInspector({
-  agent,
-  onChange
-}: {
-  agent: AgentSpec;
-  onChange: (patch: Partial<AgentSpec>) => void;
-}) {
-  return (
-    <div className="form-stack agent-editor">
-      <label>
-        {t.forms.id}
-        <input value={agent.id} onChange={(event) => onChange({ id: event.target.value })} />
-      </label>
-      <label>
-        {t.forms.name}
-        <input value={agent.name ?? ""} onChange={(event) => onChange({ name: event.target.value })} />
-      </label>
-      <label>
-        {t.forms.role}
-        <input value={agent.role} onChange={(event) => onChange({ role: event.target.value })} />
-      </label>
-      <label>
-        {t.forms.goal}
-        <textarea value={agent.goal} onChange={(event) => onChange({ goal: event.target.value })} rows={3} />
-      </label>
-      <label>
-        {t.forms.instructions}
-        <textarea
-          value={agent.instructions}
-          onChange={(event) => onChange({ instructions: event.target.value })}
-          rows={5}
-        />
-      </label>
-      <label>
-        {t.forms.provider}
-        <input value={agent.provider ?? ""} onChange={(event) => onChange({ provider: event.target.value })} />
-      </label>
-      <label>
-        {t.forms.model}
-        <input value={agent.model ?? ""} onChange={(event) => onChange({ model: event.target.value })} />
-      </label>
-      <label>
-        {t.forms.tool}
-        <input value={agent.tools.join(", ")} onChange={(event) => onChange({ tools: csvToList(event.target.value) })} />
-      </label>
-      <label>
-        {t.forms.outputKey}
-        <input value={agent.output_key ?? ""} onChange={(event) => onChange({ output_key: event.target.value })} />
-      </label>
-      <div className="panel-subtitle">{t.forms.permissions}</div>
-      <label className="checkbox-row">
-        <input
-          type="checkbox"
-          checked={agent.permissions.read_files}
-          onChange={(event) => onChange({ permissions: { ...agent.permissions, read_files: event.target.checked } })}
-        />
-        {t.forms.readFiles}
-      </label>
-      <label className="checkbox-row">
-        <input
-          type="checkbox"
-          checked={agent.permissions.edit_files}
-          onChange={(event) => onChange({ permissions: { ...agent.permissions, edit_files: event.target.checked } })}
-        />
-        {t.forms.editFiles}
-      </label>
-      <label className="checkbox-row">
-        <input
-          type="checkbox"
-          checked={agent.permissions.run_commands}
-          onChange={(event) => onChange({ permissions: { ...agent.permissions, run_commands: event.target.checked } })}
-        />
-        {t.forms.runCommands}
-      </label>
-      <label className="checkbox-row">
-        <input
-          type="checkbox"
-          checked={agent.permissions.use_network}
-          onChange={(event) => onChange({ permissions: { ...agent.permissions, use_network: event.target.checked } })}
-        />
-        {t.forms.useNetwork}
-      </label>
-      <label className="checkbox-row">
-        <input
-          type="checkbox"
-          checked={agent.permissions.requires_approval}
-          onChange={(event) =>
-            onChange({ permissions: { ...agent.permissions, requires_approval: event.target.checked } })
-          }
-        />
-        {t.forms.requiresApproval}
-      </label>
-      <div className="panel-subtitle">{t.forms.contextPolicy}</div>
-      <label>
-        {t.forms.inputKeys}
-        <input
-          value={agent.context.input_keys.join(", ")}
-          onChange={(event) => onChange({ context: { ...agent.context, input_keys: csvToList(event.target.value) } })}
-        />
-      </label>
-      <label>
-        {t.forms.summaryKeys}
-        <input
-          value={agent.context.summary_keys.join(", ")}
-          onChange={(event) => onChange({ context: { ...agent.context, summary_keys: csvToList(event.target.value) } })}
-        />
-      </label>
-    </div>
-  );
-}

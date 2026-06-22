@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 
-import { getAgentRoleCards, getCapabilities, getHealth, getLiveRuns, getRuns } from "../api";
+import { getAgentRoleCards, getCapabilities, getHealth, getRuns } from "../api";
 import type { CapabilitySpec, HealthStatus, RoleCardSpec, RunSummaryItem } from "../types";
 
 export function useRuntimeInfo(onStatus: (status: string) => void) {
@@ -11,10 +11,10 @@ export function useRuntimeInfo(onStatus: (status: string) => void) {
   const [roleCards, setRoleCards] = useState<RoleCardSpec[]>([]);
 
   const refreshRuntimeInfo = useCallback(() => {
-    Promise.all([getRuns(), getLiveRuns(), getHealth(), getCapabilities(), getAgentRoleCards()])
-      .then(([runs, live, nextHealth, nextCapabilities, nextRoleCards]) => {
+    Promise.all([getRuns(), getHealth(), getCapabilities(), getAgentRoleCards()])
+      .then(([runs, nextHealth, nextCapabilities, nextRoleCards]) => {
         setRunHistory(runs);
-        setLiveRuns(live);
+        setLiveRuns([]);
         setHealth(nextHealth);
         setCapabilities(nextCapabilities);
         setRoleCards(nextRoleCards);

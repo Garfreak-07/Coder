@@ -4,11 +4,15 @@ import inspect
 import re
 import tempfile
 import unittest
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 import coder_workbench.server.app as server_app
 from coder_workbench.server.app import create_app
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class LegacyDeletionGateTests(unittest.TestCase):
@@ -72,6 +76,42 @@ class LegacyDeletionGateTests(unittest.TestCase):
         self.assertNotIn("workflows", index_response.json())
         self.assertIn(save_response.status_code, {404, 405, 410})
         self.assertIn(get_response.status_code, {404, 405, 410})
+
+    def test_frontend_does_not_expose_legacy_runtime_editor_or_api_wrappers(self) -> None:
+        api_source = (ROOT / "frontend" / "src" / "api.ts").read_text(encoding="utf-8")
+        app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+
+        for token in [
+            "compileLegacyRuntimePreview",
+            "getWorkflow",
+            "saveWorkflow",
+            "validateWorkflow",
+            "startLiveRun",
+            "approveLiveRun",
+            "retryCurrentNode",
+            "getLiveRun",
+            "/api/v2/live-runs",
+            "/api/v2/workflows/validate",
+            "/api/v2/library/workflows",
+        ]:
+            with self.subTest(token=token):
+                self.assertNotIn(token, api_source)
+
+        for token in [
+            "runtimeJsonText",
+            "showAdvancedRuntime",
+            "runtimePreviewDirty",
+            "compileLegacyRuntimePreview",
+            "PreflightModal",
+            "function NodeInspector",
+            "function EdgeInspector",
+            "function AgentInspector",
+            "Legacy Runtime Inspector",
+            "Legacy Runtime Agents",
+            "/api/v2/live-runs",
+        ]:
+            with self.subTest(token=token):
+                self.assertNotIn(token, app_source)
 
 
 if __name__ == "__main__":

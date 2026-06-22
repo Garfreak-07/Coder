@@ -12,7 +12,6 @@ import type {
   InstalledSkillsPayload,
   LibraryIndex,
   LiveRunDetail,
-  PreflightResult,
   ProviderSettings,
   ProviderStatus,
   PluginManifest,
@@ -22,8 +21,7 @@ import type {
   RunSummaryItem,
   SkillUpdateInfo,
   StoredRunDetail,
-  ToolResultDetail,
-  WorkflowSpec
+  ToolResultDetail
 } from "./types";
 
 const jsonHeaders = {
@@ -196,11 +194,6 @@ export async function getRuns(): Promise<RunSummaryItem[]> {
   return payload.runs;
 }
 
-export async function getLiveRuns(): Promise<RunSummaryItem[]> {
-  const payload = await requestJson<{ runs: RunSummaryItem[] }>("/api/v2/live-runs");
-  return payload.runs;
-}
-
 export function getRun(runId: string, includeEvents = true): Promise<StoredRunDetail> {
   return requestJson<StoredRunDetail>(`/api/v2/runs/${runId}?include_events=${includeEvents ? "true" : "false"}`);
 }
@@ -225,36 +218,14 @@ export function getBlob(runId: string, blobId: string): Promise<BlobDetail> {
   return requestJson<BlobDetail>(`/api/v2/runs/${runId}/blobs/${encodeURIComponent(blobId)}`);
 }
 
-export function getLiveRun(runId: string): Promise<LiveRunDetail> {
-  return requestJson<LiveRunDetail>(`/api/v2/live-runs/${runId}`);
-}
-
 export function getLiveAgentRun(runId: string): Promise<LiveRunDetail> {
   return requestJson<LiveRunDetail>(`/api/v2/live-agent-runs/${runId}`);
 }
 
 export async function getDefaultAgentWorkflow(): Promise<{
   agent_workflow: AgentWorkflowSpec;
-  runtime_boundary: "legacy_runtime_preview";
-  runtime_type: "legacy_preview";
-  deprecated: boolean;
-  workflow: WorkflowSpec;
 }> {
   return requestJson("/api/v2/agent-workflows/default");
-}
-
-export async function compileLegacyRuntimePreview(agentWorkflow: AgentWorkflowSpec): Promise<{
-  agent_workflow: AgentWorkflowSpec;
-  runtime_boundary: "legacy_runtime_preview";
-  runtime_type: "legacy_preview";
-  deprecated: boolean;
-  workflow: WorkflowSpec;
-}> {
-  return requestJson("/api/v2/agent-workflows/compile", {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify(agentWorkflow)
-  });
 }
 
 export function validateAgentWorkflow(agentWorkflow: AgentWorkflowSpec): Promise<AgentWorkflowValidationResult> {
@@ -288,11 +259,6 @@ export async function saveAgentWorkflow(agentWorkflow: AgentWorkflowSpec): Promi
   return payload.agent_workflow;
 }
 
-export async function getWorkflow(workflowId: string): Promise<WorkflowSpec> {
-  const payload = await requestJson<{ workflow: WorkflowSpec }>(`/api/v2/library/workflows/${workflowId}`);
-  return payload.workflow;
-}
-
 export async function getAgent(agentId: string): Promise<AgentSpec> {
   const payload = await requestJson<{ agent: AgentSpec }>(`/api/v2/library/agents/${agentId}`);
   return payload.agent;
@@ -307,37 +273,6 @@ export async function saveAgent(agent: AgentSpec): Promise<AgentSpec> {
   return payload.agent;
 }
 
-export async function saveWorkflow(workflow: WorkflowSpec): Promise<WorkflowSpec> {
-  const payload = await requestJson<{ workflow: WorkflowSpec }>("/api/v2/library/workflows", {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify(workflow)
-  });
-  return payload.workflow;
-}
-
-export function validateWorkflow(workflow: WorkflowSpec): Promise<PreflightResult> {
-  return requestJson<PreflightResult>("/api/v2/workflows/validate", {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify(workflow)
-  });
-}
-
-export async function startLiveRun(input: {
-  repo: string;
-  request: string;
-  workflow: WorkflowSpec;
-  approved: boolean;
-  scopes: string[];
-}): Promise<{ run_id: string; status: string; events_url: string; result_url: string }> {
-  return requestJson("/api/v2/live-runs", {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify(input)
-  });
-}
-
 export async function startLiveAgentRun(input: {
   repo: string;
   request: string;
@@ -350,24 +285,6 @@ export async function startLiveAgentRun(input: {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify(input)
-  });
-}
-
-export async function approveLiveRun(
-  runId: string,
-  input: { approved?: boolean; reason?: string } = {}
-): Promise<{ run_id: string; status: string; events_url: string; result_url: string }> {
-  return requestJson(`/api/v2/live-runs/${runId}/approve`, {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify({ approved: input.approved ?? true, reason: input.reason ?? null })
-  });
-}
-
-export async function retryCurrentNode(runId: string): Promise<{ run_id: string; status: string; events_url: string; result_url: string }> {
-  return requestJson(`/api/v2/live-runs/${runId}/retry-current-node`, {
-    method: "POST",
-    headers: jsonHeaders
   });
 }
 

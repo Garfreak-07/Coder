@@ -270,7 +270,6 @@ export interface AgentSummary {
 export interface LibraryIndex {
   agents: AgentSummary[];
   agent_workflows: AgentWorkflowSummary[];
-  workflows: WorkflowSummary[];
 }
 
 export interface RunEvent {
