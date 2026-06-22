@@ -9,13 +9,12 @@ from coder_workbench.core import (
     AgentSpec,
     AgentWorkflowSpec,
     AgentWorkflowValidationError,
-    WorkflowSpec,
     assert_valid_agent_workflow,
     validate_agent_workflow_payload,
 )
 
 
-LibraryKind = Literal["agents", "agent_workflows", "workflows"]
+LibraryKind = Literal["agents", "agent_workflows"]
 
 
 class LibraryStore:
@@ -24,13 +23,9 @@ class LibraryStore:
         self._lock = Lock()
         (self.root / "agents").mkdir(parents=True, exist_ok=True)
         (self.root / "agent_workflows").mkdir(parents=True, exist_ok=True)
-        (self.root / "workflows").mkdir(parents=True, exist_ok=True)
 
     def list_agents(self) -> list[dict[str, Any]]:
         return self._list("agents")
-
-    def list_workflows(self) -> list[dict[str, Any]]:
-        return self._list("workflows")
 
     def list_agent_workflows(self) -> list[dict[str, Any]]:
         return self._list("agent_workflows")
@@ -39,12 +34,6 @@ class LibraryStore:
         agent = AgentSpec.model_validate(data)
         payload = agent.model_dump(mode="json")
         self._write("agents", agent.id, payload)
-        return payload
-
-    def save_workflow(self, data: dict[str, Any]) -> dict[str, Any]:
-        workflow = WorkflowSpec.model_validate(data)
-        payload = workflow.model_dump(mode="json", by_alias=True)
-        self._write("workflows", workflow.id, payload)
         return payload
 
     def save_agent_workflow(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -59,9 +48,6 @@ class LibraryStore:
 
     def get_agent(self, agent_id: str) -> dict[str, Any]:
         return self._read("agents", agent_id)
-
-    def get_workflow(self, workflow_id: str) -> dict[str, Any]:
-        return self._read("workflows", workflow_id)
 
     def get_agent_workflow(self, workflow_id: str) -> dict[str, Any]:
         return self._read("agent_workflows", workflow_id)
@@ -101,22 +87,12 @@ def _summary(kind: LibraryKind, data: dict[str, Any]) -> dict[str, Any]:
             "model": data.get("model"),
             "tools": data.get("tools", []),
         }
-    if kind == "agent_workflows":
-        return {
-            "id": data.get("id"),
-            "version": data.get("version"),
-            "name": data.get("name"),
-            "description": data.get("description", ""),
-            "agents": len(data.get("agents", [])),
-            "edges": len(data.get("edges", [])),
-            "max_auto_rounds": data.get("loop_policy", {}).get("max_auto_rounds"),
-        }
     return {
         "id": data.get("id"),
         "version": data.get("version"),
         "name": data.get("name"),
         "description": data.get("description", ""),
-        "nodes": len(data.get("nodes", [])),
-        "edges": len(data.get("edges", [])),
         "agents": len(data.get("agents", [])),
+        "edges": len(data.get("edges", [])),
+        "max_auto_rounds": data.get("loop_policy", {}).get("max_auto_rounds"),
     }

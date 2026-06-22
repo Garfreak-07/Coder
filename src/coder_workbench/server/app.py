@@ -370,7 +370,6 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
         return {
             "agents": library.list_agents(),
             "agent_workflows": library.list_agent_workflows(),
-            "workflows": library.list_workflows(),
         }
 
     @app.post("/api/v2/library/agents")
@@ -456,17 +455,6 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
                 for profile in compile_runtime_profiles(spec)
             ]
         }
-
-    @app.post("/api/v2/library/workflows")
-    def save_workflow(workflow: dict[str, Any]) -> dict[str, Any]:
-        return {"workflow": library.save_workflow(workflow)}
-
-    @app.get("/api/v2/library/workflows/{workflow_id}")
-    def get_workflow(workflow_id: str) -> dict[str, Any]:
-        try:
-            return {"workflow": library.get_workflow(workflow_id)}
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="workflow not found") from exc
 
     @app.get("/api/v2/runs")
     def list_runs() -> dict[str, Any]:

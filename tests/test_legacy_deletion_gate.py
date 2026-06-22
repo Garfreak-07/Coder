@@ -60,6 +60,19 @@ class LegacyDeletionGateTests(unittest.TestCase):
             with self.subTest(endpoint=name):
                 self.assertEqual(response.status_code, 404)
 
+    def test_legacy_workflow_library_paths_are_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            client = TestClient(create_app(store_root=tmp, frontend_dist=tmp))
+
+            index_response = client.get("/api/v2/library")
+            save_response = client.post("/api/v2/library/workflows", json={})
+            get_response = client.get("/api/v2/library/workflows/example")
+
+        self.assertEqual(index_response.status_code, 200)
+        self.assertNotIn("workflows", index_response.json())
+        self.assertIn(save_response.status_code, {404, 405, 410})
+        self.assertIn(get_response.status_code, {404, 405, 410})
+
 
 if __name__ == "__main__":
     unittest.main()
