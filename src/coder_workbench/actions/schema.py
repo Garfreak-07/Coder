@@ -39,3 +39,26 @@ class ActionResult(BaseModel):
     token_used: int = Field(default=0, ge=0)
     error_code: str | None = None
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuntimeActionRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_type: Literal["runtime_action"] = "runtime_action"
+    effect_type: Literal["runtime_action"] = "runtime_action"
+    action_type: str
+    status: Literal["ok", "blocked", "failed"]
+    work_item_id: str | None = None
+    artifact_ref: str
+    output_ref: str
+    tool_result_ref: str
+    requires_planner_replan: bool = False
+    reason: str = ""
+    error_code: str | None = None
+    operation_id: str | None = None
+    approval_key: str | None = None
+    policy: dict[str, Any] = Field(default_factory=dict)
+    action_spec: dict[str, Any]
+    requested_action: dict[str, Any] = Field(default_factory=dict)
+    replay_of: str | None = None
+    action: dict[str, Any] = Field(default_factory=dict)

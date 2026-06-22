@@ -15,7 +15,7 @@ from coder_workbench.agent_graph.artifacts import AgentGraphArtifactRecorder, gr
 from coder_workbench.agent_graph.agent_run import AgentRun
 from coder_workbench.agent_graph.cache import GraphRunCache
 from coder_workbench.agent_graph.context import upstream_refs_for_item
-from coder_workbench.agent_graph.effects import apply_hidden_effects
+from coder_workbench.agent_graph.effects import apply_hidden_effects, replay_approved_runtime_actions
 from coder_workbench.agent_graph.evaluation import (
     build_agent_evaluation_reports,
     build_skill_evaluation_reports,
@@ -239,6 +239,23 @@ class AgentGraphRunner:
                 if previous_bundle is None:
                     raise ValueError("resume_mode=planner_response requires planner_input_bundle")
                 previous_round_summary = self._round_summary_from_data(data.get("round_summary"))
+                replay_cache = GraphRunCache(round=previous_bundle.round)
+                replay_effects = replay_approved_runtime_actions(
+                    cache=replay_cache,
+                    repo_root=repo_root,
+                    scopes=_scopes_from_data(data),
+                    data=data,
+                    action_gateway=self.action_gateway,
+                )
+                if replay_effects:
+                    self._emit_hidden_effect_outputs(replay_cache, replay_effects, emit)
+                    self._record_hidden_effect_artifacts(replay_cache, recorder, replay_effects)
+                    previous_bundle = previous_bundle.model_copy(
+                        update={"effects": [*previous_bundle.effects, *replay_effects]}
+                    )
+                    data["planner_input_bundle"] = previous_bundle.model_dump(mode="json", exclude_none=True)
+                    _merge_replay_cache_payload(data, replay_effects, replay_cache.hidden_effect_outputs)
+                    data.setdefault("runtime_action_replays", []).extend(replay_effects)
                 resume_decision = self.agent_run.run_planner_decision(
                     bundle=previous_bundle,
                     planner_human_response=planner_human_response,
@@ -1413,11 +1430,35 @@ def _hidden_effect_artifact_payload(effect: dict[str, Any], output: dict[str, An
             "output_ref": effect.get("output_ref"),
             "returncode": effect.get("returncode"),
         }
+    if effect.get("effect_type") == "runtime_action":
+        return {
+            "artifact_type": "runtime_action",
+            "effect": effect,
+            "status": effect.get("status"),
+            "summary": effect.get("reason") or output.get("summary") or "",
+            "output": output,
+        }
     return {
         "artifact_type": "hidden_effect",
         "effect": effect,
         "output": output,
     }
+
+
+def _merge_replay_cache_payload(
+    data: dict[str, Any],
+    replay_effects: list[dict[str, Any]],
+    replay_outputs: dict[str, dict[str, Any]],
+) -> None:
+    graph_run_cache = data.get("graph_run_cache")
+    if not isinstance(graph_run_cache, dict):
+        return
+    hidden_effects = graph_run_cache.setdefault("hidden_effects", [])
+    if isinstance(hidden_effects, list):
+        hidden_effects.extend(replay_effects)
+    hidden_outputs = graph_run_cache.setdefault("hidden_effect_outputs", {})
+    if isinstance(hidden_outputs, dict):
+        hidden_outputs.update(replay_outputs)
 
 
 class _LegacyAgentRunAdapter:

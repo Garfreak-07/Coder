@@ -202,7 +202,131 @@ class AgentGraphEffectsTests(unittest.TestCase):
         self.assertEqual(effect["operation_id"], "project_index")
         self.assertEqual(effect["tool_result_ref"], output_ref)
         self.assertIn(output_ref, result.data["graph_run_cache"]["hidden_effect_outputs"])
-        self.assertEqual(result.artifacts[output_ref]["artifact_type"], "hidden_effect")
+        self.assertEqual(result.artifacts[output_ref]["artifact_type"], "runtime_action")
+
+    def test_unknown_requested_runtime_action_records_failed_effect(self) -> None:
+        cache = GraphRunCache(round=1)
+        cache.record_execution(
+            ExecutionRecord(
+                work_item_id="executor-work",
+                merge_index=1,
+                agent_id="executor",
+                status="completed",
+                execution_summary="Requested unsupported runtime action.",
+                execution_result_ref="execution_result_executor-work",
+                artifact_payload={
+                    "artifact_type": "execution_result",
+                    "status": "completed",
+                    "summary": "Requested unsupported runtime action.",
+                    "requested_actions": [
+                        {"action_type": "open_browser", "operation_id": "browser.open"}
+                    ],
+                },
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            records = apply_hidden_effects(
+                agent_workflow=default_planner_led_agent_workflow(),
+                cache=cache,
+                repo_root=tmp,
+                scopes=[],
+                data={"run_id": "run"},
+            )
+
+        effect = next(record for record in records if record["effect_type"] == "runtime_action")
+        self.assertEqual(effect["artifact_type"], "runtime_action")
+        self.assertEqual(effect["status"], "failed")
+        self.assertEqual(effect["error_code"], "unknown_action_type")
+        self.assertEqual(effect["work_item_id"], "executor-work")
+        self.assertEqual(effect["action_spec"]["action_type"], "open_browser")
+        self.assertTrue(effect["requires_planner_replan"])
+
+    def test_blocked_plugin_runtime_action_records_replay_metadata(self) -> None:
+        cache = GraphRunCache(round=1)
+        cache.record_execution(
+            ExecutionRecord(
+                work_item_id="executor-work",
+                merge_index=1,
+                agent_id="executor",
+                status="completed",
+                execution_summary="Needs project index after approval.",
+                execution_result_ref="execution_result_executor-work",
+                artifact_payload={
+                    "artifact_type": "execution_result",
+                    "status": "completed",
+                    "summary": "Needs project index after approval.",
+                    "requested_actions": [
+                        {
+                            "action_type": "call_plugin",
+                            "operation_id": "project_index",
+                            "risk_level": "high",
+                            "args": {"max_files": 5},
+                        }
+                    ],
+                },
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "README.md").write_text("sample\n", encoding="utf-8")
+            records = apply_hidden_effects(
+                agent_workflow=default_planner_led_agent_workflow(),
+                cache=cache,
+                repo_root=tmp,
+                scopes=[],
+                data={"run_id": "run"},
+            )
+
+        effect = next(record for record in records if record["effect_type"] == "runtime_action")
+        self.assertEqual(effect["status"], "blocked")
+        self.assertEqual(effect["error_code"], "plugin_requires_approval")
+        self.assertEqual(effect["approval_key"], "plugin:project_index:high")
+        self.assertEqual(effect["policy"]["operation_id"], "project_index")
+        self.assertEqual(effect["action_spec"]["action_type"], "call_plugin")
+        self.assertEqual(effect["action_spec"]["input"]["operation_id"], "project_index")
+        self.assertEqual(effect["work_item_id"], "executor-work")
+
+    def test_approved_runtime_action_replay_does_not_rerun_worker(self) -> None:
+        executor = RuntimeActionReplayExecutor()
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "README.md").write_text("sample\n", encoding="utf-8")
+            blocked = AgentGraphRunner(
+                default_planner_led_agent_workflow(),
+                executor=executor,
+            ).run("Replay approved action.", tmp)
+            blocked_effect = blocked.data["planner_input_bundle"]["effects"][0]
+            checkpoint = dict(blocked.resume_checkpoint["data"])
+            checkpoint["planner_human_response"] = {
+                "response": "Approve project index.",
+                "data": {
+                    "approved_runtime_actions": [
+                        {
+                            "approval_key": blocked_effect["approval_key"],
+                            "action_spec": blocked_effect["action_spec"],
+                            "replay_of": blocked_effect["artifact_ref"],
+                        }
+                    ]
+                },
+            }
+            checkpoint["approved_runtime_actions"] = checkpoint["planner_human_response"]["data"]["approved_runtime_actions"]
+            checkpoint.pop("planner_decision", None)
+            checkpoint["resume_mode"] = "planner_response"
+            resumed = AgentGraphRunner(
+                default_planner_led_agent_workflow(),
+                executor=executor,
+            ).run("Replay approved action.", tmp, initial_data=checkpoint, prior_events=blocked.events)
+
+        effects = resumed.data["planner_input_bundle"]["effects"]
+        replay = next(effect for effect in effects if effect.get("replay_of") == blocked_effect["artifact_ref"])
+
+        self.assertEqual(blocked.status, "blocked")
+        self.assertEqual(resumed.status, "completed")
+        self.assertEqual(executor.execution_calls, 1)
+        self.assertEqual(replay["status"], "ok")
+        self.assertEqual(replay["action_type"], "call_plugin")
+        self.assertEqual(replay["action_spec"]["input"]["operation_id"], "project_index")
+        self.assertIn(replay["output_ref"], resumed.data["graph_run_cache"]["hidden_effect_outputs"])
 
 
 class EffectSourceExecutor:
@@ -307,6 +431,68 @@ class EffectSourceExecutor:
             "task_done": True,
             "next_action": "finish",
             "reason": "Effect source test completed.",
+        }
+
+
+class RuntimeActionReplayExecutor(EffectSourceExecutor):
+    def __init__(self) -> None:
+        super().__init__(
+            requested_actions=[
+                {
+                    "action_type": "call_plugin",
+                    "operation_id": "project_index",
+                    "risk_level": "high",
+                    "args": {"max_files": 5},
+                }
+            ]
+        )
+        self.execution_calls = 0
+
+    def create_execution_result(
+        self,
+        *,
+        item: WorkItem,
+        envelope: AgentTaskEnvelope,
+        emit=None,
+    ) -> ExecutionRecord:
+        self.execution_calls += 1
+        return super().create_execution_result(item=item, envelope=envelope, emit=emit)
+
+    def create_planner_decision(
+        self,
+        *,
+        bundle: PlannerInputBundle,
+        planner_human_response: dict[str, Any] | None = None,
+        emit=None,
+    ) -> dict[str, Any]:
+        replay_ok = any(
+            effect.get("effect_type") == "runtime_action"
+            and effect.get("status") == "ok"
+            and effect.get("replay_of")
+            for effect in bundle.effects
+        )
+        blocked_runtime_action = any(
+            effect.get("effect_type") == "runtime_action"
+            and effect.get("status") == "blocked"
+            for effect in bundle.effects
+        )
+        if blocked_runtime_action and not replay_ok:
+            return {
+                "artifact_type": "planner_decision",
+                "round": bundle.round,
+                "task_done": False,
+                "next_action": "ask_human",
+                "risk_level": "medium",
+                "requires_human_confirmation": True,
+                "reason": "Runtime action requires user approval.",
+                "human_message": "Approve project_index runtime action?",
+            }
+        return {
+            "artifact_type": "planner_decision",
+            "round": bundle.round,
+            "task_done": True,
+            "next_action": "finish",
+            "reason": "Approved runtime action replay completed.",
         }
 
 

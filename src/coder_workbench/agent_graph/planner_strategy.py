@@ -134,20 +134,32 @@ def _local_decision(
     has_failed_tests = any(item.execution_status == "failed" or item.test_status == "fail" for item in bundle.items)
     has_blocked_work = any(item.execution_status == "blocked" or item.test_status == "blocked" for item in bundle.items)
     has_debug_findings = any(effect.get("effect_type") == "debug_finding" for effect in bundle.effects)
+    has_failed_runtime_actions = any(
+        effect.get("effect_type") == "runtime_action" and effect.get("status") == "failed"
+        for effect in bundle.effects
+    )
+    has_blocked_runtime_actions = any(
+        effect.get("effect_type") == "runtime_action" and effect.get("status") == "blocked"
+        for effect in bundle.effects
+    )
     can_continue_from_interrupts = has_interrupts and all(
         interrupt.continue_without_human_possible is True
         for interrupt in bundle.interrupts
     )
     next_action = (
         "continue"
-        if can_continue_from_interrupts or has_failed_tests or has_debug_findings
+        if can_continue_from_interrupts or has_failed_tests or has_debug_findings or has_failed_runtime_actions
         else "ask_human"
-        if has_interrupts or has_blocked_work
+        if has_interrupts or has_blocked_work or has_blocked_runtime_actions
         else "finish"
     )
     reason = (
         "DebugFinding is inside the current RunContract; local PlannerStrategy will replan."
         if has_debug_findings
+        else "Runtime action failed; local PlannerStrategy will replan inside the current RunContract."
+        if has_failed_runtime_actions
+        else "Runtime action requires approval before it can continue."
+        if has_blocked_runtime_actions
         else "Tests failed; local PlannerStrategy will replan inside the existing RunContract."
         if has_failed_tests
         else "Worker requested Planner intervention."
@@ -165,12 +177,14 @@ def _local_decision(
         "round": bundle.round,
         "task_done": next_action == "finish",
         "next_action": next_action,
-        "risk_level": "medium" if has_interrupts or has_debug_findings else "low",
+        "risk_level": "medium" if has_interrupts or has_debug_findings or has_blocked_runtime_actions or has_failed_runtime_actions else "low",
         "requires_human_confirmation": next_action == "ask_human",
         "reason": reason,
         "next_round_goal": (
             "Fix debug finding evidence and rerun checks."
             if has_debug_findings
+            else "Replan around failed runtime action evidence."
+            if has_failed_runtime_actions
             else "Fix failing test evidence and rerun checks."
             if has_failed_tests
             else "Resolve the blocked work item."
