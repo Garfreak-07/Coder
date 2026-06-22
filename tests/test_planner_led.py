@@ -3,7 +3,6 @@ from __future__ import annotations
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
 
 from coder_workbench.core import (
     AgentWorkflowSpec,
@@ -11,14 +10,13 @@ from coder_workbench.core import (
     default_planner_led_agent_workflow,
     validate_agent_workflow_payload,
 )
-from coder_workbench.core.legacy_compile import compile_agent_workflow, compile_agent_workflow_legacy_preview
 from coder_workbench.core.artifacts import (
     ArtifactValidationError,
     artifact_summary,
     supported_artifact_types,
     validate_artifact,
 )
-from coder_workbench.runtime.runner import WorkflowRunner
+import coder_workbench.server.app as server_app
 from coder_workbench.server.app import create_app
 from fastapi.testclient import TestClient
 
@@ -226,30 +224,7 @@ class PlannerLedArtifactTests(unittest.TestCase):
         self.assertEqual(artifact["remaining_work"], ["Fix frontend validation rendering."])
 
 
-class AgentWorkflowCompilerTests(unittest.TestCase):
-    def test_default_agent_workflow_compiles_to_hidden_runtime_graph(self) -> None:
-        agent_workflow = default_planner_led_agent_workflow()
-        workflow = compile_agent_workflow(agent_workflow)
-
-        self.assertEqual(agent_workflow.name, workflow.name)
-        self.assertEqual(agent_workflow.version, "0.4")
-        self.assertEqual(agent_workflow.primary_planner_id, "planner")
-        self.assertEqual([agent.role for agent in agent_workflow.agents], ["planner", "executor", "tester"])
-        self.assertIsNone(agent_workflow.edges[0].handoff)
-        self.assertEqual(workflow.max_tool_calls, 0)
-        self.assertIn("planner_loop", {node.id for node in workflow.nodes})
-        self.assertEqual(
-            [agent.artifact_type for agent in workflow.agents],
-            [
-                "run_contract",
-                "planner_order",
-                "execution_result",
-                "test_result",
-                "planner_decision",
-                "round_summary",
-            ],
-        )
-
+class AgentWorkflowContractTests(unittest.TestCase):
     def test_capability_registry_contains_initial_user_choices(self) -> None:
         registry = capability_registry()
 
@@ -279,9 +254,6 @@ class AgentWorkflowCompilerTests(unittest.TestCase):
 
         validation = validate_agent_workflow_payload(payload)
         self.assertEqual(validation.status, "pass")
-
-        workflow = compile_agent_workflow(AgentWorkflowSpec.model_validate(payload))
-        self.assertIn("agent_reviewer", {node.id for node in workflow.nodes})
 
     def test_validation_reports_missing_primary_planner(self) -> None:
         payload = default_planner_led_agent_workflow().model_dump(mode="json", by_alias=True)
@@ -340,34 +312,9 @@ class AgentWorkflowCompilerTests(unittest.TestCase):
         self.assertEqual(validation.status, "error")
         self.assertIn("unsatisfied_capability_input", {issue.code for issue in validation.issues})
 
-    def test_default_planner_led_workflow_runs_in_mock_mode(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workflow = compile_agent_workflow(default_planner_led_agent_workflow())
-
-            result = WorkflowRunner(workflow).run("Build the smallest Planner-led loop.", tmp)
-
-            self.assertEqual(result.status, "completed")
-            produced_types = [
-                event.payload["artifact_type"]
-                for event in result.events
-                if event.type == "artifact.produced"
-            ]
-            self.assertEqual(
-                produced_types,
-                [
-                    "run_contract",
-                    "planner_order",
-                    "execution_result",
-                    "test_result",
-                    "planner_decision",
-                    "round_summary",
-                ],
-            )
-            self.assertEqual(result.data["planner_decision"]["next_action"], "finish")
-
 
 class AgentWorkflowApiTests(unittest.TestCase):
-    def test_default_agent_workflow_api_returns_compiled_runtime(self) -> None:
+    def test_default_agent_workflow_api_returns_agent_contract_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             client = TestClient(create_app(store_root=tmp, frontend_dist=tmp))
 
@@ -376,36 +323,20 @@ class AgentWorkflowApiTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             payload = response.json()
             self.assertEqual(payload["agent_workflow"]["id"], "default-planner-led")
-            self.assertEqual(payload["runtime_boundary"], "legacy_runtime_preview")
-            self.assertEqual(payload["runtime_type"], "legacy_preview")
-            self.assertTrue(payload["deprecated"])
-            self.assertEqual(payload["workflow"]["max_tool_calls"], 0)
-            self.assertIn("planner_loop", {node["id"] for node in payload["workflow"]["nodes"]})
+            self.assertNotIn("workflow", payload)
+            self.assertNotIn("runtime_boundary", payload)
+            self.assertNotIn("runtime_type", payload)
+            self.assertNotIn("deprecated", payload)
 
-    def test_agent_workflow_compile_api_accepts_agent_contract(self) -> None:
+    def test_agent_workflow_compile_api_is_quarantined(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             client = TestClient(create_app(store_root=tmp, frontend_dist=tmp))
             agent_workflow = default_planner_led_agent_workflow().model_dump(mode="json", by_alias=True)
 
             response = client.post("/api/v2/agent-workflows/compile", json=agent_workflow)
 
-            self.assertEqual(response.status_code, 200)
-            payload = response.json()
-            self.assertEqual(payload["runtime_boundary"], "legacy_runtime_preview")
-            self.assertEqual(payload["runtime_type"], "legacy_preview")
-            self.assertTrue(payload["deprecated"])
-            self.assertEqual(payload["workflow"]["id"], "default-planner-led-runtime")
-            self.assertEqual(
-                [agent["artifact_type"] for agent in payload["workflow"]["agents"]],
-                [
-                    "run_contract",
-                    "planner_order",
-                    "execution_result",
-                    "test_result",
-                    "planner_decision",
-                    "round_summary",
-                ],
-            )
+            self.assertEqual(response.status_code, 410)
+            self.assertTrue(response.json()["detail"]["removed"])
 
     def test_agent_workflow_library_saves_agent_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -454,17 +385,17 @@ class AgentWorkflowApiTests(unittest.TestCase):
             client = TestClient(create_app(store_root=tmp, frontend_dist=tmp))
             agent_workflow = default_planner_led_agent_workflow().model_dump(mode="json", by_alias=True)
 
-            with patch("coder_workbench.server.app.compile_agent_workflow_legacy_preview", side_effect=AssertionError("legacy compile called")):
-                response = client.post(
-                    "/api/v2/live-agent-runs",
-                    json={
-                        "repo": tmp,
-                        "request": "Run the default workflow.",
-                        "agent_workflow": agent_workflow,
-                        "approved": True,
-                        "scopes": [],
-                    },
-                )
+            self.assertFalse(hasattr(server_app, "compile_agent_workflow_legacy_preview"))
+            response = client.post(
+                "/api/v2/live-agent-runs",
+                json={
+                    "repo": tmp,
+                    "request": "Run the default workflow.",
+                    "agent_workflow": agent_workflow,
+                    "approved": True,
+                    "scopes": [],
+                },
+            )
 
             self.assertEqual(response.status_code, 200)
             run_id = response.json()["run_id"]

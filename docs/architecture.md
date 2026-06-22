@@ -99,9 +99,11 @@ explicit metadata, result, event, artifact, blob, ledger, context, tool-result,
 live-run, extension, and cache write path. `RunStore.save()` orchestrates these
 stores instead of owning primary object file writes directly.
 
-Legacy `WorkflowSpec` endpoints remain compatibility-only. Preview compilers
-return `runtime_type=legacy_preview`, and `/api/v2/live-runs` is deprecated in
-favor of `/api/v2/live-agent-runs` for product AgentGraph execution. Live
-AgentGraph creation returns `live-agent-runs` event and result URLs. Legacy
+Legacy `WorkflowSpec` code remains compatibility-only and is not exposed by the
+product AgentWorkflow API. `/api/v2/agent-workflows/default` returns only the
+AgentWorkflow contract, and `/api/v2/agent-workflows/compile` returns
+`410 Gone`. `/api/v2/live-runs` is deprecated in favor of
+`/api/v2/live-agent-runs` for product AgentGraph execution. Live AgentGraph
+creation returns `live-agent-runs` event and result URLs. Legacy
 `/api/v2/live-runs/{run_id}` and `/events` return `410 Gone` for AgentGraph run
 ids with migration URLs instead of returning AgentGraph payloads.

@@ -7,7 +7,8 @@ removed only after product references are gone and tests protect the boundary.
 
 1. Add architecture boundary tests.
 2. Stop new product calls to legacy runtime paths.
-3. Keep `WorkflowSpec` / `WorkflowRunner` only for compatibility preview.
+3. Keep `WorkflowSpec` / `WorkflowRunner` only for compatibility tests and old
+   saved workflow support.
 4. Migrate product UI away from runtime JSON editing.
 5. Migrate patch/check/repair/context code behind `ActionGateway`.
 6. Move Planner/Tester/FinalReview/Synthesizer execution behind
@@ -17,9 +18,9 @@ removed only after product references are gone and tests protect the boundary.
 
 ## Current v0.9.7 Boundary
 
-`compile_agent_workflow_legacy_preview()` is the explicit compiler for advanced
-preview and migration/debug only. `compile_agent_workflow()` remains a
-compatibility alias until callers have moved.
+`compile_agent_workflow_legacy_preview()` and `compile_agent_workflow()` remain
+legacy compatibility helpers, but they are no longer exposed through the product
+server API.
 
 Product live Agent runs use:
 
@@ -45,13 +46,17 @@ AgentWorkflowSpec
 They must not compile into `WorkflowSpec`, run through `WorkflowRunner`, or
 construct `AgentGraphExecutor` from the product runner path.
 
-Legacy preview responses include:
+The product default AgentWorkflow response no longer includes legacy preview
+fields:
 
 ```text
-runtime_boundary=legacy_runtime_preview
-runtime_type=legacy_preview
-deprecated=true
+workflow
+runtime_boundary
+runtime_type
+deprecated
 ```
+
+`/api/v2/agent-workflows/compile` returns `410 Gone`.
 
 `/api/v2/live-runs` remains as a compatibility endpoint and is marked
 `deprecated=true`. Product AgentGraph runs use `/api/v2/live-agent-runs`, and
@@ -101,5 +106,5 @@ paths.
 - Partitioned stores are the explicit write path for metadata, results, events,
   artifacts, blobs, ledgers, contexts, tool results, live runs, extensions, and
   cache data.
-- Legacy preview is explicit; new product behavior must not depend on
-  `WorkflowRunner`.
+- Legacy preview is quarantined; new product behavior must not depend on
+  `WorkflowSpec`, `WorkflowRunner`, `run_workflow`, or `legacy_compile`.

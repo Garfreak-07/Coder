@@ -78,9 +78,10 @@ AgentWorkflowSpec
 ```
 
 `WorkflowSpec` and `WorkflowRunner` are legacy compatibility paths for old saved
-workflows and advanced preview only. Do not add new product behavior there.
-Legacy live-run and compile-preview endpoints are explicitly marked deprecated
-or `runtime_type=legacy_preview`; normal product execution uses AgentGraph.
+workflows only. Do not add new product behavior there. Legacy live-run detail
+endpoints return migration responses for AgentGraph runs, and the legacy
+compile-preview product endpoint is quarantined. Normal product execution uses
+AgentGraph.
 
 ## Core Artifacts
 
@@ -230,15 +231,17 @@ Common development endpoints:
 - `GET /api/v2/extensions/skills`
 - `GET /api/v2/extensions/search`
 
-Legacy `/api/v2/skills/*`, `/api/v2/live-runs`, and `WorkflowSpec` endpoints
+Legacy `/api/v2/skills/*`, `/api/v2/live-runs`, and old `WorkflowSpec` paths
 remain for compatibility and are marked deprecated where they overlap the
 AgentGraph product path. `/api/v2/live-runs/{run_id}` returns `410 Gone` for
-AgentGraph run ids with `/api/v2/live-agent-runs/{run_id}` migration URLs. New
-Agent product behavior should use the AgentGraph and Extensions endpoints.
+AgentGraph run ids with `/api/v2/live-agent-runs/{run_id}` migration URLs.
+`/api/v2/agent-workflows/compile` returns `410 Gone`; product clients should use
+`/api/v2/agent-workflows/validate` and `/runtime-profiles` for AgentWorkflow
+inspection. New Agent product behavior should use the AgentGraph and Extensions
+endpoints.
 
-`compile_agent_workflow_legacy_preview()` is the explicit compatibility
-compiler for advanced preview and migration/debug only. `compile_agent_workflow()`
-remains a compatibility alias.
+`compile_agent_workflow_legacy_preview()` and `compile_agent_workflow()` remain
+legacy compatibility helpers outside the product server/API path.
 
 ## Testing
 

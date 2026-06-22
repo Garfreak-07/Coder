@@ -3,57 +3,53 @@ from __future__ import annotations
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from coder_workbench.agent_graph.runner import AgentGraphRunner
 from coder_workbench.core import default_planner_led_agent_workflow
 import coder_workbench.server.app as server_app
-from coder_workbench.server.app import LEGACY_RUNTIME_PREVIEW_BOUNDARY, create_app
+from coder_workbench.server.app import create_app
 
 
 class LegacyIsolationGateTests(unittest.TestCase):
     def test_live_agent_run_does_not_compile_or_run_legacy_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            with (
-                patch(
-                    "coder_workbench.server.app.compile_agent_workflow_legacy_preview",
-                    side_effect=AssertionError("legacy compiler called"),
-                ),
-            ):
-                self.assertFalse(hasattr(server_app, "WorkflowRunner"))
-                client = TestClient(create_app(store_root=tmp, frontend_dist=tmp))
-                response = client.post(
-                    "/api/v2/live-agent-runs",
-                    json={
-                        "repo": tmp,
-                        "request": "Run product AgentGraph only.",
-                        "agent_workflow": default_planner_led_agent_workflow().model_dump(mode="json", by_alias=True),
-                        "approved": True,
-                    },
-                )
-                self.assertEqual(response.status_code, 200)
-                detail = _wait_for_agent_run(client, response.json()["run_id"])
+            self.assertFalse(hasattr(server_app, "WorkflowRunner"))
+            self.assertFalse(hasattr(server_app, "compile_agent_workflow_legacy_preview"))
+            client = TestClient(create_app(store_root=tmp, frontend_dist=tmp))
+            response = client.post(
+                "/api/v2/live-agent-runs",
+                json={
+                    "repo": tmp,
+                    "request": "Run product AgentGraph only.",
+                    "agent_workflow": default_planner_led_agent_workflow().model_dump(mode="json", by_alias=True),
+                    "approved": True,
+                },
+            )
+            self.assertEqual(response.status_code, 200)
+            detail = _wait_for_agent_run(client, response.json()["run_id"])
 
         self.assertEqual(detail["runtime_type"], "agent_graph")
         self.assertIn(detail["status"], {"completed", "blocked"})
 
-    def test_legacy_preview_endpoints_are_explicitly_deprecated(self) -> None:
+    def test_legacy_preview_endpoints_are_quarantined_from_product_api(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             client = TestClient(create_app(store_root=tmp, frontend_dist=tmp))
             workflow = default_planner_led_agent_workflow().model_dump(mode="json", by_alias=True)
             default_response = client.get("/api/v2/agent-workflows/default")
             compile_response = client.post("/api/v2/agent-workflows/compile", json=workflow)
 
-        for response in [default_response, compile_response]:
-            with self.subTest(endpoint=response.request.url.path):
-                self.assertEqual(response.status_code, 200)
-                payload = response.json()
-                self.assertTrue(payload["deprecated"])
-                self.assertEqual(payload["runtime_boundary"], LEGACY_RUNTIME_PREVIEW_BOUNDARY)
-                self.assertEqual(payload["runtime_type"], "legacy_preview")
-                self.assertIn("workflow", payload)
+        self.assertEqual(default_response.status_code, 200)
+        default_payload = default_response.json()
+        self.assertIn("agent_workflow", default_payload)
+        self.assertNotIn("workflow", default_payload)
+        self.assertNotIn("runtime_boundary", default_payload)
+        self.assertNotIn("runtime_type", default_payload)
+        self.assertNotIn("deprecated", default_payload)
+
+        self.assertEqual(compile_response.status_code, 410)
+        self.assertTrue(compile_response.json()["detail"]["removed"])
 
     def test_agentgraph_product_artifacts_exclude_legacy_artifact_types(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
