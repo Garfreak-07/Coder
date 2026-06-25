@@ -267,6 +267,9 @@ export function createPlannerChatDraft(input: {
   planner_agent_id: string;
   agent_workflow: AgentWorkflowSpec;
   scopes: string[];
+  knowledge_pack_ids?: string[];
+  skill_pack_ids?: string[];
+  memory_pack_ids?: string[];
 }): Promise<PlannerChatDraft> {
   return requestJson("/api/v2/planner-chat/draft", {
     method: "POST",

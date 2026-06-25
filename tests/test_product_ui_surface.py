@@ -42,12 +42,43 @@ class ProductUISurfaceTests(unittest.TestCase):
             "Message the Planner",
             "Planner strength",
             "Run settings",
+            "Review before run",
+            "Selected workflow",
+            "Success criteria",
+            "Risks to check",
             "Advanced debug: event log",
         ]:
             with self.subTest(token=token):
                 self.assertIn(token, sources)
 
         self.assertNotIn("submitPlannerResponse", sources)
+
+    def test_planner_confirmation_surface_is_editable_without_internal_ids(self) -> None:
+        source = (ROOT / "frontend" / "src" / "features" / "planner-chat" / "PlannerChatPage.tsx").read_text(
+            encoding="utf-8"
+        )
+
+        for token in [
+            "draftRequestText",
+            "draftScopesText",
+            "draftSuccessCriteriaText",
+            "Selected packs",
+            "Confirm and run",
+            "The confirmed workflow is running.",
+        ]:
+            with self.subTest(token=token):
+                self.assertIn(token, source)
+
+        for token in [
+            "draft_id.slice",
+            "activeRunId.slice",
+            "AgentGraph",
+            "OpenHands",
+            "runtime JSON",
+            "token budget",
+        ]:
+            with self.subTest(token=token):
+                self.assertNotIn(token, source)
 
     def test_app_uses_left_sidebar_not_top_navigation(self) -> None:
         app = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")

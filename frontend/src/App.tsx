@@ -28,7 +28,11 @@ import { defaultPlannerLedAgentWorkflow } from "./examples";
 import { AppSidebar, type AppSection } from "./components/AppSidebar";
 import { ProviderSettingsPanel } from "./components/ProviderSettingsPanel";
 import { AgentWorkflowPage } from "./features/agent-workflow/AgentWorkflowPage";
-import { PlannerChatPage, type PlannerStrength } from "./features/planner-chat/PlannerChatPage";
+import {
+  PlannerChatPage,
+  type PlannerChatWorkflowSummary,
+  type PlannerStrength
+} from "./features/planner-chat/PlannerChatPage";
 import { SkillsPanel } from "./features/skills/SkillsPanel";
 import { useProviderSettings } from "./hooks/useProviderSettings";
 import { useRuntimeInfo } from "./hooks/useRuntimeInfo";
@@ -80,6 +84,9 @@ export function App() {
   const [eventsLoadingMore, setEventsLoadingMore] = useState(false);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [plannerDraft, setPlannerDraft] = useState<PlannerChatDraft | null>(null);
+  const [draftRequestText, setDraftRequestText] = useState("");
+  const [draftScopesText, setDraftScopesText] = useState("");
+  const [draftSuccessCriteriaText, setDraftSuccessCriteriaText] = useState("");
   const [newAgentRoleCard, setNewAgentRoleCard] = useState("executor");
   const [connectionFrom, setConnectionFrom] = useState("planner");
   const [connectionTo, setConnectionTo] = useState("executor");
@@ -102,6 +109,10 @@ export function App() {
   const primaryPlannerAgent = useMemo(
     () => agentWorkflow.agents.find((agent) => agent.id === agentWorkflow.primary_planner_id) ?? null,
     [agentWorkflow.agents, agentWorkflow.primary_planner_id]
+  );
+  const plannerChatWorkflowSummary = useMemo(
+    () => summarizePlannerChatWorkflow(agentWorkflow),
+    [agentWorkflow]
   );
   const availableRoleCards = useMemo(
     () => roleCards.filter((roleCard) => roleCard.id === "executor"),
@@ -128,7 +139,7 @@ export function App() {
   }
 
   async function openStoredRun(runId: string) {
-    setStatus(`Loading stored run ${runId}...`);
+    setStatus("Loading stored result...");
     try {
       const detail = await getRun(runId, false);
       const eventPage = await getRunEvents(runId);
@@ -151,8 +162,8 @@ export function App() {
       setSubmittedRequest(detail.request);
       setStatus(
         eventPage.has_more
-          ? `Stored run ${runId}: ${detail.result.status} (${eventPage.events.length}+ events)`
-          : `Stored run ${runId}: ${detail.result.status}`
+          ? `Stored result: ${detail.result.status} (${eventPage.events.length}+ events)`
+          : `Stored result: ${detail.result.status}`
       );
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
@@ -181,7 +192,7 @@ export function App() {
       });
       setEventCursor(eventPage.next_cursor);
       setEventHasMore(eventPage.has_more);
-      setStatus(`Stored run ${runId}: loaded ${eventPage.next_cursor} events`);
+      setStatus(`Stored result: loaded ${eventPage.next_cursor} events`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -190,7 +201,7 @@ export function App() {
   }
 
   async function openLiveRun(runId: string, attach = false) {
-    setStatus(`Loading live run ${runId}...`);
+    setStatus("Loading live run...");
     try {
       const detail = await getLiveAgentRun(runId);
       setSelectedRunKind("live");
@@ -203,7 +214,7 @@ export function App() {
       setRepo(detail.repo_root);
       setRequest(detail.request);
       setSubmittedRequest(detail.request);
-      setStatus(`Live run ${runId}: ${detail.status}`);
+      setStatus(`Live run: ${detail.status}`);
       if (attach || detail.status === "queued" || detail.status === "running") {
         subscribeToRun(detail.id, liveEventsUrl(detail));
       }
@@ -549,6 +560,9 @@ export function App() {
       setSelectedRunDetail(null);
       setSelectedRunKind(null);
       setPlannerDraft(null);
+      setDraftRequestText("");
+      setDraftScopesText("");
+      setDraftSuccessCriteriaText("");
       setStatus("Drafting plan...");
       const draft = await createPlannerChatDraft({
         repo,
@@ -556,9 +570,15 @@ export function App() {
         workflow_id: workflow.id,
         planner_agent_id: workflow.primary_planner_id,
         agent_workflow: workflow,
-        scopes
+        scopes,
+        skill_pack_ids: plannerChatWorkflowSummary.skillPackIds,
+        knowledge_pack_ids: plannerChatWorkflowSummary.knowledgePackIds,
+        memory_pack_ids: plannerChatWorkflowSummary.memoryPackIds
       });
       setPlannerDraft(draft);
+      setDraftRequestText(requestText);
+      setDraftScopesText((draft.proposed_scope.length > 0 ? draft.proposed_scope : scopes).join("\n"));
+      setDraftSuccessCriteriaText(draft.success_criteria.join("\n"));
       setSubmittedRequest(requestText);
       setRequest("");
       setStatus("Plan draft ready for confirmation.");
@@ -571,25 +591,46 @@ export function App() {
 
   async function confirmDraft() {
     if (!plannerDraft) return;
+    const confirmedRequest = (draftRequestText.trim() || submittedRequest).trim();
+    const confirmedScopes = linesToList(draftScopesText);
+    const confirmedSuccessCriteria = linesToList(draftSuccessCriteriaText);
+    if (!confirmedRequest) return;
     setRunLoading(true);
-    setStatus("Starting confirmed Agent workflow run...");
+    setStatus("Starting confirmed run...");
     try {
       const run = await confirmPlannerChatDraft({
         draft_id: plannerDraft.draft_id,
         approved: true,
         repo,
-        scopes: linesToList(scopesText)
+        scopes: confirmedScopes,
+        edits: {
+          request: confirmedRequest,
+          proposed_scope: confirmedScopes,
+          success_criteria: confirmedSuccessCriteria
+        },
+        initial_data: {
+          request: confirmedRequest,
+          success_criteria: confirmedSuccessCriteria,
+          selected_skill_pack_ids: plannerChatWorkflowSummary.skillPackIds,
+          selected_knowledge_pack_ids: plannerChatWorkflowSummary.knowledgePackIds,
+          selected_memory_pack_ids: plannerChatWorkflowSummary.memoryPackIds
+        }
       });
       if (!run.run_id) {
         throw new Error("Draft confirmation did not start a run.");
       }
       setPlannerDraft(null);
+      setDraftRequestText("");
+      setDraftScopesText("");
+      setDraftSuccessCriteriaText("");
+      setSubmittedRequest(confirmedRequest);
+      setScopesText(confirmedScopes.join("\n"));
       setActiveRunId(run.run_id);
       setSelectedRunKind("live");
       setSelectedRunDetail(null);
       setEvents([]);
       subscribeToRun(run.run_id, `/api/v2/live-agent-runs/${run.run_id}/events`);
-      setStatus(`Live Agent run ${run.run_id}: ${run.status}`);
+      setStatus(`Run ${run.status}.`);
       refreshRuntimeInfo();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
@@ -608,6 +649,9 @@ export function App() {
         approved: false
       });
       setPlannerDraft(null);
+      setDraftRequestText("");
+      setDraftScopesText("");
+      setDraftSuccessCriteriaText("");
       setRequest(submittedRequest);
       setSubmittedRequest("");
       setStatus("Plan draft discarded.");
@@ -651,7 +695,7 @@ export function App() {
                 setSelectedRunDetail(detail);
                 setActiveRunId(detail.id);
                 setEvents(detail.events);
-                setStatus(`Live run ${runId}: ${detail.status}`);
+                setStatus(`Run ${detail.status}.`);
               })
               .catch((error) => setStatus(error instanceof Error ? error.message : String(error)));
           }
@@ -659,7 +703,7 @@ export function App() {
         });
       },
       () => {
-        setStatus(`Event stream closed for ${runId}`);
+        setStatus("Event stream closed for current run.");
         source.close();
       }
     );
@@ -721,6 +765,9 @@ export function App() {
       {activeSection === "chat" ? (
         <PlannerChatPage
           activeRunId={activeRunId}
+          draftRequestText={draftRequestText}
+          draftScopesText={draftScopesText}
+          draftSuccessCriteriaText={draftSuccessCriteriaText}
           evidence={chatEvidence}
           repo={repo}
           request={request}
@@ -730,8 +777,12 @@ export function App() {
           submittedRequest={submittedRequest}
           planDraft={plannerDraft}
           plannerStrength={plannerStrength}
+          workflowSummary={plannerChatWorkflowSummary}
           onCancelDraft={cancelDraft}
           onConfirmDraft={confirmDraft}
+          onDraftRequestTextChange={setDraftRequestText}
+          onDraftScopesTextChange={setDraftScopesText}
+          onDraftSuccessCriteriaTextChange={setDraftSuccessCriteriaText}
           onRepoChange={setRepo}
           onRequestChange={setRequest}
           onScopesTextChange={setScopesText}
@@ -863,6 +914,27 @@ function modelTierForPlannerStrength(strength: PlannerStrength): AgentModelTier 
   return "best";
 }
 
+function summarizePlannerChatWorkflow(workflow: AgentWorkflowSpec): PlannerChatWorkflowSummary {
+  const planner = workflow.agents.find((agent) => agent.id === workflow.primary_planner_id);
+  const executors = workflow.agents.filter((agent) => agent.role === "executor");
+  return {
+    workflowName: workflow.name || "Current workflow",
+    plannerName: planner?.name || "Planner",
+    executorNames: executors.map((agent) => agent.name || "Executor"),
+    skillPackIds: uniqueStrings(workflow.agents.flatMap((agent) => agent.skill_pack_ids ?? [])),
+    knowledgePackIds: uniqueStrings(workflow.agents.flatMap((agent) => agent.knowledge_pack_ids ?? [])),
+    memoryPackIds: uniqueStrings(workflow.agents.flatMap((agent) => agent.memory_pack_ids ?? [])),
+    maxAutoRounds:
+      typeof workflow.loop_policy?.max_auto_rounds === "number"
+        ? workflow.loop_policy.max_auto_rounds
+        : null
+  };
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
 function uniqueWorkflowId(name: string): string {
   const slug = name
     .trim()
@@ -912,7 +984,6 @@ function RunFinalReport({
   const modifiedFiles = stringList(files?.modified);
   const deletedFiles = stringList(files?.deleted);
   const evidenceCount = evidence.length || Number(report.evidence_count ?? 0);
-  const artifactId = typeof report.artifact_id === "string" ? report.artifact_id : null;
   const commitSha = typeof commit?.sha === "string" ? commit.sha : null;
   const commitMessage = typeof commit?.message === "string" ? commit.message : null;
 
@@ -923,7 +994,6 @@ function RunFinalReport({
           <div className="panel-subtitle">Final report</div>
           <strong>{status}</strong>
         </div>
-        {artifactId && <code>{artifactId}</code>}
       </div>
       <p>{String(report.summary ?? "")}</p>
       <div className="summary-grid">
@@ -931,7 +1001,7 @@ function RunFinalReport({
         {commitMessage && <span>{commitMessage}</span>}
         <span>{createdFiles.length + modifiedFiles.length + deletedFiles.length} files</span>
         <span>{checks.length} checks</span>
-        <span>{evidenceCount} evidence refs</span>
+        <span>{evidenceCount} evidence items</span>
       </div>
       {completed.length > 0 && <InlineTextList title="Completed" values={completed} />}
       {(createdFiles.length > 0 || modifiedFiles.length > 0 || deletedFiles.length > 0) && (
@@ -1037,7 +1107,6 @@ function RunEvidenceCards({ events }: { events: RunEvent[] }) {
             {card.round && <span>round {card.round}</span>}
             {card.nextAction && <span>next: {card.nextAction}</span>}
             {card.needsPlanner && <span>needs Planner</span>}
-            {card.ref && <span>{card.ref}</span>}
           </div>
           {card.files.length > 0 && <InlineTextList title="Files" values={card.files} />}
           {card.commands.length > 0 && <InlineTextList title="Commands / checks" values={card.commands} />}
@@ -1057,7 +1126,6 @@ interface EvidenceCardModel {
   needsPlanner: boolean;
   files: string[];
   commands: string[];
-  ref: string | null;
 }
 
 function evidenceFromArtifactEvent(event: RunEvent): EvidenceCardModel | null {
@@ -1075,8 +1143,7 @@ function evidenceFromArtifactEvent(event: RunEvent): EvidenceCardModel | null {
     nextAction: valueString(summary.next_action),
     needsPlanner: Boolean(summary.needs_planner_decision),
     files: evidenceFiles(summary),
-    commands: evidenceCommands(summary),
-    ref: valueString(payload?.artifact_id)
+    commands: evidenceCommands(summary)
   };
 }
 
@@ -1091,8 +1158,7 @@ function evidenceFromToolResult(key: string, title: string, result: Record<strin
     nextAction: null,
     needsPlanner: Boolean(result.needs_planner_decision),
     files: evidenceFiles(result),
-    commands: evidenceCommands(result),
-    ref: valueString(result.output_ref ?? result.tool_result_id)
+    commands: evidenceCommands(result)
   };
 }
 
