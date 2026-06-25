@@ -5,8 +5,10 @@ from coder_workbench.harness_runtime import (
     HarnessRunResult,
     HarnessRuntimeContext,
     HarnessRuntimeManager,
+    evaluate_harness_safety,
     default_harness_runtime_profiles,
     harness_contract_for_id,
+    sandbox_policy_for_profile,
 )
 from coder_workbench.harness_runtime.profiles import INTERNAL_FALLBACK_PROVIDER_ID
 
@@ -67,6 +69,49 @@ class HarnessRuntimeProfileTests(unittest.TestCase):
 
         self.assertEqual(profile.provider_id, INTERNAL_FALLBACK_PROVIDER_ID)
         self.assertEqual(profile.mode, "task_execution")
+
+    def test_default_profiles_pass_safety_and_sandbox_policy(self) -> None:
+        for profile in default_harness_runtime_profiles().values():
+            contract = harness_contract_for_id(profile.harness_id)
+
+            self.assertTrue(evaluate_harness_safety(contract, profile).allowed)
+            self.assertTrue(sandbox_policy_for_profile(profile).workspace_mode)
+
+    def test_manager_rejects_conversation_side_effect_profile(self) -> None:
+        manager = HarnessRuntimeManager()
+        unsafe = manager.profile_for_id("internal-fallback-workflow-supervisor").model_copy(
+            update={"id": "unsafe-conversation", "tool_policy": {"run_commands": True}, "sandbox_policy": {"workspace": "readonly"}}
+        )
+        manager.profiles[unsafe.id] = unsafe
+        context = HarnessRuntimeContext(
+            run_id="run-1",
+            agent_id="planner",
+            workflow_id="workflow-1",
+            harness_id="conversation-harness",
+            mode="workflow_supervisor",
+            profile_id=unsafe.id,
+        )
+
+        with self.assertRaisesRegex(ValueError, "cannot run commands"):
+            manager.run_workflow_supervisor(context=context, profile_id=unsafe.id)
+
+    def test_manager_rejects_executor_user_chat_profile(self) -> None:
+        manager = HarnessRuntimeManager()
+        unsafe = manager.profile_for_id("internal-fallback-task-executor").model_copy(
+            update={"id": "unsafe-executor", "tool_policy": {"ask_human": True}, "sandbox_policy": {"workspace": "temp_worktree"}}
+        )
+        manager.profiles[unsafe.id] = unsafe
+        context = HarnessRuntimeContext(
+            run_id="run-1",
+            agent_id="executor",
+            workflow_id="workflow-1",
+            harness_id="task-execution-harness",
+            mode="task_execution",
+            profile_id=unsafe.id,
+        )
+
+        with self.assertRaisesRegex(ValueError, "cannot talk to the user"):
+            manager.run_task_execution(context=context, profile_id=unsafe.id)
 
 
 if __name__ == "__main__":

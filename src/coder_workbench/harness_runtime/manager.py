@@ -15,6 +15,8 @@ from .profiles import (
 )
 from .providers import HarnessProvider
 from .runtime_context import HarnessRunRequest, HarnessRunResult, HarnessRuntimeContext
+from .safety import enforce_harness_safety
+from .sandbox import enforce_sandbox_policy
 
 
 class HarnessRuntimeManager:
@@ -135,6 +137,8 @@ class HarnessRuntimeManager:
             raise ValueError(f"mode {request.mode!r} is not valid for harness {contract.harness_id!r}")
         if request.profile.mode != request.mode:
             raise ValueError(f"profile {request.profile.id!r} mode does not match request mode {request.mode!r}")
+        enforce_harness_safety(contract, request.profile)
+        enforce_sandbox_policy(contract, request.profile)
 
     def _provider_for_profile(self, profile: HarnessRuntimeProfile) -> HarnessProvider:
         if profile.provider_id == OPENHANDS_PROVIDER_ID and not _openhands_enabled():

@@ -17,12 +17,18 @@ from .schema import (
 
 
 PLANNER_TOOL_CAPABILITIES = [
+    ToolCapability(name="inspect_workflow", toolset="workflow", side_effect="read", risk="low"),
+    ToolCapability(name="inspect_project_summary", toolset="context", side_effect="read", risk="low"),
     ToolCapability(name="inspect_artifact", toolset="runtime_state", side_effect="read", risk="low"),
     ToolCapability(name="inspect_run_state", toolset="runtime_state", side_effect="read", risk="low"),
+    ToolCapability(name="inspect_round_summary", toolset="runtime_state", side_effect="read", risk="low"),
     ToolCapability(name="inspect_evidence", toolset="evidence", side_effect="read", risk="low"),
+    ToolCapability(name="inspect_skill_index", toolset="skills", side_effect="read", risk="low"),
+    ToolCapability(name="inspect_memory", toolset="memory", side_effect="read", risk="low"),
     ToolCapability(name="read_skill_index", toolset="skills", side_effect="read", risk="low"),
     ToolCapability(name="search_workflow_memory", toolset="memory", side_effect="read", risk="low"),
     ToolCapability(name="search_project_memory", toolset="memory", side_effect="read", risk="low"),
+    ToolCapability(name="validate_run_contract_draft", toolset="artifacts", side_effect="none", risk="low"),
     ToolCapability(name="validate_planner_order", toolset="artifacts", side_effect="none", risk="low"),
     ToolCapability(name="validate_planner_decision", toolset="artifacts", side_effect="none", risk="low"),
     ToolCapability(name="build_final_report", toolset="artifacts", side_effect="none", risk="low"),
@@ -76,7 +82,7 @@ TOOL_REGISTRY_ENTRIES = [
         ToolRegistryEntry(
             capability=tool,
             description=f"Planner harness tool: {tool.name}.",
-            harness_ids=["planner-order-harness", "planner-decision-harness", "final-report-harness"],
+            harness_ids=["conversation-harness", "planner-order-harness", "planner-decision-harness", "final-report-harness"],
             requires_approval=tool.risk != "low" or tool.side_effect in {"write", "external"},
         )
         for tool in PLANNER_TOOL_CAPABILITIES
@@ -85,7 +91,7 @@ TOOL_REGISTRY_ENTRIES = [
         ToolRegistryEntry(
             capability=tool,
             description=f"Code worker harness tool: {tool.name}.",
-            harness_ids=["code-worker-harness"],
+            harness_ids=["task-execution-harness", "code-worker-harness"],
             requires_approval=tool.risk != "low" or tool.side_effect in {"write", "external"},
         )
         for tool in CODE_WORKER_TOOL_CAPABILITIES

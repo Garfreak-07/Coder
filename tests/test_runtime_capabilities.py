@@ -14,7 +14,9 @@ from coder_workbench.agent_harness.contracts import (
 )
 from coder_workbench.agent_model import AgentRecipe, RuntimeProfileCompiler
 from coder_workbench.core import default_planner_led_agent_workflow
+from coder_workbench.harness_runtime import CONVERSATION_HARNESS_ID, TASK_EXECUTION_HARNESS_ID
 from coder_workbench.runtime_capabilities import resolve_capabilities
+from coder_workbench.runtime_capabilities.registries import ToolRegistry
 
 
 class HarnessContractTests(unittest.TestCase):
@@ -135,6 +137,37 @@ class RuntimeCapabilityResolverTests(unittest.TestCase):
         self.assertIn("propose_patch", denied_names)
         self.assertIn("apply_patch_sandbox", denied_names)
         self.assertIn("run_command_sandbox", denied_names)
+
+    def test_canonical_harness_ids_resolve_capabilities(self) -> None:
+        workflow = default_planner_led_agent_workflow()
+        planner = workflow.agents[0]
+        executor = workflow.agents[1]
+
+        planning_caps = resolve_capabilities(
+            agent=planner,
+            runtime_profile=SimpleNamespace(role="planner", mode="planning_chat", tool_policy={}),
+            harness_id=CONVERSATION_HARNESS_ID,
+        )
+        executor_caps = resolve_capabilities(
+            agent=executor,
+            runtime_profile=SimpleNamespace(role="executor", mode="task_execution", tool_policy={"write_files": True, "run_commands": True}),
+            harness_id=TASK_EXECUTION_HARNESS_ID,
+            work_item={"work_item_id": "executor-work"},
+        )
+
+        self.assertIn("validate_run_contract_draft", {tool.name for tool in planning_caps.tools})
+        self.assertNotIn("build_final_report", {tool.name for tool in planning_caps.tools})
+        self.assertIn("return_execution_result", {tool.name for tool in executor_caps.tools})
+        self.assertIn("ask_user", {capability.name for capability in executor_caps.denied})
+
+    def test_tool_registry_lists_canonical_harness_tools(self) -> None:
+        registry = ToolRegistry()
+
+        conversation_tools = {entry.capability.name for entry in registry.list_tools(harness_id=CONVERSATION_HARNESS_ID)}
+        task_tools = {entry.capability.name for entry in registry.list_tools(harness_id=TASK_EXECUTION_HARNESS_ID)}
+
+        self.assertIn("inspect_workflow", conversation_tools)
+        self.assertIn("return_execution_result", task_tools)
 
 
 if __name__ == "__main__":

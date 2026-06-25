@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from coder_workbench.harness_runtime.contracts import (
+    CONVERSATION_HARNESS_ID,
+    TASK_EXECUTION_HARNESS_ID,
+    resolve_harness_id,
+)
+
 from .registries import (
     code_worker_denied_capabilities,
     code_worker_memory_scopes,
@@ -18,10 +24,33 @@ FINAL_REPORT_HARNESS_ID = "final-report-harness"
 PLANNER_DECISION_HARNESS_ID = "planner-decision-harness"
 PLANNER_ORDER_HARNESS_ID = "planner-order-harness"
 HARNESS_ROLES = {
+    CONVERSATION_HARNESS_ID: "planner",
+    TASK_EXECUTION_HARNESS_ID: "executor",
     CODE_WORKER_HARNESS_ID: "executor",
     FINAL_REPORT_HARNESS_ID: "planner",
     PLANNER_DECISION_HARNESS_ID: "planner",
     PLANNER_ORDER_HARNESS_ID: "planner",
+}
+
+PLANNING_CHAT_TOOLS = {
+    "inspect_workflow",
+    "inspect_skill_index",
+    "inspect_memory",
+    "inspect_project_summary",
+    "validate_run_contract_draft",
+    "estimate_risk",
+    "estimate_budget",
+}
+WORKFLOW_SUPERVISOR_TOOLS = {
+    "inspect_artifact",
+    "inspect_run_state",
+    "inspect_evidence",
+    "inspect_round_summary",
+    "validate_planner_order",
+    "validate_planner_decision",
+    "build_final_report",
+    "estimate_risk",
+    "estimate_budget",
 }
 
 
@@ -34,13 +63,17 @@ def resolve_capabilities(
     state_view: dict[str, Any] | None = None,
     installed_capabilities: Any = None,
 ) -> CapabilitySet:
-    contract_role = HARNESS_ROLES.get(harness_id)
+    canonical_harness_id, alias_mode = resolve_harness_id(harness_id)
+    contract_role = HARNESS_ROLES.get(canonical_harness_id)
     if contract_role is None:
         raise ValueError(f"unknown harness_id {harness_id!r}")
     role = str(getattr(agent, "role", "") or getattr(runtime_profile, "role", "") or contract_role)
+    mode = str(getattr(runtime_profile, "mode", "") or alias_mode or "")
     if contract_role == "planner" or role == "planner":
         return _planner_capability_set(
             harness_id=harness_id,
+            canonical_harness_id=canonical_harness_id,
+            mode=mode,
             installed_capabilities=installed_capabilities,
         )
     return _code_worker_capability_set(
@@ -54,9 +87,15 @@ def resolve_capabilities(
 def _planner_capability_set(
     *,
     harness_id: str,
+    canonical_harness_id: str,
+    mode: str,
     installed_capabilities: Any,
 ) -> CapabilitySet:
     tools = planner_tool_capabilities()
+    if canonical_harness_id == CONVERSATION_HARNESS_ID and mode == "planning_chat":
+        tools = [tool for tool in tools if tool.name in PLANNING_CHAT_TOOLS]
+    elif canonical_harness_id == CONVERSATION_HARNESS_ID and mode == "workflow_supervisor":
+        tools = [tool for tool in tools if tool.name in WORKFLOW_SUPERVISOR_TOOLS]
     if harness_id == FINAL_REPORT_HARNESS_ID:
         tools = [tool for tool in tools if tool.name in {"inspect_artifact", "inspect_run_state", "inspect_evidence", "build_final_report"}]
     elif harness_id == PLANNER_ORDER_HARNESS_ID:
