@@ -56,6 +56,55 @@ class ArtifactProjectorTests(unittest.TestCase):
         self.assertEqual(artifact["verification"]["status"], "blocked")
         self.assertIn("Provider failed.", artifact["unexpected_issues"])
 
+    def test_projector_normalizes_completed_execution_without_evidence_to_skipped_no_op(self) -> None:
+        artifact = ArtifactProjector().project(
+            HarnessRunResult(
+                status="completed",
+                artifact_type="execution_result",
+                artifact={
+                    "artifact_type": "execution_result",
+                    "round": 1,
+                    "status": "completed",
+                    "summary": "Provider reported done.",
+                    "verification": {
+                        "status": "pass",
+                        "checks_run": [],
+                        "evidence_refs": [],
+                        "confidence": "medium",
+                    },
+                },
+            )
+        )
+
+        self.assertEqual(artifact["status"], "completed")
+        self.assertEqual(artifact["verification"]["status"], "skipped")
+        self.assertIn("no_check_rationale", artifact["verification"])
+        self.assertIn("no_op_rationale", artifact)
+
+    def test_projector_maps_runtime_errors_to_specific_blocker_types(self) -> None:
+        missing_secret = ArtifactProjector().project(
+            HarnessRunResult(
+                status="blocked",
+                artifact_type="execution_result",
+                error={
+                    "code": "openhands_llm_credentials_missing",
+                    "message": "OpenHands runtime requires LLM_API_KEY or DEEPSEEK_API_KEY.",
+                },
+                native_event_refs=["native-ref"],
+            )
+        )
+        missing_sdk = ArtifactProjector().project(
+            HarnessRunResult(
+                status="failed",
+                artifact_type="execution_result",
+                error={"code": "openhands_sdk_unavailable", "message": "SDK missing."},
+                native_event_refs=["native-ref"],
+            )
+        )
+
+        self.assertEqual(missing_secret["blocker_type"], "missing_secret")
+        self.assertEqual(missing_sdk["blocker_type"], "missing_dependency")
+
     def test_projector_synthesizes_planner_artifacts(self) -> None:
         projector = ArtifactProjector()
         order = projector.project(HarnessRunResult(status="completed", artifact_type="planner_order"))

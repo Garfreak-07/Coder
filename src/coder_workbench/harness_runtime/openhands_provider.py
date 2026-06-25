@@ -399,6 +399,8 @@ def _artifact_for_success(
     facts: dict[str, list[str]],
 ) -> dict[str, Any]:
     if request.mode == "task_execution":
+        verification_status = "pass" if _has_runtime_evidence(facts) else "skipped"
+        no_check_rationale = None if verification_status == "pass" else "OpenHands conversation completed; explicit check extraction is not wired yet."
         return {
             "artifact_type": "execution_result",
             "round": request.context.round or 1,
@@ -412,11 +414,11 @@ def _artifact_for_success(
             "patch_refs": facts["diff_refs"],
             "evidence_refs": evidence_refs,
             "verification": {
-                "status": "skipped",
+                "status": verification_status,
                 "checks_run": [],
                 "evidence_refs": evidence_refs,
                 "confidence": "medium",
-                "no_check_rationale": "OpenHands conversation completed; explicit check extraction is not wired yet.",
+                "no_check_rationale": no_check_rationale,
             },
         }
     if request.mode == "planning_chat":
@@ -517,6 +519,13 @@ def _runtime_facts(run_output: Any) -> dict[str, list[str]]:
         "log_refs": _string_list_fact(run_output, "log_refs"),
         "evidence_refs": _string_list_fact(run_output, "evidence_refs"),
     }
+
+
+def _has_runtime_evidence(facts: dict[str, list[str]]) -> bool:
+    return any(
+        facts.get(key)
+        for key in ("changed_files", "created_files", "deleted_files", "diff_refs", "log_refs", "evidence_refs")
+    )
 
 
 def _string_list_fact(run_output: Any, *names: str) -> list[str]:

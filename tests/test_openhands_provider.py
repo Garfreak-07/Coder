@@ -95,7 +95,7 @@ class OpenHandsRuntimeProviderTests(unittest.TestCase):
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.artifact_type, "execution_result")
-        self.assertEqual(result.artifact["verification"]["status"], "skipped")
+        self.assertEqual(result.artifact["verification"]["status"], "pass")
         self.assertEqual(result.artifact["changed_files"], ["src/app.py"])
         self.assertEqual(result.artifact["patch_refs"], ["diff-ref"])
         self.assertEqual(result.diff_refs, ["diff-ref"])
