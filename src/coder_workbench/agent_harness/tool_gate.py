@@ -7,22 +7,14 @@ from pydantic import BaseModel, ConfigDict
 
 from coder_workbench.actions import ActionSpec, RunContext
 from coder_workbench.agent_harness.action_protocol import HarnessActionRequest, HarnessObservation
+from coder_workbench.agent_harness.tool_metadata import DEFAULT_CODE_WORKER_TOOL_METADATA
 from coder_workbench.coding.command_policy import evaluate_command_policy
 from coder_workbench.coding.risk_map import build_risk_map, is_risk_path
 from coder_workbench.runtime_capabilities.registries import code_worker_tool_capabilities
 from coder_workbench.tools.filesystem import resolve_scoped_path
 
 
-ALLOWED_CODE_WORKER_ACTIONS = {
-    "read_file",
-    "search_files",
-    "inspect_git_diff",
-    "propose_patch",
-    "apply_patch_sandbox",
-    "run_command_sandbox",
-    "read_tool_output",
-    "return_execution_result",
-}
+ALLOWED_CODE_WORKER_ACTIONS = set(DEFAULT_CODE_WORKER_TOOL_METADATA)
 
 DENIED_CODE_WORKER_ACTIONS = {
     "ask_user",

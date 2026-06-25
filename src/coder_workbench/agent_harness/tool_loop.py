@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from pydantic import ValidationError
@@ -11,7 +12,7 @@ from coder_workbench.actions.result_budget import ResultBudget, apply_result_bud
 from coder_workbench.agent_graph.artifacts import graph_artifact_id
 from coder_workbench.agent_graph.repair import parse_json_object
 from coder_workbench.agent_graph.schema import AgentTaskEnvelope, WorkItem
-from coder_workbench.agent_harness.action_protocol import HarnessActionRequest, HarnessObservation
+from coder_workbench.agent_harness.action_protocol import HarnessActionBatch, HarnessActionRequest, HarnessObservation
 from coder_workbench.agent_harness.artifact_repair_pipeline import ArtifactRepairPipeline, RepairContext
 from coder_workbench.agent_harness.context_preprocessor import CodeWorkerContextPreprocessor
 from coder_workbench.agent_harness.execution_verification import ensure_blocked_contract, ensure_execution_verification
@@ -19,6 +20,7 @@ from coder_workbench.agent_harness.recovery_policy import RecoveryPolicy
 from coder_workbench.agent_harness.self_check import ExecutorSelfChecker
 from coder_workbench.agent_harness.session import CodeWorkerLoopState, HarnessSession
 from coder_workbench.agent_harness.stop_gate import StopGate
+from coder_workbench.agent_harness.tool_batcher import ToolBatcher
 from coder_workbench.agent_harness.tool_gate import ToolGate
 from coder_workbench.core.artifacts import validate_artifact
 
@@ -46,6 +48,7 @@ class CodeWorkerToolLoop:
         self.stop_gate = StopGate()
         self.context_preprocessor = CodeWorkerContextPreprocessor()
         self.result_budget = ResultBudget(max_inline_chars=4000, preview_chars=1200)
+        self.tool_batcher = ToolBatcher()
         self.max_turns = max(1, max_turns)
         self.emit = emit
 
@@ -143,6 +146,28 @@ class CodeWorkerToolLoop:
                     f"Executor attempted to return planner-only artifact_type: {artifact_type}",
                     "permission_boundary",
                 )
+            if artifact_type == "harness_action_batch":
+                try:
+                    action_batch = HarnessActionBatch.model_validate(payload)
+                except ValidationError as exc:
+                    if self._recoverable_model_output_error(
+                        state,
+                        "Model returned malformed harness_action_batch.",
+                        "invalid_action_schema",
+                        payload_preview={"errors": exc.errors()[:8]},
+                    ):
+                        continue
+                    return self._blocked_result(
+                        state,
+                        item,
+                        envelope,
+                        "Model returned malformed harness_action_batch after one correction.",
+                        "schema_validation_failed",
+                    )
+                result = self._process_action_requests(action_batch.actions, state=state, item=item, envelope=envelope)
+                if result is not None:
+                    return result
+                continue
             if artifact_type != "harness_action":
                 if self._recoverable_model_output_error(
                     state,
@@ -176,23 +201,79 @@ class CodeWorkerToolLoop:
                     "schema_validation_failed",
                 )
 
+            result = self._process_action_requests([request], state=state, item=item, envelope=envelope)
+            if result is not None:
+                return result
+            continue
+
+        return self._blocked_result(
+            state,
+            item,
+            envelope,
+            f"CodeWorker tool loop reached max_turns={state.max_turns}.",
+            "timeout",
+        )
+
+    def _process_action_requests(
+        self,
+        requests: list[HarnessActionRequest],
+        *,
+        state: CodeWorkerLoopState,
+        item: WorkItem,
+        envelope: AgentTaskEnvelope,
+    ) -> dict[str, Any] | None:
+        try:
+            batches = self.tool_batcher.partition(requests)
+        except KeyError as exc:
+            request = next(
+                (
+                    item
+                    for item in requests
+                    if item.action_type not in self.tool_batcher.metadata_registry.names()
+                ),
+                requests[0],
+            )
+            decision = self.tool_gate.decide(request)
+            if not decision.allowed and decision.observation is not None:
+                self._record_blocked_action(state, request, decision.observation, decision.reason, decision.error_code)
+                return self._blocked_result(
+                    state,
+                    item,
+                    envelope,
+                    decision.reason or "CodeWorker action was blocked.",
+                    _blocker_type_for_error(decision.error_code),
+                )
+            observation = HarnessObservation(
+                action_id=request.action_id,
+                action_type=request.action_type,
+                status="blocked",
+                summary=str(exc),
+                evidence_refs=[f"harness_observation:{request.action_id}"],
+                error_code="unknown_action_type",
+            )
+            self._record_observation(state, request, observation)
+            return self._blocked_result(
+                state,
+                item,
+                envelope,
+                str(exc),
+                "tool_unavailable",
+            )
+
+        processed_action_ids: set[str] = set()
+        for batch in batches:
+            if batch.execution_mode == "concurrent":
+                blocked = self._process_concurrent_action_batch(batch.actions, state=state, item=item, envelope=envelope)
+                processed_action_ids.update(action.action_id for action in batch.actions)
+                if blocked is not None:
+                    return blocked
+                continue
+
+            request = batch.actions[0]
             decision = self.tool_gate.decide(request)
             if not decision.allowed:
                 assert decision.observation is not None
-                self._record_observation(state, request, decision.observation)
-                _emit(
-                    self.emit,
-                    "code_worker.loop.action.blocked",
-                    decision.reason,
-                    run_id=state.session.run_id,
-                    round=state.session.round,
-                    work_item_id=state.session.work_item_id,
-                    agent_id=state.session.agent_id,
-                    turn_count=state.turn_count,
-                    action_id=request.action_id,
-                    action_type=request.action_type,
-                    error_code=decision.error_code,
-                )
+                self._record_blocked_action(state, request, decision.observation, decision.reason, decision.error_code)
                 return self._blocked_result(
                     state,
                     item,
@@ -208,48 +289,147 @@ class CodeWorkerToolLoop:
                 final_payload["artifact_type"] = "execution_result"
                 final = self._finalize_execution_result(final_payload, state=state, item=item, envelope=envelope)
                 if final is None:
-                    continue
+                    return None
                 return final
 
             assert decision.action_spec is not None
-            _emit(
-                self.emit,
-                "code_worker.loop.action.allowed",
-                "CodeWorker action allowed",
-                run_id=state.session.run_id,
-                round=state.session.round,
-                work_item_id=state.session.work_item_id,
-                agent_id=state.session.agent_id,
-                turn_count=state.turn_count,
-                action_id=request.action_id,
-                action_type=request.action_type,
-            )
+            self._emit_action_allowed(state, request)
             result = self.action_gateway.run(decision.action_spec, run_context=self.run_context)
-            observation = self._observation_from_result(request, result)
-            self._record_observation(state, request, observation)
-            _emit(
-                self.emit,
-                "code_worker.loop.action.executed",
-                observation.summary,
-                run_id=state.session.run_id,
-                round=state.session.round,
-                work_item_id=state.session.work_item_id,
-                agent_id=state.session.agent_id,
-                turn_count=state.turn_count,
+            observation = self._record_action_result(state, request, result)
+            processed_action_ids.add(request.action_id)
+            if observation.status != "ok":
+                remaining = [action for action in requests if action.action_id not in processed_action_ids]
+                self._record_skipped_actions(state, remaining, failed_action_id=request.action_id)
+                state.transition = {
+                    "reason": "exclusive_action_failed",
+                    "from_action_id": request.action_id,
+                    "error_code": observation.error_code,
+                }
+                return None
+
+        state.transition = {
+            "reason": "next_turn",
+            "from_action_ids": [request.action_id for request in requests],
+        }
+        return None
+
+    def _process_concurrent_action_batch(
+        self,
+        requests: list[HarnessActionRequest],
+        *,
+        state: CodeWorkerLoopState,
+        item: WorkItem,
+        envelope: AgentTaskEnvelope,
+    ) -> dict[str, Any] | None:
+        decisions = [(request, self.tool_gate.decide(request)) for request in requests]
+        for request, decision in decisions:
+            if not decision.allowed:
+                assert decision.observation is not None
+                self._record_blocked_action(state, request, decision.observation, decision.reason, decision.error_code)
+                return self._blocked_result(
+                    state,
+                    item,
+                    envelope,
+                    decision.reason or "CodeWorker action was blocked.",
+                    _blocker_type_for_error(decision.error_code),
+                )
+
+        for request, _decision in decisions:
+            self._emit_action_allowed(state, request)
+
+        max_workers = min(4, max(1, len(decisions)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                (
+                    request,
+                    executor.submit(self.action_gateway.run, decision.action_spec, run_context=self.run_context),
+                )
+                for request, decision in decisions
+                if decision.action_spec is not None
+            ]
+            for request, future in futures:
+                self._record_action_result(state, request, future.result())
+        return None
+
+    def _record_blocked_action(
+        self,
+        state: CodeWorkerLoopState,
+        request: HarnessActionRequest,
+        observation: HarnessObservation,
+        reason: str,
+        error_code: str | None,
+    ) -> None:
+        self._record_observation(state, request, observation)
+        _emit(
+            self.emit,
+            "code_worker.loop.action.blocked",
+            reason,
+            run_id=state.session.run_id,
+            round=state.session.round,
+            work_item_id=state.session.work_item_id,
+            agent_id=state.session.agent_id,
+            turn_count=state.turn_count,
+            action_id=request.action_id,
+            action_type=request.action_type,
+            error_code=error_code,
+        )
+
+    def _emit_action_allowed(self, state: CodeWorkerLoopState, request: HarnessActionRequest) -> None:
+        _emit(
+            self.emit,
+            "code_worker.loop.action.allowed",
+            "CodeWorker action allowed",
+            run_id=state.session.run_id,
+            round=state.session.round,
+            work_item_id=state.session.work_item_id,
+            agent_id=state.session.agent_id,
+            turn_count=state.turn_count,
+            action_id=request.action_id,
+            action_type=request.action_type,
+        )
+
+    def _record_action_result(
+        self,
+        state: CodeWorkerLoopState,
+        request: HarnessActionRequest,
+        result: ActionResult,
+    ) -> HarnessObservation:
+        observation = self._observation_from_result(request, result)
+        self._record_observation(state, request, observation)
+        _emit(
+            self.emit,
+            "code_worker.loop.action.executed",
+            observation.summary,
+            run_id=state.session.run_id,
+            round=state.session.round,
+            work_item_id=state.session.work_item_id,
+            agent_id=state.session.agent_id,
+            turn_count=state.turn_count,
+            action_id=request.action_id,
+            action_type=request.action_type,
+            status=observation.status,
+            error_code=observation.error_code,
+            evidence_refs=observation.evidence_refs,
+        )
+        return observation
+
+    def _record_skipped_actions(
+        self,
+        state: CodeWorkerLoopState,
+        requests: list[HarnessActionRequest],
+        *,
+        failed_action_id: str,
+    ) -> None:
+        for request in requests:
+            observation = HarnessObservation(
                 action_id=request.action_id,
                 action_type=request.action_type,
-                status=observation.status,
-                error_code=observation.error_code,
-                evidence_refs=observation.evidence_refs,
+                status="blocked",
+                summary=f"Skipped because prior exclusive action failed: {failed_action_id}.",
+                evidence_refs=[f"harness_observation:{request.action_id}"],
+                error_code="skipped_after_failed_exclusive_action",
             )
-
-        return self._blocked_result(
-            state,
-            item,
-            envelope,
-            f"CodeWorker tool loop reached max_turns={state.max_turns}.",
-            "timeout",
-        )
+            self._record_observation(state, request, observation)
 
     def _prompt(
         self,

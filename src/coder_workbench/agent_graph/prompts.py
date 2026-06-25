@@ -149,8 +149,8 @@ def build_worker_tool_loop_prompt(
                 title="CodeWorker Tool Loop Contract",
                 instructions=[
                     "Return exactly one JSON object. Do not include markdown, commentary, transcript, or code fences.",
-                    "Allowed artifact_type values are harness_action and execution_result.",
-                    "Use harness_action when you need runtime evidence before continuing.",
+                    "Allowed artifact_type values are harness_action, harness_action_batch, and execution_result.",
+                    "Use harness_action or harness_action_batch when you need runtime evidence before continuing.",
                     "Use execution_result only when the WorkItem is complete or blocked.",
                     "Do not claim file edits, command results, diffs, or evidence unless prior runtime observations support them.",
                     "Do not fabricate observations. Observations are produced only by runtime.",
@@ -170,6 +170,15 @@ def build_worker_tool_loop_prompt(
                     '{"artifact_type":"harness_action","action_id":"step-1","action_type":"read_file",'
                     '"payload":{"path":"src/example.py"},"reason":"Inspect the file before editing.",'
                     '"risk_level":"low","expected_evidence":["file content preview"]}'
+                ),
+            ),
+            text_layer(
+                layer_id="action_batch_schema",
+                title="Harness action batch schema",
+                content=(
+                    '{"artifact_type":"harness_action_batch","actions":[{"artifact_type":"harness_action",'
+                    '"action_id":"step-1","action_type":"read_file","payload":{"path":"src/example.py"},'
+                    '"reason":"Inspect file.","risk_level":"low"}]}'
                 ),
             ),
             text_layer(

@@ -1,4 +1,4 @@
-from .action_protocol import HarnessActionRequest, HarnessObservation
+from .action_protocol import HarnessActionBatch, HarnessActionRequest, HarnessObservation
 from .actions import HarnessAction
 from .base import AgentHarness, HarnessResult, HarnessTask
 from .code_worker import CodeWorkerHarness
@@ -37,8 +37,10 @@ from .scratchpad import Scratchpad, ScratchpadEntry
 from .self_check import ExecutorSelfChecker, SelfCheckResult, harness_self_check_enabled
 from .session import CodeWorkerLoopState, HarnessSession
 from .stop_gate import StopGate, StopGateDecision
+from .tool_batcher import ToolActionBatch, ToolBatcher
 from .tool_gate import ToolGate, ToolGateDecision
 from .tool_loop import CodeWorkerToolLoop
+from .tool_metadata import ToolCapabilityMetadata, ToolMetadataRegistry
 
 __all__ = [
     "AgentHarness",
@@ -53,6 +55,7 @@ __all__ = [
     "FINAL_REPORT_HARNESS",
     "HARNESS_CONTRACTS",
     "HarnessAction",
+    "HarnessActionBatch",
     "HarnessActionRequest",
     "HarnessContract",
     "HarnessObservation",
@@ -74,8 +77,12 @@ __all__ = [
     "SelfCheckResult",
     "StopGate",
     "StopGateDecision",
+    "ToolActionBatch",
+    "ToolBatcher",
+    "ToolCapabilityMetadata",
     "ToolGate",
     "ToolGateDecision",
+    "ToolMetadataRegistry",
     "code_worker_policy",
     "default_prompt_layer_config",
     "harness_contract_layer",

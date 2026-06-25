@@ -17,6 +17,13 @@ class HarnessActionRequest(BaseModel):
     expected_evidence: list[str] = Field(default_factory=list)
 
 
+class HarnessActionBatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_type: Literal["harness_action_batch"] = "harness_action_batch"
+    actions: list[HarnessActionRequest] = Field(default_factory=list, min_length=1)
+
+
 class HarnessObservation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
