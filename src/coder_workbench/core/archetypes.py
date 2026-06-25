@@ -4,12 +4,11 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from coder_workbench.agent_model import RuntimeProfileCompiler
-from coder_workbench.agent_model.profile import AgentRuntimeProfile, TokenBudget
-from coder_workbench.agent_model.recipe import recipe_from_workflow_agent
 from coder_workbench.core.authority import AgentAuthorityProfile, authority_profile_for_agent
 
 if TYPE_CHECKING:
+    from coder_workbench.agent_model.profile import AgentRuntimeProfile
+    from coder_workbench.agent_model.token_budget import TokenBudget
     from coder_workbench.core.agent_workflow import AgentWorkflowAgent, AgentWorkflowSpec
 
 
@@ -102,6 +101,9 @@ def compile_agent_runtime_profile(
     *,
     primary_planner_id: str,
 ) -> AgentRuntimeProfile:
+    from coder_workbench.agent_model import RuntimeProfileCompiler
+    from coder_workbench.agent_model.recipe import recipe_from_workflow_agent
+
     authority = authority_profile_for_agent(agent, primary_planner_id=primary_planner_id)
     archetype = _archetype_for_agent(agent, authority.authority)
     profile = RuntimeProfileCompiler().compile(
@@ -203,6 +205,8 @@ def _prompt_layers(archetype: str) -> dict[str, object]:
 
 
 def _token_budget(archetype: str) -> TokenBudget:
+    from coder_workbench.agent_model.token_budget import TokenBudget
+
     budgets = {
         "planner": 12000,
         "executor": 9000,

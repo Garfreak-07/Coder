@@ -23,7 +23,6 @@ from .authority import (
     authority_profile_for_agent,
 )
 from .archetypes import (
-    AgentRuntimeProfile,
     RoleCardSpec,
     compile_agent_runtime_profile,
     compile_runtime_profiles,
@@ -63,3 +62,11 @@ __all__ = [
     "validate_agent_workflow",
     "validate_agent_workflow_payload",
 ]
+
+
+def __getattr__(name: str):
+    if name == "AgentRuntimeProfile":
+        from coder_workbench.agent_model.profile import AgentRuntimeProfile
+
+        return AgentRuntimeProfile
+    raise AttributeError(name)

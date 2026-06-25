@@ -4,7 +4,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from coder_workbench.agent_model.profile import TokenBudget
+from coder_workbench.agent_model.token_budget import TokenBudget
 
 from .contracts import CONVERSATION_HARNESS_ID, TASK_EXECUTION_HARNESS_ID, HarnessMode, harness_contract_for_id
 

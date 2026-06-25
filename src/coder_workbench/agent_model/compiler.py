@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .profile import AgentRuntimeProfile, TokenBudget
+from .profile import AgentRuntimeProfile
 from .recipe import AgentRecipe, recipe_from_workflow_agent
+from .token_budget import TokenBudget
 
 if TYPE_CHECKING:
     from coder_workbench.core import AgentWorkflowSpec
