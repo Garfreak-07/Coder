@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from coder_workbench.core.archetypes import agent_payload_from_role_card
 from coder_workbench.core.authority import authority_profile_for_agent
+from coder_workbench.harness_runtime.profiles import HarnessBindings
 
 
 AgentModelTier = Literal["best", "standard", "economy"]
@@ -92,6 +93,10 @@ class AgentWorkflowAgent(BaseModel):
     model_tier: str = "standard"
     can_talk_to_human: bool = False
     capabilities: list[str] = Field(default_factory=list)
+    runtime_profile_id: str | None = None
+    skill_pack_ids: list[str] = Field(default_factory=list)
+    knowledge_pack_ids: list[str] = Field(default_factory=list)
+    memory_pack_ids: list[str] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -141,12 +146,13 @@ class AgentWorkflowSpec(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     id: str
-    version: str = "0.4"
+    version: str = "0.5"
     name: str
     description: str = ""
     primary_planner_id: str
     agents: list[AgentWorkflowAgent]
     edges: list[AgentWorkflowEdge]
+    harness_bindings: HarnessBindings = Field(default_factory=HarnessBindings)
     loop_policy: AgentWorkflowLoopPolicy = Field(default_factory=AgentWorkflowLoopPolicy)
     ui: AgentWorkflowUi = Field(default_factory=AgentWorkflowUi)
 
@@ -156,8 +162,8 @@ class AgentWorkflowSpec(BaseModel):
         if not isinstance(data, dict):
             return data
         migrated = dict(data)
-        if migrated.get("version") in {None, "0.3"}:
-            migrated["version"] = "0.4"
+        if migrated.get("version") in {None, "0.3", "0.4"}:
+            migrated["version"] = "0.5"
         if not migrated.get("primary_planner_id"):
             agents = migrated.get("agents")
             if isinstance(agents, list):
@@ -534,7 +540,7 @@ def default_planner_led_agent_workflow() -> AgentWorkflowSpec:
     return AgentWorkflowSpec.model_validate(
         {
             "id": "default-planner-led",
-            "version": "0.4",
+            "version": "0.5",
             "name": "Planner-led Agent Workflow",
             "description": "Planner decides. Executor executes, verifies, and returns execution evidence. Runtime hides graph details.",
             "primary_planner_id": "planner",

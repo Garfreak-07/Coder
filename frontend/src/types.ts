@@ -49,6 +49,10 @@ export interface AgentWorkflowAgent {
   model_tier: AgentModelTier;
   can_talk_to_human: boolean;
   capabilities: AgentCapability[];
+  runtime_profile_id?: string | null;
+  skill_pack_ids?: string[];
+  knowledge_pack_ids?: string[];
+  memory_pack_ids?: string[];
 }
 
 export interface AgentWorkflowEdge {
@@ -63,6 +67,18 @@ export interface AgentWorkflowLoopPolicy {
   user_can_change: boolean;
 }
 
+export interface HarnessModeBinding {
+  profile_id: string;
+  provider_id?: string;
+}
+
+export interface HarnessBindings {
+  planning_chat: HarnessModeBinding;
+  workflow_supervisor: HarnessModeBinding;
+  task_execution: HarnessModeBinding;
+  agent_overrides?: Record<string, Record<string, HarnessModeBinding>>;
+}
+
 export interface AgentWorkflowSpec {
   id: string;
   version: string;
@@ -71,6 +87,7 @@ export interface AgentWorkflowSpec {
   primary_planner_id: string;
   agents: AgentWorkflowAgent[];
   edges: AgentWorkflowEdge[];
+  harness_bindings?: HarnessBindings;
   loop_policy: AgentWorkflowLoopPolicy;
   ui?: {
     layout?: Record<string, { x: number; y: number }>;

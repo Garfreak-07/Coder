@@ -5,7 +5,7 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-from coder_workbench.core import default_planner_led_agent_workflow, validate_agent_workflow_payload
+from coder_workbench.core import AgentWorkflowSpec, default_planner_led_agent_workflow, validate_agent_workflow_payload
 from coder_workbench.core.artifacts import supported_artifact_types, validate_artifact
 from coder_workbench.server.app import create_app
 
@@ -143,8 +143,24 @@ class AgentWorkflowContractTests(unittest.TestCase):
     def test_default_workflow_is_planner_executor_loop(self) -> None:
         workflow = default_planner_led_agent_workflow()
 
+        self.assertEqual(workflow.version, "0.5")
+        self.assertEqual(workflow.harness_bindings.planning_chat.profile_id, "openhands-planning-chat-default")
+        self.assertEqual(workflow.harness_bindings.workflow_supervisor.profile_id, "openhands-workflow-supervisor-default")
+        self.assertEqual(workflow.harness_bindings.task_execution.profile_id, "openhands-task-executor-default")
         self.assertEqual([agent.role for agent in workflow.agents], ["planner", "executor"])
         self.assertEqual([(edge.from_agent, edge.to_agent, edge.loop) for edge in workflow.edges], [("planner", "executor", False), ("executor", "planner", True)])
+
+    def test_legacy_workflow_payload_migrates_to_harness_bindings(self) -> None:
+        payload = default_planner_led_agent_workflow().model_dump(mode="json", by_alias=True)
+        payload["version"] = "0.4"
+        payload.pop("harness_bindings", None)
+        payload["agents"][1].pop("skill_pack_ids", None)
+
+        workflow = AgentWorkflowSpec.model_validate(payload)
+
+        self.assertEqual(workflow.version, "0.5")
+        self.assertEqual(workflow.agents[1].skill_pack_ids, [])
+        self.assertEqual(workflow.harness_bindings.task_execution.profile_id, "openhands-task-executor-default")
 
     def test_legacy_tester_workflow_payload_is_rejected(self) -> None:
         payload = default_planner_led_agent_workflow().model_dump(mode="json", by_alias=True)

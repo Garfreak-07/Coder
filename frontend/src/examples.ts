@@ -2,10 +2,16 @@ import type { AgentWorkflowSpec } from "./types";
 
 export const defaultPlannerLedAgentWorkflow: AgentWorkflowSpec = {
   id: "default-planner-led",
-  version: "0.4",
+  version: "0.5",
   name: "Planner-led Agent Workflow",
   description: "Planner decides. Executor executes, verifies, and returns execution evidence. Runtime hides graph details.",
   primary_planner_id: "planner",
+  harness_bindings: {
+    planning_chat: { profile_id: "openhands-planning-chat-default" },
+    workflow_supervisor: { profile_id: "openhands-workflow-supervisor-default" },
+    task_execution: { profile_id: "openhands-task-executor-default" },
+    agent_overrides: {}
+  },
   agents: [
     {
       id: "planner",
