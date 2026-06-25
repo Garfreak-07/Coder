@@ -12,8 +12,10 @@ from coder_workbench.agent_graph.schema import AgentTaskEnvelope, WorkItem
 from coder_workbench.agent_harness.action_protocol import HarnessActionRequest, HarnessObservation
 from coder_workbench.agent_harness.artifact_repair_pipeline import ArtifactRepairPipeline, RepairContext
 from coder_workbench.agent_harness.execution_verification import ensure_blocked_contract, ensure_execution_verification
+from coder_workbench.agent_harness.recovery_policy import RecoveryPolicy
 from coder_workbench.agent_harness.self_check import ExecutorSelfChecker
 from coder_workbench.agent_harness.session import CodeWorkerLoopState, HarnessSession
+from coder_workbench.agent_harness.stop_gate import StopGate
 from coder_workbench.agent_harness.tool_gate import ToolGate
 from coder_workbench.core.artifacts import validate_artifact
 
@@ -37,6 +39,8 @@ class CodeWorkerToolLoop:
         self.tool_gate = tool_gate
         self.repair_pipeline = repair_pipeline or ArtifactRepairPipeline()
         self.self_checker = self_checker or ExecutorSelfChecker(self.repair_pipeline)
+        self.recovery_policy = RecoveryPolicy()
+        self.stop_gate = StopGate()
         self.max_turns = max(1, max_turns)
         self.emit = emit
 
@@ -122,7 +126,18 @@ class CodeWorkerToolLoop:
             )
             artifact_type = str(payload.get("artifact_type") or "")
             if artifact_type == "execution_result":
-                return self._finalize_execution_result(payload, state=state, item=item, envelope=envelope)
+                final = self._finalize_execution_result(payload, state=state, item=item, envelope=envelope)
+                if final is None:
+                    continue
+                return final
+            if artifact_type in {"planner_decision", "final_report"}:
+                return self._blocked_result(
+                    state,
+                    item,
+                    envelope,
+                    f"Executor attempted to return planner-only artifact_type: {artifact_type}",
+                    "permission_boundary",
+                )
             if artifact_type != "harness_action":
                 if self._recoverable_model_output_error(
                     state,
@@ -186,7 +201,10 @@ class CodeWorkerToolLoop:
                 if not isinstance(final_payload, dict):
                     final_payload = dict(request.payload)
                 final_payload["artifact_type"] = "execution_result"
-                return self._finalize_execution_result(final_payload, state=state, item=item, envelope=envelope)
+                final = self._finalize_execution_result(final_payload, state=state, item=item, envelope=envelope)
+                if final is None:
+                    continue
+                return final
 
             assert decision.action_spec is not None
             _emit(
@@ -252,6 +270,7 @@ class CodeWorkerToolLoop:
         error_code: str,
         payload_preview: dict[str, Any] | None = None,
     ) -> bool:
+        decision = self.recovery_policy.decide(error_code, attempts=state.session.recovery_attempts)
         state.max_output_recovery_count += 1
         observation = HarnessObservation(
             action_id=f"model-output-{state.turn_count}",
@@ -259,12 +278,20 @@ class CodeWorkerToolLoop:
             status="blocked",
             summary=summary,
             evidence_refs=[f"harness_observation:model-output-{state.turn_count}"],
-            payload_preview=payload_preview or {},
+            payload_preview={"next_instruction": decision.next_instruction, **(payload_preview or {})},
             error_code=error_code,
         )
         state.session.observations.append(observation)
         state.session.blocked_reasons.append(summary)
-        state.transition = {"reason": error_code, "recoverable": state.max_output_recovery_count <= 1}
+        state.session.recovery_attempts.append(
+            {
+                "error_code": error_code,
+                "reason": summary,
+                "turn_count": state.turn_count,
+                "recoverable": decision.recoverable,
+            }
+        )
+        state.transition = {"reason": error_code, "recoverable": decision.recoverable}
         _emit(
             self.emit,
             "code_worker.loop.recovery.scheduled",
@@ -276,7 +303,7 @@ class CodeWorkerToolLoop:
             turn_count=state.turn_count,
             error_code=error_code,
         )
-        return state.max_output_recovery_count <= 1
+        return decision.recoverable
 
     def _observation_from_result(self, request: HarnessActionRequest, result: ActionResult) -> HarnessObservation:
         status = result.status
@@ -354,7 +381,7 @@ class CodeWorkerToolLoop:
         state: CodeWorkerLoopState,
         item: WorkItem,
         envelope: AgentTaskEnvelope,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         state.stop_gate_active = True
         _emit(
             self.emit,
@@ -365,16 +392,63 @@ class CodeWorkerToolLoop:
             work_item_id=state.session.work_item_id,
             agent_id=state.session.agent_id,
         )
-        identity_issue = _identity_issue(payload, item, envelope)
-        if identity_issue:
-            return self._blocked_result(state, item, envelope, identity_issue, "schema_validation_failed")
-        if any(key in payload for key in ("planner_decision", "final_report", "ask_human", "human_message")):
+        gate_decision = self.stop_gate.evaluate(payload, state=state, item=item, envelope=envelope)
+        if not gate_decision.accepted:
+            if gate_decision.recoverable and gate_decision.observation is not None:
+                recovery = self.recovery_policy.decide(
+                    gate_decision.error_code or "stop_gate_failed",
+                    attempts=state.session.recovery_attempts,
+                )
+                state.session.stop_gate_failures.append(
+                    {
+                        "turn_count": state.turn_count,
+                        "reason": gate_decision.reason,
+                        "error_code": gate_decision.error_code,
+                        "recoverable": recovery.recoverable,
+                    }
+                )
+                state.session.recovery_attempts.append(
+                    {
+                        "turn_count": state.turn_count,
+                        "reason": gate_decision.reason,
+                        "error_code": gate_decision.error_code or "stop_gate_failed",
+                        "next_instruction": recovery.next_instruction,
+                        "recoverable": recovery.recoverable,
+                    }
+                )
+                if recovery.recoverable:
+                    observation = gate_decision.observation.model_copy(
+                        update={
+                            "payload_preview": {
+                                **gate_decision.observation.payload_preview,
+                                "next_instruction": recovery.next_instruction,
+                            }
+                        }
+                    )
+                    state.session.observations.append(observation)
+                    state.session.blocked_reasons.append(gate_decision.reason)
+                    state.transition = {
+                        "reason": "stop_gate_retry",
+                        "error_code": gate_decision.error_code,
+                        "turn_count": state.turn_count,
+                    }
+                    _emit(
+                        self.emit,
+                        "code_worker.loop.stop_gate.failed",
+                        gate_decision.reason,
+                        run_id=state.session.run_id,
+                        round=state.session.round,
+                        work_item_id=state.session.work_item_id,
+                        agent_id=state.session.agent_id,
+                        error_code=gate_decision.error_code,
+                    )
+                    return None
             return self._blocked_result(
                 state,
                 item,
                 envelope,
-                "Executor attempted to include planner-only or human-prompt fields.",
-                "permission_boundary",
+                gate_decision.reason or "Stop gate rejected candidate execution_result.",
+                _blocker_type_for_error(gate_decision.error_code),
             )
 
         enriched = self._enrich_final_payload(payload, state, item, envelope)
@@ -647,6 +721,11 @@ def _blocker_type_for_error(error_code: str | None) -> str:
         "command_failed": "command_failed",
         "unknown_action_type": "tool_unavailable",
         "invalid_action_payload": "tool_unavailable",
+        "invalid_json": "schema_validation_failed",
+        "invalid_action_schema": "schema_validation_failed",
+        "invalid_artifact_type": "schema_validation_failed",
+        "schema_validation_failed": "schema_validation_failed",
+        "stop_gate_failed": "schema_validation_failed",
     }.get(str(error_code or ""), "unknown_error")
 
 

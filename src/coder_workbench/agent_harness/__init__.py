@@ -30,10 +30,12 @@ from .prompt_layers import (
     render_prompt_layers,
     text_layer,
 )
+from .recovery_policy import RecoveryDecision, RecoveryPolicy
 from .repair import ArtifactRepairService
 from .scratchpad import Scratchpad, ScratchpadEntry
 from .self_check import ExecutorSelfChecker, SelfCheckResult, harness_self_check_enabled
 from .session import CodeWorkerLoopState, HarnessSession
+from .stop_gate import StopGate, StopGateDecision
 from .tool_gate import ToolGate, ToolGateDecision
 from .tool_loop import CodeWorkerToolLoop
 
@@ -61,9 +63,13 @@ __all__ = [
     "PLANNER_ORDER_HARNESS",
     "PromptLayer",
     "PlannerHarness",
+    "RecoveryDecision",
+    "RecoveryPolicy",
     "Scratchpad",
     "ScratchpadEntry",
     "SelfCheckResult",
+    "StopGate",
+    "StopGateDecision",
     "ToolGate",
     "ToolGateDecision",
     "code_worker_policy",

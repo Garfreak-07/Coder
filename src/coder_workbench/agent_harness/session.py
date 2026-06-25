@@ -32,6 +32,7 @@ class HarnessSession(BaseModel):
 
     command_checks: list[dict[str, Any]] = Field(default_factory=list)
     blocked_reasons: list[str] = Field(default_factory=list)
+    stop_gate_failures: list[dict[str, Any]] = Field(default_factory=list)
     recovery_attempts: list[dict[str, Any]] = Field(default_factory=list)
 
 

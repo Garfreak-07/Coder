@@ -202,7 +202,7 @@ class CodeWorkerToolLoopTests(unittest.TestCase):
             ])
             record = _run_tool_loop(str(root), model.responses, sandbox_root=str(sandbox), model=model)
 
-        self.assertEqual(model.calls, 2)
+        self.assertEqual(model.calls, 4)
         self.assertEqual(record.status, "blocked")
         self.assertEqual(record.artifact_payload["verification"]["checks_run"][0]["status"], "fail")
 
@@ -248,12 +248,12 @@ class CodeWorkerToolLoopTests(unittest.TestCase):
                 ],
             )
 
-        self.assertEqual(record.status, "completed")
-        self.assertEqual(record.artifact_payload["changed_files"], [])
+        self.assertEqual(record.status, "blocked")
+        self.assertEqual(record.artifact_payload["blocker_type"], "schema_validation_failed")
 
     def test_invalid_model_json_triggers_one_correction(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            model = FakeModel(["not json", _final("Corrected.")])
+            model = FakeModel(["not json", _final_noop("Corrected.")])
             record = _run_tool_loop(tmp, model.responses, model=model)
 
         self.assertEqual(model.calls, 2)
@@ -263,8 +263,8 @@ class CodeWorkerToolLoopTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             record = _run_tool_loop(tmp, ['{"artifact_type":"execution_result","status":"completed","summary":"Done."}'])
 
-        self.assertEqual(record.status, "completed")
-        self.assertEqual(record.artifact_payload["verification"]["status"], "skipped")
+        self.assertEqual(record.status, "blocked")
+        self.assertEqual(record.artifact_payload["blocker_type"], "schema_validation_failed")
 
     def test_self_check_blocks_mismatched_work_item_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -344,6 +344,14 @@ def _action(action_id: str, action_type: str, payload: dict, *, risk_level: str 
 
 def _final(summary: str) -> str:
     return '{"artifact_type":"execution_result","status":"completed","summary":' + _json(summary) + "}"
+
+
+def _final_noop(summary: str) -> str:
+    return (
+        '{"artifact_type":"execution_result","status":"completed","summary":'
+        + _json(summary)
+        + ',"no_op_rationale":"No runtime action was needed for this test."}'
+    )
 
 
 def _json(value) -> str:
