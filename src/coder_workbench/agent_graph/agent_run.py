@@ -285,6 +285,8 @@ class AgentRun:
             capability_set=capability_set,
         )
         round_number = int(getattr(bundle, "round", 1) or 1)
+        supervisor_facts = _workflow_supervisor_facts_from_data(self.initial_data)
+        evidence_refs = _unique_strings([*_evidence_refs_from_bundle(bundle), *supervisor_facts["evidence_refs"]])
         context = self._harness_context(
             agent_id=planner.id,
             harness_id="conversation-harness",
@@ -294,7 +296,15 @@ class AgentRun:
             state_view=state_view,
             capability_set=capability_set.model_dump(mode="json"),
             request_text=str(getattr(bundle, "user_goal", "") or self.initial_data.get("request") or ""),
-            evidence_refs=_evidence_refs_from_bundle(bundle),
+            round_summary=supervisor_facts["round_summary"],
+            execution_results=supervisor_facts["execution_results"],
+            verification_summaries=supervisor_facts["verification_summaries"],
+            blocked_reasons=supervisor_facts["blocked_reasons"],
+            changed_files_summary=supervisor_facts["changed_files_summary"],
+            evidence_refs=evidence_refs,
+            native_event_refs=supervisor_facts["native_runtime_refs"],
+            diff_refs=supervisor_facts["diff_refs"],
+            log_refs=supervisor_facts["log_refs"],
         )
         result = self.harness_runtime_manager.run_workflow_supervisor(
             context=context,
@@ -398,6 +408,13 @@ class AgentRun:
         task_envelope: AgentTaskEnvelope | None = None,
         evidence_refs: list[str] | None = None,
         native_event_refs: list[str] | None = None,
+        diff_refs: list[str] | None = None,
+        log_refs: list[str] | None = None,
+        round_summary: dict[str, Any] | None = None,
+        execution_results: list[dict[str, Any]] | None = None,
+        verification_summaries: list[dict[str, Any]] | None = None,
+        blocked_reasons: list[str] | None = None,
+        changed_files_summary: dict[str, Any] | None = None,
     ) -> HarnessRuntimeContext:
         shared_state = self.initial_data.get("shared_run_state")
         user_goal = request_text or str(self.initial_data.get("request") or "")
@@ -411,8 +428,15 @@ class AgentRun:
             task_envelope=task_envelope,
             state_view=state_view,
             capability_set=capability_set,
+            round_summary=round_summary,
+            execution_results=execution_results,
+            verification_summaries=verification_summaries,
+            blocked_reasons=blocked_reasons,
+            changed_files_summary=changed_files_summary,
             evidence_refs=evidence_refs,
             native_event_refs=native_event_refs,
+            diff_refs=diff_refs,
+            log_refs=log_refs,
         )
         return HarnessRuntimeContext(
             run_id=self.run_id or str(self.initial_data.get("run_id") or self.agent_workflow.id),
@@ -513,3 +537,107 @@ def _evidence_refs_from_bundle(bundle: Any) -> list[str]:
     for item in getattr(bundle, "items", []) or []:
         refs.extend(str(ref) for ref in getattr(item, "refs", []) or [] if str(ref).strip())
     return refs
+
+
+def _workflow_supervisor_facts_from_data(data: dict[str, Any]) -> dict[str, Any]:
+    graph_cache = data.get("graph_run_cache") if isinstance(data.get("graph_run_cache"), dict) else {}
+    execution_cache = graph_cache.get("execution_cache") if isinstance(graph_cache.get("execution_cache"), dict) else {}
+    execution_results: list[dict[str, Any]] = []
+    verification_summaries: list[dict[str, Any]] = []
+    blocked_reasons: list[str] = []
+    changed_files_summary: dict[str, list[str]] = {"created": [], "modified": [], "deleted": []}
+    evidence_refs: list[str] = []
+    for record in execution_cache.values():
+        if not isinstance(record, dict):
+            continue
+        artifact = record.get("artifact_payload") if isinstance(record.get("artifact_payload"), dict) else {}
+        if not artifact:
+            continue
+        execution_results.append(artifact)
+        evidence_refs.extend(_artifact_evidence_refs(artifact))
+        if artifact.get("status") == "blocked":
+            reason = str(artifact.get("blocker_reason") or artifact.get("summary") or "").strip()
+            if reason:
+                blocked_reasons.append(reason)
+        _extend_file_summary(changed_files_summary, "created", artifact.get("created_files"))
+        _extend_file_summary(changed_files_summary, "modified", artifact.get("changed_files"))
+        _extend_file_summary(changed_files_summary, "deleted", artifact.get("deleted_files"))
+        verification = artifact.get("verification") if isinstance(artifact.get("verification"), dict) else {}
+        if verification:
+            verification_summaries.append(
+                {
+                    "work_item_id": artifact.get("work_item_id"),
+                    "status": verification.get("status"),
+                    "evidence_refs": _string_list(verification.get("evidence_refs")),
+                    "remaining_work": _string_list(verification.get("remaining_work")),
+                    "no_check_rationale": verification.get("no_check_rationale"),
+                }
+            )
+
+    round_summary = data.get("round_summary") if isinstance(data.get("round_summary"), dict) else None
+    native_runtime_refs = _flatten_ref_map(graph_cache.get("native_runtime_refs"))
+    diff_refs = _flatten_ref_map(graph_cache.get("diff_refs"))
+    log_refs = _flatten_ref_map(graph_cache.get("log_refs"))
+    return {
+        "round_summary": round_summary,
+        "execution_results": execution_results,
+        "verification_summaries": verification_summaries,
+        "blocked_reasons": _unique_strings(blocked_reasons),
+        "changed_files_summary": {key: refs for key, refs in changed_files_summary.items() if refs},
+        "evidence_refs": _unique_strings(evidence_refs),
+        "native_runtime_refs": native_runtime_refs,
+        "diff_refs": diff_refs,
+        "log_refs": log_refs,
+    }
+
+
+def _artifact_evidence_refs(artifact: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    for key in ("artifact_id", "evidence_refs", "patch_refs", "outputs"):
+        value = artifact.get(key)
+        if isinstance(value, str):
+            refs.append(value)
+        else:
+            refs.extend(_string_list(value))
+    verification = artifact.get("verification") if isinstance(artifact.get("verification"), dict) else {}
+    refs.extend(_string_list(verification.get("evidence_refs")))
+    for check in verification.get("checks_run") or []:
+        if not isinstance(check, dict):
+            continue
+        refs.extend(_string_list(check.get("evidence_refs")))
+        output_ref = check.get("output_ref")
+        if isinstance(output_ref, str):
+            refs.append(output_ref)
+    return _unique_strings(refs)
+
+
+def _extend_file_summary(summary: dict[str, list[str]], key: str, value: Any) -> None:
+    for item in _string_list(value):
+        if item not in summary[key]:
+            summary[key].append(item)
+
+
+def _flatten_ref_map(value: Any) -> list[str]:
+    refs: list[str] = []
+    if isinstance(value, dict):
+        for item in value.values():
+            refs.extend(_string_list(item))
+    return _unique_strings(refs)
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item).strip()]
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        output.append(text)
+    return output

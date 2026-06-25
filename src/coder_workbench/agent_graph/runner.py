@@ -25,6 +25,7 @@ from coder_workbench.agent_graph.evaluation import (
 from coder_workbench.agent_graph.final_report import build_final_report
 from coder_workbench.agent_graph.interruption import build_graph_interrupt, should_interrupt_execution
 from coder_workbench.agent_graph.merge import build_planner_input_bundle, build_round_summary
+from coder_workbench.agent_graph.planner_strategy import POLICY_BLOCKER_TYPES
 from coder_workbench.agent_graph.round_budget import evaluate_round_budget_preflight
 from coder_workbench.agent_graph.scheduler import AgentGraphScheduler
 from coder_workbench.agent_graph.schema import (
@@ -376,8 +377,13 @@ class AgentGraphRunner:
                     for item in outcome.planner_input_bundle.items
                 )
                 blocked_replan_once = _blocked_recommends_replan_once(outcome, artifacts)
+                blocked_progress_stop_reason = _blocked_progress_stop_reason(
+                    outcome,
+                    previous_bundle=previous_bundle,
+                    artifacts=artifacts,
+                )
                 if round_has_blocked and outcome.planner_decision.get("next_action") == "continue":
-                    if blocked_replan_once and not blocked_recovery_used:
+                    if blocked_progress_stop_reason is None and blocked_replan_once and not blocked_recovery_used:
                         blocked_recovery_used = True
                         data["blocked_recovery_used"] = True
                         record_state_update(
@@ -388,7 +394,7 @@ class AgentGraphRunner:
                             },
                         )
                     else:
-                        reason = _blocked_recovery_summary(outcome)
+                        reason = blocked_progress_stop_reason or _blocked_recovery_summary(outcome)
                         forced_ref = graph_artifact_id("planner_decision", "blocked_recovery", "round", round_number)
                         forced_decision = recorder.record(
                             forced_ref,
@@ -2001,15 +2007,133 @@ def _blocked_recovery_summary(outcome: RoundOutcome) -> str:
     return f"Blocked recovery was exhausted. Blocked WorkItems: {details}"
 
 
+def _blocked_progress_stop_reason(
+    outcome: RoundOutcome,
+    *,
+    previous_bundle: PlannerInputBundle | None,
+    artifacts: dict[str, Any],
+) -> str | None:
+    policy_blocked = _policy_blocked_summary(outcome.planner_input_bundle, artifacts)
+    if policy_blocked:
+        return policy_blocked
+    if previous_bundle is None:
+        return None
+    current_signature = _blocked_blocker_key(outcome.planner_input_bundle, artifacts)
+    previous_signature = _blocked_blocker_key(previous_bundle, artifacts)
+    if current_signature and current_signature == previous_signature:
+        return f"Blocked recovery stopped after the same blocker repeated: {current_signature}."
+    current_refs = _progress_evidence_refs(outcome.planner_input_bundle, artifacts)
+    previous_refs = _progress_evidence_refs(previous_bundle, artifacts)
+    if not current_refs:
+        return "Blocked recovery stopped because the blocked round produced no diff or evidence refs."
+    if current_refs.issubset(previous_refs):
+        return "Blocked recovery stopped because this round produced no new diff or evidence refs."
+    return None
+
+
 def _blocked_recommends_replan_once(outcome: RoundOutcome, artifacts: dict[str, Any]) -> bool:
     for item in outcome.planner_input_bundle.items:
         if item.execution_status != "blocked" and item.verification_status not in {"fail", "blocked"}:
             continue
         for ref in item.refs:
             artifact = artifacts.get(ref)
-            if isinstance(artifact, dict) and artifact.get("planner_recommendation") == "replan_once":
+            if not isinstance(artifact, dict):
+                continue
+            if _artifact_policy_blocked(artifact):
+                continue
+            if artifact.get("planner_recommendation") == "replan_once":
                 return True
-    return any(interrupt.continue_without_human_possible is True for interrupt in outcome.planner_input_bundle.interrupts)
+    return any(
+        interrupt.continue_without_human_possible is True
+        and interrupt.blocker_type not in POLICY_BLOCKER_TYPES
+        for interrupt in outcome.planner_input_bundle.interrupts
+    )
+
+
+def _policy_blocked_summary(bundle: PlannerInputBundle, artifacts: dict[str, Any]) -> str | None:
+    for interrupt in bundle.interrupts:
+        if interrupt.blocker_type in POLICY_BLOCKER_TYPES:
+            artifact = artifacts.get(interrupt.artifact_ref)
+            if isinstance(artifact, dict) and not _artifact_policy_blocked(artifact):
+                continue
+            return f"Sandbox or security policy blocked progress: {interrupt.reason}"
+    for item in bundle.items:
+        for artifact in _artifacts_for_item(item.refs, artifacts):
+            if _artifact_policy_blocked(artifact):
+                blocker = str(artifact.get("blocker_type") or "policy_blocked")
+                reason = str(artifact.get("blocker_reason") or artifact.get("summary") or "policy boundary")
+                return f"Sandbox or security policy blocked progress: {blocker}: {reason}"
+    return None
+
+
+def _blocked_blocker_key(bundle: PlannerInputBundle, artifacts: dict[str, Any]) -> tuple[str, ...]:
+    signatures: list[str] = []
+    for item in bundle.items:
+        if item.execution_status != "blocked" and item.verification_status not in {"fail", "blocked"}:
+            continue
+        item_signatures: list[str] = []
+        for artifact in _artifacts_for_item(item.refs, artifacts):
+            fingerprint = str(artifact.get("blocker_fingerprint") or "").strip()
+            if fingerprint:
+                item_signatures.append(fingerprint)
+                continue
+            blocker_type = str(artifact.get("blocker_type") or "").strip()
+            reason = str(artifact.get("blocker_reason") or artifact.get("summary") or "").strip()
+            if blocker_type or reason:
+                item_signatures.append(f"{blocker_type}:{reason}")
+        if item_signatures:
+            signatures.append("|".join(sorted(set(item_signatures))))
+        else:
+            signatures.append(item.execution_summary or item.verification_summary)
+    return tuple(sorted(signatures))
+
+
+def _progress_evidence_refs(bundle: PlannerInputBundle, artifacts: dict[str, Any]) -> set[str]:
+    refs: set[str] = set()
+    for item in bundle.items:
+        for artifact in _artifacts_for_item(item.refs, artifacts):
+            refs.update(_artifact_progress_refs(artifact))
+    return refs
+
+
+def _artifact_policy_blocked(artifact: dict[str, Any]) -> bool:
+    if artifact.get("planner_recommendation") == "replan_once" and artifact.get("continue_without_human_possible") is True:
+        return False
+    if artifact.get("blocker_type") in POLICY_BLOCKER_TYPES:
+        return True
+    boundary = artifact.get("constraint_boundary")
+    return isinstance(boundary, dict) and (
+        boundary.get("requires_out_of_scope_write") is True
+        or boundary.get("requires_destructive_action") is True
+    )
+
+
+def _artifact_progress_refs(artifact: dict[str, Any]) -> set[str]:
+    refs: set[str] = set()
+    for key in ("evidence_refs", "patch_refs", "outputs"):
+        refs.update(_string_refs(artifact.get(key)))
+    verification = artifact.get("verification") if isinstance(artifact.get("verification"), dict) else {}
+    refs.update(_string_refs(verification.get("evidence_refs")))
+    for check in verification.get("checks_run") or []:
+        if not isinstance(check, dict):
+            continue
+        refs.update(_string_refs(check.get("evidence_refs")))
+        output_ref = check.get("output_ref")
+        if isinstance(output_ref, str) and output_ref.strip():
+            refs.add(output_ref)
+    return refs
+
+
+def _artifacts_for_item(refs: list[str], artifacts: dict[str, Any]) -> list[dict[str, Any]]:
+    return [artifact for ref in refs if isinstance((artifact := artifacts.get(ref)), dict)]
+
+
+def _string_refs(value: Any) -> set[str]:
+    if isinstance(value, str):
+        return {value.strip()} if value.strip() else set()
+    if isinstance(value, list):
+        return {str(item).strip() for item in value if str(item).strip()}
+    return set()
 
 
 def _run_guard_from_data(data: dict[str, Any], *, max_rounds: int) -> RunGuard:

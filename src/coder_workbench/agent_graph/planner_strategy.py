@@ -8,6 +8,14 @@ from coder_workbench.core import AgentWorkflowAgent, AgentWorkflowSpec
 from coder_workbench.core.artifacts import validate_artifact
 
 
+POLICY_BLOCKER_TYPES = {
+    "scope_violation",
+    "risk_path_blocked",
+    "permission_boundary",
+    "sandbox_unavailable",
+}
+
+
 @dataclass(frozen=True)
 class PlannerStrategyContext:
     agent_workflow: AgentWorkflowSpec
@@ -142,38 +150,50 @@ def _local_decision(bundle: PlannerInputBundle) -> dict[str, Any]:
         effect.get("effect_type") == "runtime_action" and effect.get("status") == "blocked"
         for effect in bundle.effects
     )
+    has_policy_blockers = any(interrupt.blocker_type in POLICY_BLOCKER_TYPES for interrupt in bundle.interrupts) or any(
+        effect.get("blocker_type") in POLICY_BLOCKER_TYPES
+        or effect.get("policy") in {"sandbox", "security"}
+        or effect.get("status") in {"sandbox_policy_blocked", "security_policy_blocked"}
+        for effect in bundle.effects
+    )
     can_continue_from_interrupts = has_interrupts and all(
         interrupt.continue_without_human_possible is True
         for interrupt in bundle.interrupts
-    )
+    ) and not has_policy_blockers
     blocked_requires_finish = (
-        has_interrupts
+        has_policy_blockers
+        or has_interrupts
         or has_blocked_work
         or has_blocked_check_effects
         or has_blocked_runtime_actions
     ) and not can_continue_from_interrupts
     next_action = (
         "continue"
-        if can_continue_from_interrupts
-        or has_failed_verification
-        or has_debug_findings
-        or has_failed_check_effects
-        or has_failed_runtime_actions
+        if not has_policy_blockers
+        and (
+            can_continue_from_interrupts
+            or has_failed_verification
+            or has_debug_findings
+            or has_failed_check_effects
+            or has_failed_runtime_actions
+        )
         else "finish"
     )
     final_status = "blocked" if blocked_requires_finish else None
     reason = (
-        "DebugFinding is inside the current RunContract; local PlannerStrategy will replan."
+        "Sandbox or security policy blocked progress; local PlannerStrategy will finish blocked."
+        if has_policy_blockers
+        else "DebugFinding is inside the current RunContract; local PlannerStrategy will retry within the current RunContract."
         if has_debug_findings
-        else "Check result failed; local PlannerStrategy will replan inside the current RunContract."
+        else "Check result failed; local PlannerStrategy will retry inside the current RunContract."
         if has_failed_check_effects
         else "Check command requires Planner confirmation before it can continue."
         if has_blocked_check_effects
-        else "Runtime action failed; local PlannerStrategy will replan inside the current RunContract."
+        else "Runtime action failed; local PlannerStrategy will retry inside the current RunContract."
         if has_failed_runtime_actions
         else "Runtime action requires approval before it can continue."
         if has_blocked_runtime_actions
-        else "Execution verification failed; local PlannerStrategy will replan inside the existing RunContract."
+        else "Execution verification failed; local PlannerStrategy will retry inside the existing RunContract."
         if has_failed_verification
         else "Executor requested Planner intervention."
         if has_interrupts
@@ -186,9 +206,10 @@ def _local_decision(bundle: PlannerInputBundle) -> dict[str, Any]:
         "round": bundle.round,
         "task_done": next_action == "finish" and final_status is None,
         "next_action": next_action,
-        "final_status": final_status,
+        "final_status": final_status or ("completed" if next_action == "finish" else None),
         "risk_level": "medium"
-        if has_interrupts
+        if has_policy_blockers
+        or has_interrupts
         or has_debug_findings
         or has_failed_check_effects
         or has_blocked_check_effects

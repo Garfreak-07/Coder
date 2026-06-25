@@ -27,6 +27,13 @@ if TYPE_CHECKING:
 EmitEvent = Callable[..., None]
 ModelFactory = Callable[[RuntimeConfig], Any]
 
+POLICY_BLOCKER_TYPES = {
+    "scope_violation",
+    "risk_path_blocked",
+    "permission_boundary",
+    "sandbox_unavailable",
+}
+
 
 class AgentEngineRuntimeError(ValueError):
     def __init__(self, message: str, *, status_code: str) -> None:
@@ -446,40 +453,52 @@ class PlannerEngine(ModelBackedEngine):
             effect.get("effect_type") == "runtime_action" and effect.get("status") == "blocked"
             for effect in bundle.effects
         )
+        has_policy_blockers = any(interrupt.blocker_type in POLICY_BLOCKER_TYPES for interrupt in bundle.interrupts) or any(
+            effect.get("blocker_type") in POLICY_BLOCKER_TYPES
+            or effect.get("policy") in {"sandbox", "security"}
+            or effect.get("status") in {"sandbox_policy_blocked", "security_policy_blocked"}
+            for effect in bundle.effects
+        )
         can_continue_from_interrupts = has_interrupts and all(
             interrupt.continue_without_human_possible is True
             for interrupt in bundle.interrupts
-        )
+        ) and not has_policy_blockers
         blocked_requires_finish = (
-            has_interrupts
+            has_policy_blockers
+            or has_interrupts
             or has_blocked_work
             or has_blocked_check_effects
             or has_blocked_runtime_actions
         ) and not can_continue_from_interrupts
         mock_next_action = (
             "continue"
-            if can_continue_from_interrupts
-            or has_failed_verification
-            or has_debug_findings
-            or has_failed_check_effects
-            or has_failed_runtime_actions
+            if not has_policy_blockers
+            and (
+                can_continue_from_interrupts
+                or has_failed_verification
+                or has_debug_findings
+                or has_failed_check_effects
+                or has_failed_runtime_actions
+            )
             else "finish"
         )
         mock_final_status = "blocked" if blocked_requires_finish else None
         mock_reason = (
-            "DebugFinding is inside the current RunContract; Planner will replan."
+            "Sandbox or security policy blocked progress; Planner will finish blocked."
+            if has_policy_blockers
+            else "DebugFinding is inside the current RunContract; Planner will retry."
             if has_debug_findings
-            else "Check result failed; Planner will replan inside the current RunContract."
+            else "Check result failed; Planner will retry inside the current RunContract."
             if has_failed_check_effects
             else "Check command requires Planner confirmation before it can continue."
             if has_blocked_check_effects
-            else "Runtime action failed; Planner will replan inside the current RunContract."
+            else "Runtime action failed; Planner will retry inside the current RunContract."
             if has_failed_runtime_actions
             else "Runtime action requires approval before Planner can continue."
             if has_blocked_runtime_actions
             else "Executor requested Planner intervention."
             if has_interrupts
-            else "Execution verification failed; Planner will replan inside the existing RunContract."
+            else "Execution verification failed; Planner will retry inside the existing RunContract."
             if has_failed_verification
             else "Work is blocked and requires Planner or user judgment."
             if has_blocked_work
@@ -499,9 +518,10 @@ class PlannerEngine(ModelBackedEngine):
                 "round": bundle.round,
                 "task_done": mock_next_action == "finish" and mock_final_status is None,
                 "next_action": mock_next_action,
-                "final_status": mock_final_status,
+                "final_status": mock_final_status or ("completed" if mock_next_action == "finish" else None),
                 "risk_level": "medium"
-                if has_interrupts
+                if has_policy_blockers
+                or has_interrupts
                 or has_debug_findings
                 or has_failed_check_effects
                 or has_blocked_check_effects

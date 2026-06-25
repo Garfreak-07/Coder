@@ -333,7 +333,15 @@ def _prompt_for_request(request: HarnessRunRequest) -> str:
         )
         _append_section(lines, "Confirmed goal", _dig(context_packet, "hot", "confirmed_goal") or _dig(context_packet, "hot", "user_goal"))
         _append_section(lines, "Round state", request.context.round_working_set or _dig(context_packet, "warm", "run_state_summary"))
+        _append_section(lines, "Round summary", _dig(context_packet, "warm", "round_summary"))
+        _append_section(lines, "Execution summaries", _dig(context_packet, "warm", "execution_result_summaries"))
+        _append_section(lines, "Verification summaries", _dig(context_packet, "warm", "verification_summaries"))
+        _append_section(lines, "Blocked reasons", _dig(context_packet, "warm", "blocked_reasons"))
+        _append_section(lines, "Changed files summary", _dig(context_packet, "warm", "changed_files_summary"))
         _append_section(lines, "Evidence refs", request.input_artifacts.get("evidence_refs") or _cold_refs(context_packet, "evidence"))
+        _append_section(lines, "Native runtime refs", _cold_refs(context_packet, "native_runtime"))
+        _append_section(lines, "Diff refs", _cold_refs(context_packet, "diff"))
+        _append_section(lines, "Log refs", _cold_refs(context_packet, "log"))
         return "\n\n".join(lines)
     lines.extend(
         [
