@@ -5,6 +5,12 @@ from .schema import SharedRunState, StateUpdate
 
 
 class RunStateStore:
+    """In-memory helper for tests and live runtime staging only.
+
+    Durable SharedRunState persistence is the `data["shared_run_state"]` payload
+    inside the stored RunResult.
+    """
+
     def __init__(self) -> None:
         self._states: dict[str, SharedRunState] = {}
 

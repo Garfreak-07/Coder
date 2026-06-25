@@ -7,6 +7,12 @@ from .schema import SharedRunState
 
 
 class RunStateCheckpointer:
+    """In-memory helper for tests and live runtime staging only.
+
+    Durable checkpoint state is carried in RunResult resume checkpoints and the
+    persisted `data["shared_run_state"]` payload.
+    """
+
     def __init__(self) -> None:
         self._checkpoints: dict[str, list[dict[str, Any]]] = {}
 

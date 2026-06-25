@@ -42,11 +42,12 @@ class ProductUISurfaceTests(unittest.TestCase):
             "Message the Planner",
             "Planner strength",
             "Run settings",
-            "Event log",
-            "submitPlannerResponse",
+            "Advanced debug: event log",
         ]:
             with self.subTest(token=token):
                 self.assertIn(token, sources)
+
+        self.assertNotIn("submitPlannerResponse", sources)
 
     def test_app_uses_left_sidebar_not_top_navigation(self) -> None:
         app = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")

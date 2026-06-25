@@ -91,7 +91,7 @@ class RunController:
             return RunControllerDecision(
                 action="finish",
                 reason=reason,
-                status_code="planner_blocked",
+                status_code="legacy_planner_blocked_action",
                 final_status="blocked",
             )
         if action != "continue":

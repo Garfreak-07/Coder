@@ -273,17 +273,6 @@ export async function startLiveAgentRun(input: {
   });
 }
 
-export function submitPlannerResponse(
-  runId: string,
-  input: { response: string; data?: Record<string, unknown> }
-): Promise<{ run_id: string; status: string; events_url: string; result_url: string }> {
-  return requestJson(`/api/v2/live-agent-runs/${runId}/planner-response`, {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify(input)
-  });
-}
-
 export function deleteRun(runId: string): Promise<{ run_id: string; deleted: boolean; orphan_blobs_removed: number }> {
   return requestJson(`/api/v2/runs/${runId}`, {
     method: "DELETE"
@@ -360,7 +349,6 @@ export function subscribeRunEvents(url: string, onEvent: (event: RunEvent) => vo
     "round_summary.created",
     "planner.decision.produced",
     "final_report.created",
-    "planner.human_prompt",
     "agent_graph.run.completed",
     "agent_graph.run.blocked",
     "agent_graph.run.failed"

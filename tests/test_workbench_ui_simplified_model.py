@@ -101,7 +101,6 @@ class WorkbenchUiSimplifiedModelTests(unittest.TestCase):
             "Purpose",
             "Workflow ID",
             "Description",
-            "Advanced",
             "Apply JSON",
             "This edge loops back to the Planner",
             "handoff inferred",

@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from coder_workbench.agent_graph.prompts import build_planner_order_prompt, build_worker_execution_prompt
-from coder_workbench.agent_graph.schema import AgentTaskEnvelope, WorkItem
+from coder_workbench.agent_graph.prompts import (
+    build_planner_decision_prompt,
+    build_planner_order_prompt,
+    build_worker_execution_prompt,
+)
+from coder_workbench.agent_graph.schema import AgentTaskEnvelope, PlannerInputBundle, WorkItem
 from coder_workbench.agent_harness.contracts import CODE_WORKER_HARNESS, PLANNER_ORDER_HARNESS
 from coder_workbench.agent_harness.prompt_layers import default_prompt_layer_config
 from coder_workbench.agent_model import AgentRecipe, RuntimeProfileCompiler
@@ -57,6 +61,27 @@ class PromptLayerTests(unittest.TestCase):
         self.assertIn("AgentTaskEnvelope JSON:", prompt)
         self.assertIn("CodingContextPacket JSON:", prompt)
         self.assertIn("Resolved CapabilitySet JSON:", prompt)
+
+    def test_planner_prompts_do_not_include_legacy_human_response_layer(self) -> None:
+        workflow = default_planner_led_agent_workflow()
+        order_prompt = build_planner_order_prompt(
+            request="Plan without legacy response state.",
+            agent_workflow=workflow,
+        )
+        decision_prompt = build_planner_decision_prompt(
+            planner=workflow.agents[0],
+            bundle=PlannerInputBundle(
+                round=1,
+                planner_order_ref="planner_order_round_1",
+                plan_status="completed",
+                items=[],
+            ),
+        )
+
+        for prompt in [order_prompt, decision_prompt]:
+            with self.subTest(prompt=prompt[:40]):
+                self.assertNotIn("planner_human_response", prompt)
+                self.assertNotIn("Planner human response JSON", prompt)
 
     def test_runtime_profiles_record_prompt_layer_policy(self) -> None:
         compiler = RuntimeProfileCompiler()

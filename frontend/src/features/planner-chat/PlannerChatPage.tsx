@@ -5,10 +5,6 @@ export type PlannerStrength = "fast" | "balanced" | "strong";
 interface PlannerChatPageProps {
   activeRunId: string | null;
   evidence: ReactNode;
-  isWaitingForPlannerResponse: boolean;
-  plannerPrompt: string;
-  plannerResponse: string;
-  plannerResponseLoading: boolean;
   repo: string;
   request: string;
   runLoading: boolean;
@@ -16,22 +12,16 @@ interface PlannerChatPageProps {
   scopesText: string;
   submittedRequest: string;
   plannerStrength: PlannerStrength;
-  onPlannerResponseChange: (value: string) => void;
   onRepoChange: (value: string) => void;
   onRequestChange: (value: string) => void;
   onScopesTextChange: (value: string) => void;
   onPlannerStrengthChange: (value: PlannerStrength) => void;
-  onSubmitPlannerResponse: () => void;
   onSubmitRequest: () => void;
 }
 
 export function PlannerChatPage({
   activeRunId,
   evidence,
-  isWaitingForPlannerResponse,
-  plannerPrompt,
-  plannerResponse,
-  plannerResponseLoading,
   repo,
   request,
   runLoading,
@@ -39,24 +29,18 @@ export function PlannerChatPage({
   scopesText,
   submittedRequest,
   plannerStrength,
-  onPlannerResponseChange,
   onRepoChange,
   onRequestChange,
   onScopesTextChange,
   onPlannerStrengthChange,
-  onSubmitPlannerResponse,
   onSubmitRequest
 }: PlannerChatPageProps) {
-  const inputValue = isWaitingForPlannerResponse ? plannerResponse : request;
-  const inputDisabled = runLoading || plannerResponseLoading;
-  const canSend = inputValue.trim().length > 0 && !inputDisabled;
+  const inputValue = request;
+  const inputDisabled = runLoading;
+  const canSend = request.trim().length > 0 && !inputDisabled;
 
   function submit() {
     if (!canSend) return;
-    if (isWaitingForPlannerResponse) {
-      onSubmitPlannerResponse();
-      return;
-    }
     onSubmitRequest();
   }
 
@@ -83,8 +67,7 @@ export function PlannerChatPage({
                   <span>{runStatus}</span>
                   {activeRunId && <code>{activeRunId.slice(0, 8)}</code>}
                 </div>
-                {isWaitingForPlannerResponse && <p>{plannerPrompt}</p>}
-                {!isWaitingForPlannerResponse && activeRunId && <p>Running the Planner-led AgentGraph.</p>}
+                {activeRunId && <p>Running the Planner-led AgentGraph.</p>}
               </div>
               {evidence}
             </article>
@@ -115,12 +98,8 @@ export function PlannerChatPage({
           <textarea
             value={inputValue}
             disabled={inputDisabled}
-            onChange={(event) =>
-              isWaitingForPlannerResponse
-                ? onPlannerResponseChange(event.target.value)
-                : onRequestChange(event.target.value)
-            }
-            placeholder={isWaitingForPlannerResponse ? "Reply to the Planner..." : "Message the Planner..."}
+            onChange={(event) => onRequestChange(event.target.value)}
+            placeholder="Message the Planner..."
             rows={4}
           />
           <div className="composer-footer">
@@ -136,7 +115,7 @@ export function PlannerChatPage({
               </select>
             </label>
             <button onClick={submit} disabled={!canSend}>
-              {runLoading || plannerResponseLoading ? "Sending..." : "Send"}
+              {runLoading ? "Sending..." : "Send"}
             </button>
           </div>
         </div>

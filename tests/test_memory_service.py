@@ -72,6 +72,44 @@ class MemoryServiceTests(unittest.TestCase):
             self.assertEqual(memory.planner_notes[0]["reason"], "remember this")
             self.assertEqual(memory.planner_notes[0]["evidence_refs"], ["round_summary_1"])
 
+    def test_non_workflow_scope_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MemoryService(tmp)
+            staged = service.stage_delta(
+                MemoryDelta(
+                    scope="project",
+                    workflow_id="workflow",
+                    collection="planner_notes",
+                    actor_id="planner",
+                    actor_role="planner",
+                    evidence_refs=["round_summary_1"],
+                    entry={"note": "project memory is out of scope"},
+                )
+            )
+
+            self.assertEqual(staged.status, "rejected")
+            self.assertEqual(staged.reason, "memory_scope_not_supported")
+
+    def test_staged_delta_cannot_commit_without_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            service = MemoryService(tmp)
+            staged = service.stage_delta(
+                MemoryDelta(
+                    workflow_id="workflow",
+                    collection="planner_notes",
+                    actor_id="planner",
+                    actor_role="planner",
+                    evidence_refs=["round_summary_1"],
+                    entry={"note": "needs approval"},
+                )
+            )
+
+            committed = service.commit_staged(staged.write_id, approved_by="")
+
+            self.assertEqual(committed.status, "rejected")
+            self.assertEqual(committed.reason, "memory_write_requires_approval")
+            self.assertEqual(service.load_workflow_memory("workflow").planner_notes, [])
+
     def test_record_planner_round_wraps_existing_workflow_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             service = MemoryService(tmp)

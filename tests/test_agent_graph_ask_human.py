@@ -75,7 +75,7 @@ class AgentGraphAskHumanTests(unittest.TestCase):
                 f"/api/v2/live-agent-runs/{run_id}/planner-response",
                 json={"response": "Proceed.", "data": {"confirmed": True}},
             )
-            self.assertEqual(resume.status_code, 409)
+            self.assertEqual(resume.status_code, 405)
 
 
 def _wait_for_status(client: TestClient, run_id: str, expected: str) -> dict:

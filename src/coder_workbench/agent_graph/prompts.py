@@ -24,7 +24,6 @@ def build_planner_order_prompt(
     agent_workflow: AgentWorkflowSpec,
     previous_bundle: PlannerInputBundle | None = None,
     previous_round_summary: dict[str, Any] | None = None,
-    planner_human_response: dict[str, Any] | None = None,
     skill_index: SkillIndex | None = None,
     repo_intelligence: dict[str, Any] | None = None,
     state_view: dict[str, Any] | None = None,
@@ -94,8 +93,6 @@ def build_planner_order_prompt(
             layers.append(text_layer(layer_id="debug_findings", title="Debug findings from previous round", content=_debug_findings_text(debug_findings)))
     if previous_round_summary:
         layers.append(json_layer(layer_id="previous_round_summary", title="Previous RoundSummary JSON", value=previous_round_summary))
-    if planner_human_response:
-        layers.append(json_layer(layer_id="planner_human_response", title="Planner human response JSON", value=planner_human_response))
     return render_prompt_layers(layers)
 
 
@@ -141,7 +138,6 @@ def build_planner_decision_prompt(
     *,
     planner: AgentWorkflowAgent,
     bundle: PlannerInputBundle,
-    planner_human_response: dict[str, Any] | None = None,
     state_view: dict[str, Any] | None = None,
     capability_set: dict[str, Any] | None = None,
 ) -> str:
@@ -181,8 +177,6 @@ def build_planner_decision_prompt(
                 ),
             ]
         )
-    if planner_human_response:
-        layers.append(json_layer(layer_id="planner_human_response", title="Planner human response JSON", value=planner_human_response))
     return render_prompt_layers(layers)
 
 

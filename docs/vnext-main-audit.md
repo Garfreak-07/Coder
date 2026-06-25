@@ -119,28 +119,31 @@ Currently supported normal artifact types:
 - `ARTIFACT_MODELS`
 - frontend artifact rendering
 
-## Current Planner Decision Semantics
+## Historical Planner Decision Semantics
 
-`PlannerNextAction` currently allows:
+At the time of the original vNext audit, `PlannerNextAction` allowed:
 
 - `continue`
 - `ask_human`
 - `finish`
 - `stop`
 
-The runner and controller still contain ordinary branches for:
+The runner and controller still contained ordinary branches for:
 
 - `ask_human`
 - `stop`
 - controller `blocked`
 
-The normal loop also still tracks:
+The normal loop also still tracked:
 
 - `consecutive_blocked_rounds`
 - `planner_human_prompt`
 - `planner_human_response`
 
-These are candidates for later normalization after `final_report` exists.
+These were the legacy paths targeted for normalization after `final_report`
+exists. The normal product path now treats Planner decisions as `continue` or
+`finish`; blocked outcomes finish with a blocked `final_report` instead of a
+planner human-prompt resume flow.
 
 ## Current Blocked Execution Semantics
 
@@ -190,9 +193,9 @@ Remaining raw/internal data still appears in run result data:
 These should become debug/internal surfaces after the final report and
 SharedRunState paths are available.
 
-## Current Frontend Surface
+## Historical Frontend Surface
 
-Normal sections are:
+At the time of the original audit, normal sections were:
 
 - Planner Chat
 - Agent Workflow
@@ -200,8 +203,9 @@ Normal sections are:
 - Runs
 - Settings
 
-Planner Chat currently renders a Planner status card and an evidence area. It
-does not have first-class `final_report` rendering yet.
+Planner Chat now renders first-class `final_report` evidence. Raw event logs and
+debug exports are explicit debug affordances, not part of the ordinary Planner
+Chat journey.
 
 `runEvents.tsx` can render artifact previews for:
 
@@ -212,8 +216,9 @@ does not have first-class `final_report` rendering yet.
 - `round_summary`
 - legacy `plan_artifact`, `patch_artifact`, `review_artifact`
 
-The Runs page and raw event/detail views are still in ordinary navigation and
-should be hidden or made debug-only after the normal final report path exists.
+The Runs page and raw event/detail views were identified here as surfaces to
+remove from ordinary navigation or make debug-only after the normal final report
+path exists.
 
 ## Phase 1 Entry Point
 

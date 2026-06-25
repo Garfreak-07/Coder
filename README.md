@@ -6,16 +6,20 @@ Coder keeps the ordinary product path small:
 
 ```text
 User request
--> Planner
--> Execution Engine
--> Planner decision
--> Final report
+-> Planner Chat
+-> AgentGraphRunner / RunController
+-> SharedRunState
+-> PlannerEngine / CodeWorkerEngine
+-> Harness contracts and ActionGateway
+-> Evidence stores
+-> final_report
 ```
 
-The Planner owns global decisions and is the only agent that can ask the user.
-The Execution Engine performs bounded implementation work, runs allowed checks,
-and returns structured verification evidence. The runtime passes structured
-artifacts instead of transcript-sized context.
+The Planner owns global decisions and communicates ordinary user-facing
+outcomes through the `final_report` artifact. Executors perform bounded
+implementation work, run allowed checks, and return structured verification
+evidence. The runtime passes structured artifacts and refs instead of
+transcript-sized context.
 
 ## Runtime Hardening
 
@@ -89,9 +93,8 @@ CODER_ENABLE_WAVE_RETRY=1
 The app uses a ChatGPT-style left sidebar and keeps chat separate from workflow
 editing:
 
-- `Planner Chat`: send a request to the Planner, continue `ask_human` replies
-  in the same composer, and inspect the final report, run status, evidence,
-  patches, checks, event logs, and explicit debug exports.
+- `Planner Chat`: send a request to the Planner and inspect the structured final
+  report, run status, evidence, patches, checks, and explicit debug exports.
 - `Agent Workflow`: load saved Agent workflows, load the default workflow, edit
   the basic Planner -> Executor loop, save, save as a new copy, import, and
   export.
@@ -100,9 +103,14 @@ editing:
 
 The ordinary product UI does not expose runtime JSON editors, workflow IDs,
 agent inspectors, manual edge labels, engine settings, harness controls, or
-legacy runtime previews. Stored run inspection remains available through the
-debug/export affordances and API endpoints, not as a default navigation
-surface.
+legacy runtime previews. Stored run inspection and raw event data remain
+available only through explicit debug/export affordances and API endpoints, not
+as the default Planner Chat journey.
+
+Normal Planner decisions are `continue` or `finish`; legacy `ask_human`,
+`planner_human_prompt`, and planner-response resume flows are not part of the
+ordinary product path. If the run cannot safely proceed, it finishes with a
+blocked `final_report`.
 
 ## Repository Layout
 
@@ -199,7 +207,6 @@ Common development endpoints:
 - `POST /api/v2/live-agent-runs`
 - `GET /api/v2/live-agent-runs/{run_id}`
 - `GET /api/v2/live-agent-runs/{run_id}/events`
-- `POST /api/v2/live-agent-runs/{run_id}/planner-response`
 - `POST /api/v2/live-agent-runs/{run_id}/pause`
 - `POST /api/v2/live-agent-runs/{run_id}/resume`
 - `POST /api/v2/live-agent-runs/{run_id}/cancel`

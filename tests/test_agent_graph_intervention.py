@@ -239,7 +239,6 @@ class InterventionExecutor:
         self,
         *,
         bundle: PlannerInputBundle,
-        planner_human_response: dict[str, Any] | None = None,
         emit=None,
     ) -> dict[str, Any]:
         return {
@@ -264,7 +263,6 @@ class MultiRoundExecutor:
         *,
         previous_bundle: PlannerInputBundle | None = None,
         previous_round_summary: dict[str, Any] | None = None,
-        planner_human_response: dict[str, Any] | None = None,
         round_number: int = 1,
         emit=None,
     ) -> PlannerOrder:
@@ -273,7 +271,6 @@ class MultiRoundExecutor:
                 "round": round_number,
                 "previous_bundle": previous_bundle,
                 "previous_round_summary": previous_round_summary,
-                "planner_human_response": planner_human_response,
             }
         )
         work_items = [_work_item("blocked-work", 1)] if round_number == 1 else [
@@ -329,7 +326,6 @@ class MultiRoundExecutor:
         self,
         *,
         bundle: PlannerInputBundle,
-        planner_human_response: dict[str, Any] | None = None,
         emit=None,
     ) -> dict[str, Any]:
         if bundle.interrupts:
@@ -383,7 +379,6 @@ class AlwaysContinueExecutor(MultiRoundExecutor):
         self,
         *,
         bundle: PlannerInputBundle,
-        planner_human_response: dict[str, Any] | None = None,
         emit=None,
     ) -> dict[str, Any]:
         return {
@@ -442,10 +437,9 @@ class ResumeThroughPlannerExecutor(MultiRoundExecutor):
         self,
         *,
         bundle: PlannerInputBundle,
-        planner_human_response: dict[str, Any] | None = None,
         emit=None,
     ) -> dict[str, Any]:
-        if bundle.interrupts and planner_human_response is None:
+        if bundle.interrupts:
             return {
                 "artifact_type": "planner_decision",
                 "round": bundle.round,
@@ -455,16 +449,6 @@ class ResumeThroughPlannerExecutor(MultiRoundExecutor):
                 "requires_human_confirmation": True,
                 "reason": "User must confirm scope.",
                 "human_message": "Can the executor use the local fix?",
-            }
-        if bundle.interrupts:
-            return {
-                "artifact_type": "planner_decision",
-                "round": bundle.round,
-                "task_done": False,
-                "next_action": "continue",
-                "risk_level": "medium",
-                "reason": "User confirmed scope.",
-                "next_round_goal": "Apply the local fix.",
             }
         return {
             "artifact_type": "planner_decision",

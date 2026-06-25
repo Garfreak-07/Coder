@@ -35,7 +35,7 @@ class RunControllerTests(unittest.TestCase):
 
         self.assertEqual(decision.action, "finish")
         self.assertEqual(decision.final_status, "blocked")
-        self.assertEqual(decision.status_code, "planner_blocked")
+        self.assertEqual(decision.status_code, "legacy_planner_blocked_action")
 
     def test_continue_within_max_rounds_passes(self) -> None:
         controller = RunController(guard=RunGuard(max_rounds=2))

@@ -102,7 +102,6 @@ class FailedVerificationExecutor:
         self,
         *,
         bundle: PlannerInputBundle,
-        planner_human_response: dict[str, Any] | None = None,
         emit=None,
     ) -> dict[str, Any]:
         return {

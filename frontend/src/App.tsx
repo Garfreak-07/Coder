@@ -20,7 +20,6 @@ import {
   rollbackPatch,
   saveAgentWorkflow,
   startLiveAgentRun,
-  submitPlannerResponse,
   subscribeRunEvents,
   validateAgentWorkflow
 } from "./api";
@@ -73,8 +72,6 @@ export function App() {
   const [scopesText, setScopesText] = useState("");
   const [request, setRequest] = useState("Inspect this project and propose the next safe step.");
   const [submittedRequest, setSubmittedRequest] = useState("");
-  const [plannerResponse, setPlannerResponse] = useState("");
-  const [plannerResponseLoading, setPlannerResponseLoading] = useState(false);
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [eventCursor, setEventCursor] = useState(0);
   const [eventHasMore, setEventHasMore] = useState(false);
@@ -569,27 +566,6 @@ export function App() {
     }
   }
 
-  async function submitPlannerHumanResponse() {
-    const liveDetail = selectedRunKind === "live" ? (selectedRunDetail as LiveRunDetail | null) : null;
-    const runId = liveDetail?.id ?? activeRunId;
-    const response = plannerResponse.trim();
-    if (!runId || !response) return;
-    setPlannerResponseLoading(true);
-    setStatus(`Sending Planner response for ${runId}...`);
-    try {
-      const resumed = await submitPlannerResponse(runId, { response, data: { source: "planner_chat" } });
-      setPlannerResponse("");
-      setActiveRunId(resumed.run_id);
-      setSelectedRunKind("live");
-      setStatus(`Planner response accepted for ${resumed.run_id}: ${resumed.status}`);
-      subscribeToRun(resumed.run_id, resumed.events_url);
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-    } finally {
-      setPlannerResponseLoading(false);
-    }
-  }
-
   async function deleteStoredRun(runId: string) {
     if (!window.confirm(`Delete stored run ${runId}? This also removes blobs no other run references.`)) {
       return;
@@ -641,17 +617,23 @@ export function App() {
     return `/api/v2/live-agent-runs/${detail.id}/events`;
   }
 
-  const isWaitingForPlannerResponse = isWaitingForPlannerHumanResponse(selectedRunDetail, selectedRunKind);
   const chatRunStatus = selectedRunDetail
     ? runStatusLabel(selectedRunDetail, selectedRunKind)
     : activeRunId
       ? "running"
       : "ready";
+  const debugUiEnabled = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    return (
+      new URLSearchParams(window.location.search).get("debug") === "1" ||
+      window.localStorage.getItem("coder_debug_ui") === "1"
+    );
+  }, []);
   const plannerStrength = plannerStrengthFromTier(primaryPlannerAgent?.model_tier ?? "best");
   const chatEvidence = (
     <div className="chat-evidence-stack">
       <RunFinalReport detail={selectedRunDetail} events={events} />
-      <RunSummary events={events} />
+      {debugUiEnabled && <RunSummary events={events} />}
       <RunEvidenceCards events={events} />
       <PatchPanel
         events={events}
@@ -660,18 +642,18 @@ export function App() {
         scopes={linesToList(scopesText)}
         onStatus={setStatus}
       />
-      {events.length > 0 && (
+      {debugUiEnabled && events.length > 0 && (
         <details className="event-log-details">
-          <summary>Event log</summary>
+          <summary>Advanced debug: event log</summary>
           <EventReplayList
             events={events}
             runId={selectedRunKind === "stored" ? selectedRunDetail?.id ?? null : null}
           />
         </details>
       )}
-      {selectedRunDetail && (
+      {debugUiEnabled && selectedRunDetail && (
         <details className="event-log-details">
-          <summary>Debug export</summary>
+          <summary>Advanced debug: export</summary>
           <button onClick={() => exportRunDebug(selectedRunDetail, selectedRunKind, events)}>
             Export run JSON
           </button>
@@ -688,10 +670,6 @@ export function App() {
         <PlannerChatPage
           activeRunId={activeRunId}
           evidence={chatEvidence}
-          isWaitingForPlannerResponse={isWaitingForPlannerResponse}
-          plannerPrompt={plannerPromptText(selectedRunDetail)}
-          plannerResponse={plannerResponse}
-          plannerResponseLoading={plannerResponseLoading}
           repo={repo}
           request={request}
           runLoading={runLoading}
@@ -699,12 +677,10 @@ export function App() {
           scopesText={scopesText}
           submittedRequest={submittedRequest}
           plannerStrength={plannerStrength}
-          onPlannerResponseChange={setPlannerResponse}
           onRepoChange={setRepo}
           onRequestChange={setRequest}
           onScopesTextChange={setScopesText}
           onPlannerStrengthChange={updatePlannerStrength}
-          onSubmitPlannerResponse={submitPlannerHumanResponse}
           onSubmitRequest={runWorkflow}
         />
       ) : activeSection === "workflow" ? (
@@ -818,28 +794,6 @@ function runContinuity(detail: StoredRunDetail | LiveRunDetail, kind: "live" | "
     };
   }
   return { runGroupId: null, continuedFromRunId: null, turnIndex: null };
-}
-
-function isWaitingForPlannerHumanResponse(
-  detail: StoredRunDetail | LiveRunDetail | null,
-  kind: "live" | "stored" | null
-): boolean {
-  if (!detail || kind !== "live") return false;
-  const live = detail as LiveRunDetail;
-  return live.status === "blocked" && live.result?.status_code === "planner_ask_human";
-}
-
-function plannerPromptText(detail: StoredRunDetail | LiveRunDetail | null): string {
-  if (!detail || !("result" in detail) || !detail.result) return "The Planner is waiting for your response.";
-  const checkpoint = objectValue(detail.result.resume_checkpoint);
-  const checkpointData = objectValue(checkpoint?.data);
-  const resultData = objectValue(detail.result.data);
-  return String(
-    checkpointData?.planner_human_prompt ??
-      resultData?.planner_human_prompt ??
-      detail.result.status_reason ??
-      "The Planner is waiting for your response."
-  );
 }
 
 function plannerStrengthFromTier(tier: AgentModelTier | string): PlannerStrength {

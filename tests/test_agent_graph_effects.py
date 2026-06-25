@@ -395,7 +395,6 @@ class EffectSourceExecutor:
         self,
         *,
         bundle: PlannerInputBundle,
-        planner_human_response: dict[str, Any] | None = None,
         emit=None,
     ) -> dict[str, Any]:
         return {
@@ -435,7 +434,6 @@ class RuntimeActionReplayExecutor(EffectSourceExecutor):
         self,
         *,
         bundle: PlannerInputBundle,
-        planner_human_response: dict[str, Any] | None = None,
         emit=None,
     ) -> dict[str, Any]:
         replay_ok = any(

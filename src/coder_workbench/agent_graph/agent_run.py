@@ -61,7 +61,6 @@ class AgentRun:
         *,
         previous_bundle: Any | None = None,
         previous_round_summary: dict[str, Any] | None = None,
-        planner_human_response: dict[str, Any] | None = None,
         skill_index: Any | None = None,
         repo_intelligence: dict[str, Any] | None = None,
         round_number: int = 1,
@@ -92,7 +91,6 @@ class AgentRun:
                 round_number=round_number,
                 previous_bundle=previous_bundle,
                 previous_round_summary=previous_round_summary,
-                planner_human_response=planner_human_response,
                 skill_index=skill_index,
                 repo_intelligence=repo_intelligence,
                 initial_data=self.initial_data,
@@ -111,7 +109,6 @@ class AgentRun:
             run_id=self.run_id,
             previous_bundle=previous_bundle,
             previous_round_summary=previous_round_summary,
-            planner_human_response=planner_human_response,
             skill_index=skill_index,
             repo_intelligence=repo_intelligence,
             state_view=state_view,
@@ -161,7 +158,6 @@ class AgentRun:
         self,
         *,
         bundle: Any,
-        planner_human_response: dict[str, Any] | None = None,
         emit: Any | None = None,
     ) -> dict[str, Any]:
         planner = self._agent(self.agent_workflow.primary_planner_id)
@@ -186,7 +182,6 @@ class AgentRun:
             PlannerStrategyContext(
                 agent_workflow=self.agent_workflow,
                 round_number=getattr(bundle, "round", 1),
-                planner_human_response=planner_human_response,
                 initial_data=self.initial_data,
                 bundle=bundle,
             )
@@ -197,7 +192,6 @@ class AgentRun:
         return self.engine_registry.planner().run_planner_decision(
             agent_workflow=self.agent_workflow,
             bundle=bundle,
-            planner_human_response=planner_human_response,
             runtime_settings=self.runtime_settings,
             model_factory=self.model_factory,
             budget_broker=self.budget_broker,

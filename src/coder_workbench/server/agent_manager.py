@@ -70,32 +70,6 @@ class AgentGraphRunManager:
                 raise KeyError(run_id)
             return self._runs[run_id]
 
-    def submit_planner_response(
-        self,
-        run_id: str,
-        *,
-        response: str,
-        data: dict[str, Any] | None = None,
-    ) -> LiveAgentRun:
-        run = self.get(run_id)
-        if run.status != "blocked" or not run.result or run.result.status_code != "planner_ask_human":
-            raise ValueError("run is not waiting for a Planner human response")
-        checkpoint_data = dict((run.result.resume_checkpoint or {}).get("data", {}))
-        checkpoint_data["planner_human_response"] = {
-            "response": response,
-            "data": data or {},
-        }
-        checkpoint_data.pop("planner_decision", None)
-        checkpoint_data["resume_mode"] = "planner_response"
-        run.initial_data = checkpoint_data
-        run.status = "queued"
-        run.error = None
-        run.queue = Queue()
-        prior_events = list(run.events)
-        thread = Thread(target=self._execute, args=(run, prior_events), daemon=True)
-        thread.start()
-        return run
-
     def pause(self, run_id: str) -> LiveAgentRun:
         run = self.get(run_id)
         if run.status not in {"queued", "running"}:

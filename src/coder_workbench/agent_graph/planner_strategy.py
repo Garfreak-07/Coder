@@ -15,7 +15,6 @@ class PlannerStrategyContext:
     round_number: int = 1
     previous_bundle: PlannerInputBundle | None = None
     previous_round_summary: dict[str, Any] | None = None
-    planner_human_response: dict[str, Any] | None = None
     skill_index: Any | None = None
     repo_intelligence: dict[str, Any] | None = None
     initial_data: dict[str, Any] | None = None
@@ -92,7 +91,7 @@ class SimplePlannerStrategy:
     def create_decision(self, context: PlannerStrategyContext) -> dict[str, Any] | None:
         if context.bundle is None:
             return None
-        return _local_decision(context.bundle, planner_human_response=context.planner_human_response)
+        return _local_decision(context.bundle)
 
 
 def planner_strategy_for_mode(mode: str | None) -> PlannerStrategy:
@@ -120,11 +119,7 @@ def planner_mode_from(initial_data: dict[str, Any] | None, runtime_settings: Any
     return "full"
 
 
-def _local_decision(
-    bundle: PlannerInputBundle,
-    *,
-    planner_human_response: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+def _local_decision(bundle: PlannerInputBundle) -> dict[str, Any]:
     has_interrupts = bool(bundle.interrupts)
     has_failed_verification = any(item.verification_status == "fail" for item in bundle.items)
     has_blocked_work = any(item.execution_status == "blocked" or item.verification_status == "blocked" for item in bundle.items)
@@ -184,11 +179,7 @@ def _local_decision(
         if has_interrupts
         else "Work is blocked and requires Planner or user judgment."
         if has_blocked_work
-        else (
-            "Planner human response recorded; local PlannerStrategy resume completed."
-            if planner_human_response
-            else "Local PlannerStrategy execution artifacts are complete."
-        )
+        else "Local PlannerStrategy execution artifacts are complete."
     )
     payload = {
         "artifact_type": "planner_decision",

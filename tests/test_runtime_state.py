@@ -153,6 +153,34 @@ class RuntimeStateTests(unittest.TestCase):
         self.assertNotIn("graph_run_cache", str(state))
         self.assertNotIn("token_ledger", str(state))
 
+    def test_blocked_resume_checkpoint_contains_shared_run_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = AgentGraphRunner(default_planner_led_agent_workflow()).run(
+                "Force a controller checkpoint.",
+                tmp,
+                initial_data={
+                    "max_auto_rounds": 1,
+                    "planner_decision": {
+                        "artifact_type": "planner_decision",
+                        "round": 1,
+                        "task_done": False,
+                        "next_action": "continue",
+                        "reason": "Need another round.",
+                        "next_round_goal": "Continue.",
+                    },
+                },
+            )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIsNotNone(result.resume_checkpoint)
+        checkpoint_data = result.resume_checkpoint["data"]  # type: ignore[index]
+        self.assertIn("shared_run_state", checkpoint_data)
+        self.assertEqual(checkpoint_data["shared_run_state"]["final_report_ref"], "final_report")
+        self.assertEqual(
+            checkpoint_data["shared_run_state"]["work_items"]["executor-work"]["execution_result_ref"],
+            "execution_result_executor-work",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

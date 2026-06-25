@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 from coder_workbench.agent_graph.runner import AgentGraphRunner
 from coder_workbench.agent_harness.contracts import (
@@ -82,6 +83,58 @@ class RuntimeCapabilityResolverTests(unittest.TestCase):
         by_harness = result.data["capability_sets_by_harness"]
         executor_caps = by_harness[f"executor:{CODE_WORKER_HARNESS.harness_id}"]
         self.assertIn("return_execution_result", {tool["name"] for tool in executor_caps["tools"]})
+
+    def test_planner_harness_tool_sets_are_scoped(self) -> None:
+        workflow = default_planner_led_agent_workflow()
+        planner = workflow.agents[0]
+        planner_profile = SimpleNamespace(role="planner", tool_policy={})
+
+        final_report_caps = resolve_capabilities(
+            agent=planner,
+            runtime_profile=planner_profile,
+            harness_id=FINAL_REPORT_HARNESS.harness_id,
+        )
+        order_caps = resolve_capabilities(
+            agent=planner,
+            runtime_profile=planner_profile,
+            harness_id=PLANNER_ORDER_HARNESS.harness_id,
+        )
+        decision_caps = resolve_capabilities(
+            agent=planner,
+            runtime_profile=planner_profile,
+            harness_id=PLANNER_DECISION_HARNESS.harness_id,
+        )
+
+        self.assertEqual(
+            {tool.name for tool in final_report_caps.tools},
+            {"inspect_artifact", "inspect_run_state", "inspect_evidence", "build_final_report"},
+        )
+        self.assertNotIn("validate_planner_decision", {tool.name for tool in order_caps.tools})
+        self.assertNotIn("validate_planner_order", {tool.name for tool in decision_caps.tools})
+
+    def test_code_worker_tool_policy_denies_writes_and_commands(self) -> None:
+        workflow = default_planner_led_agent_workflow()
+        executor = workflow.agents[1]
+        executor_profile = SimpleNamespace(
+            role="executor",
+            tool_policy={"read_files": True, "write_files": False, "run_commands": False},
+        )
+
+        caps = resolve_capabilities(
+            agent=executor,
+            runtime_profile=executor_profile,
+            harness_id=CODE_WORKER_HARNESS.harness_id,
+            work_item={"work_item_id": "executor-work"},
+        )
+
+        tool_names = {tool.name for tool in caps.tools}
+        denied_names = {capability.name for capability in caps.denied}
+        self.assertNotIn("propose_patch", tool_names)
+        self.assertNotIn("apply_patch_sandbox", tool_names)
+        self.assertNotIn("run_command_sandbox", tool_names)
+        self.assertIn("propose_patch", denied_names)
+        self.assertIn("apply_patch_sandbox", denied_names)
+        self.assertIn("run_command_sandbox", denied_names)
 
 
 if __name__ == "__main__":

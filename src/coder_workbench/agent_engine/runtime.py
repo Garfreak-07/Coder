@@ -354,7 +354,6 @@ class PlannerEngine(ModelBackedEngine):
         run_id: str | None = None,
         previous_bundle: "PlannerInputBundle | None" = None,
         previous_round_summary: dict[str, Any] | None = None,
-        planner_human_response: dict[str, Any] | None = None,
         skill_index: "SkillIndex | None" = None,
         repo_intelligence: dict[str, Any] | None = None,
         state_view: dict[str, Any] | None = None,
@@ -373,7 +372,6 @@ class PlannerEngine(ModelBackedEngine):
                 agent_workflow=agent_workflow,
                 previous_bundle=previous_bundle,
                 previous_round_summary=previous_round_summary,
-                planner_human_response=planner_human_response,
                 skill_index=skill_index,
                 repo_intelligence=repo_intelligence,
                 state_view=state_view,
@@ -408,7 +406,6 @@ class PlannerEngine(ModelBackedEngine):
         *,
         agent_workflow: "AgentWorkflowSpec",
         bundle: "PlannerInputBundle",
-        planner_human_response: dict[str, Any] | None = None,
         runtime_settings: Any | None = None,
         model_factory: ModelFactory = create_chat_model,
         budget_broker: BudgetBroker | None = None,
@@ -480,11 +477,7 @@ class PlannerEngine(ModelBackedEngine):
             if has_failed_verification
             else "Work is blocked and requires Planner or user judgment."
             if has_blocked_work
-            else (
-                "Planner human response recorded; AgentGraph resume completed."
-                if planner_human_response
-                else "Mock AgentGraph execution artifacts are complete."
-            )
+            else "Mock AgentGraph execution artifacts are complete."
         )
         return self._invoke_or_mock(
             artifact_type="planner_decision",
@@ -492,7 +485,6 @@ class PlannerEngine(ModelBackedEngine):
             prompt=build_planner_decision_prompt(
                 planner=planner,
                 bundle=bundle,
-                planner_human_response=planner_human_response,
                 state_view=state_view,
                 capability_set=capability_set,
             ),

@@ -13,6 +13,7 @@ from coder_workbench.agent_graph.schema import (
 
 
 def build_planner_input_bundle(cache: GraphRunCache) -> PlannerInputBundle:
+    # GraphRunCache.execution_cache entries are normalized before bundle and summary construction.
     planner_order_ref = cache.plan_cache.planner_order_ref if cache.plan_cache else "planner_order_unknown"
     items = [
         PlannerInputBundleItem(

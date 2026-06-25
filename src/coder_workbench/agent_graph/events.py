@@ -25,7 +25,6 @@ AGENT_GRAPH_EVENT_TYPES = [
     "planner.input_bundle.created",
     "round_summary.created",
     "planner.decision.produced",
-    "planner.human_prompt",
     "agent_graph.run.completed",
     "agent_graph.run.blocked",
     "agent_graph.run.failed",

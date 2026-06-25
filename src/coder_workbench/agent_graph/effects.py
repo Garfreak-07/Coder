@@ -376,11 +376,6 @@ def _approved_runtime_actions_from_data(data: dict[str, Any]) -> list[dict[str, 
     raw = data.get("approved_runtime_actions")
     if isinstance(raw, list):
         values.extend(raw)
-    response = data.get("planner_human_response")
-    if isinstance(response, dict):
-        response_data = response.get("data")
-        if isinstance(response_data, dict) and isinstance(response_data.get("approved_runtime_actions"), list):
-            values.extend(response_data["approved_runtime_actions"])
     actions: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in values:

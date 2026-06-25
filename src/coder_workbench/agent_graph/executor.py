@@ -28,7 +28,6 @@ class AgentGraphExecutorProtocol(Protocol):
         *,
         previous_bundle: PlannerInputBundle | None = None,
         previous_round_summary: dict[str, Any] | None = None,
-        planner_human_response: dict[str, Any] | None = None,
         skill_index: SkillIndex | None = None,
         repo_intelligence: dict[str, Any] | None = None,
         round_number: int = 1,
@@ -49,7 +48,6 @@ class AgentGraphExecutorProtocol(Protocol):
         self,
         *,
         bundle: PlannerInputBundle,
-        planner_human_response: dict[str, Any] | None = None,
         emit: Any | None = None,
     ) -> dict[str, Any]:
         ...
@@ -81,7 +79,6 @@ class AgentGraphExecutor:
         *,
         previous_bundle: PlannerInputBundle | None = None,
         previous_round_summary: dict[str, Any] | None = None,
-        planner_human_response: dict[str, Any] | None = None,
         skill_index: SkillIndex | None = None,
         repo_intelligence: dict[str, Any] | None = None,
         round_number: int = 1,
@@ -96,7 +93,6 @@ class AgentGraphExecutor:
             run_id=self.run_id,
             previous_bundle=previous_bundle,
             previous_round_summary=previous_round_summary,
-            planner_human_response=planner_human_response,
             skill_index=skill_index,
             repo_intelligence=repo_intelligence,
             round_number=round_number,
@@ -121,13 +117,11 @@ class AgentGraphExecutor:
         self,
         *,
         bundle: PlannerInputBundle,
-        planner_human_response: dict[str, Any] | None = None,
         emit: Any | None = None,
     ) -> dict[str, Any]:
         return self.agent_run.engine_registry.planner().run_planner_decision(
             agent_workflow=self.agent_workflow,
             bundle=bundle,
-            planner_human_response=planner_human_response,
             runtime_settings=self.runtime_settings,
             model_factory=self.model_factory,
             budget_broker=self.budget_broker,

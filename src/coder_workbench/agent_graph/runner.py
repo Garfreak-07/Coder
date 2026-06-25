@@ -17,7 +17,7 @@ from coder_workbench.agent_graph.artifacts import AgentGraphArtifactRecorder, gr
 from coder_workbench.agent_graph.agent_run import AgentRun
 from coder_workbench.agent_graph.cache import GraphRunCache
 from coder_workbench.agent_graph.context import upstream_refs_for_item
-from coder_workbench.agent_graph.effects import apply_hidden_effects, replay_approved_runtime_actions
+from coder_workbench.agent_graph.effects import apply_hidden_effects
 from coder_workbench.agent_graph.evaluation import (
     build_agent_evaluation_reports,
     build_skill_evaluation_reports,
@@ -341,101 +341,8 @@ class AgentGraphRunner:
             controller = RunController(guard=_run_guard_from_data(data, max_rounds=max_rounds))
             previous_bundle: PlannerInputBundle | None = None
             previous_round_summary: dict[str, Any] | None = None
-            planner_human_response = data.get("planner_human_response") if isinstance(data.get("planner_human_response"), dict) else None
             start_round = 1
             round_request = request
-
-            if data.get("resume_mode") == "planner_response":
-                previous_bundle = self._planner_input_bundle_from_data(data.get("planner_input_bundle"))
-                if previous_bundle is None:
-                    raise ValueError("resume_mode=planner_response requires planner_input_bundle")
-                previous_round_summary = self._round_summary_from_data(data.get("round_summary"))
-                replay_cache = GraphRunCache(round=previous_bundle.round)
-                replay_effects = replay_approved_runtime_actions(
-                    cache=replay_cache,
-                    repo_root=repo_root,
-                    scopes=_scopes_from_data(data),
-                    data=data,
-                    action_gateway=self.action_gateway,
-                )
-                if replay_effects:
-                    self._emit_hidden_effect_outputs(replay_cache, replay_effects, emit)
-                    self._record_hidden_effect_artifacts(replay_cache, recorder, replay_effects)
-                    previous_bundle = previous_bundle.model_copy(
-                        update={"effects": [*previous_bundle.effects, *replay_effects]}
-                    )
-                    data["planner_input_bundle"] = previous_bundle.model_dump(mode="json", exclude_none=True)
-                    _merge_replay_cache_payload(data, replay_effects, replay_cache.hidden_effect_outputs)
-                    data.setdefault("runtime_action_replays", []).extend(replay_effects)
-                resume_decision = self.agent_run.run_planner_decision(
-                    bundle=previous_bundle,
-                    planner_human_response=planner_human_response,
-                    emit=emit,
-                )
-                resume_decision_ref = graph_artifact_id("planner_decision", "resume", "round", previous_bundle.round)
-                data["planner_decision"] = recorder.record(
-                    resume_decision_ref,
-                    resume_decision,
-                    expected_type="planner_decision",
-                )
-                record_state_update("artifacts", _artifact_ref_payload(resume_decision_ref, data["planner_decision"]))
-                record_state_update("planner", {"planner_decision_ref": resume_decision_ref})
-                record_state_update(
-                    "messages",
-                    _state_message_payload(
-                        message_id=f"planner_decision:{resume_decision_ref}",
-                        source_agent_id=self.agent_workflow.primary_planner_id,
-                        target="all",
-                        kind="planner_decision",
-                        summary=f"Planner decision: {data['planner_decision']['next_action']}",
-                        artifact_refs=[resume_decision_ref],
-                    ),
-                )
-                emit(
-                    "planner.decision.produced",
-                    "Planner decision produced",
-                    artifact_type="planner_decision",
-                    artifact_id=resume_decision_ref,
-                    round=previous_bundle.round,
-                    next_action=data["planner_decision"]["next_action"],
-                )
-                data.pop("resume_mode", None)
-                controller.record_round(round_number=previous_bundle.round)
-                controller_decision = controller.evaluate_planner_decision(
-                    data["planner_decision"],
-                    round_number=previous_bundle.round,
-                )
-                action = controller_decision.action
-                if action == "blocked":
-                    status, status_reason, status_code, blocked_node_id, result_resume_checkpoint = self._block_for_controller(
-                        data=data,
-                        decision=controller_decision,
-                        emit=emit,
-                    )
-                    return finalize_result(
-                        final_status=status,
-                        blocked_node_id=blocked_node_id,
-                        resume_checkpoint=result_resume_checkpoint,
-                        status_reason=status_reason,
-                        status_code=status_code,
-                    )
-                if action == "finish":
-                    status, status_reason, status_code, blocked_node_id = finish_values(
-                        data["planner_decision"],
-                        controller_decision,
-                    )
-                    emit(
-                        f"agent_graph.run.{status}",
-                        f"Agent graph {self.agent_workflow.id} {status}",
-                    )
-                    return finalize_result(
-                        final_status=status,
-                        blocked_node_id=blocked_node_id,
-                        status_reason=status_reason,
-                        status_code=status_code,
-                    )
-                round_request = data["planner_decision"].get("next_round_goal") or request
-                start_round = previous_bundle.round + 1
 
             blocked_recovery_used = bool(data.get("blocked_recovery_used"))
             for round_number in range(start_round, max_rounds + 1):
@@ -448,7 +355,6 @@ class AgentGraphRunner:
                     emit=emit,
                     previous_bundle=previous_bundle,
                     previous_round_summary=previous_round_summary,
-                    planner_human_response=planner_human_response if round_number == start_round else None,
                     skill_index=skill_index,
                     skill_store_root=skill_store_root,
                     trace_context=trace,
@@ -572,7 +478,6 @@ class AgentGraphRunner:
                     previous_bundle = outcome.planner_input_bundle
                     previous_round_summary = outcome.round_summary.model_dump(mode="json")
                     round_request = outcome.planner_decision.get("next_round_goal") or request
-                    planner_human_response = None
                     continue
                 if action == "blocked":
                     status, status_reason, status_code, blocked_node_id, result_resume_checkpoint = self._block_for_controller(
@@ -592,7 +497,6 @@ class AgentGraphRunner:
                 break
             else:
                 prompt = "Agent graph stopped because max_auto_rounds was reached."
-                data["planner_human_prompt"] = prompt
                 emit(
                     "agent_graph.run.blocked",
                     "Agent graph blocked after reaching max_auto_rounds",
@@ -639,7 +543,6 @@ class AgentGraphRunner:
         emit: Any,
         previous_bundle: PlannerInputBundle | None,
         previous_round_summary: dict[str, Any] | None,
-        planner_human_response: dict[str, Any] | None,
         skill_index: SkillIndex,
         skill_store_root: Path,
         trace_context: TraceContext,
@@ -682,7 +585,6 @@ class AgentGraphRunner:
             request,
             previous_bundle=previous_bundle,
             previous_round_summary=previous_round_summary,
-            planner_human_response=planner_human_response,
             skill_index=skill_index,
             repo_intelligence=repo_intelligence,
             round_number=round_number,
@@ -814,6 +716,7 @@ class AgentGraphRunner:
                         },
                     )
                 )
+                execution = self._normalize_execution_record(cache, cache.round, execution)
                 execution_artifact = self._record_execution_artifact(recorder, cache.round, execution)
                 record_state_update(
                     "artifacts",
@@ -931,6 +834,7 @@ class AgentGraphRunner:
             ).run_wave(wave, task_contexts)
             for outcome in outcomes:
                 execution = cache.record_execution(outcome.execution)
+                execution = self._normalize_execution_record(cache, cache.round, execution)
                 execution_artifact = self._record_execution_artifact(recorder, cache.round, execution)
                 execution_status = "completed" if execution.status == "completed" else "blocked"
                 record_state_update(
@@ -1101,7 +1005,6 @@ class AgentGraphRunner:
             else None
         ) or self.agent_run.run_planner_decision(
             bundle=planner_input_bundle,
-            planner_human_response=planner_human_response,
             emit=emit,
         )
         planner_decision_ref = graph_artifact_id("planner_decision", "round", round_number)
@@ -1222,36 +1125,6 @@ class AgentGraphRunner:
         output.setdefault("coding_eval", build_run_coding_eval(output, events))
         return output
 
-    def _block_for_planner_human(
-        self,
-        *,
-        data: dict[str, Any],
-        decision: dict[str, Any],
-        emit: Any,
-        round_number: int,
-    ) -> tuple[str, str, str, str, dict[str, Any]]:
-        prompt = (
-            decision.get("human_message")
-            or decision.get("reason")
-            or "Planner needs user input."
-        )
-        data["planner_human_prompt"] = prompt
-        emit(
-            "planner.human_prompt",
-            "Planner requested human input",
-            round=round_number,
-            prompt=prompt,
-            status_code="planner_ask_human",
-        )
-        emit("agent_graph.run.blocked", "Agent graph blocked for Planner human prompt", code="planner_ask_human")
-        return (
-            "blocked",
-            str(prompt),
-            "planner_ask_human",
-            self.agent_workflow.primary_planner_id,
-            {"data": data},
-        )
-
     def _block_for_controller(
         self,
         *,
@@ -1260,7 +1133,6 @@ class AgentGraphRunner:
         emit: Any,
     ) -> tuple[str, str, str, str, dict[str, Any]]:
         prompt = decision.reason or "RunController blocked the run."
-        data["planner_human_prompt"] = prompt
         status_code = decision.status_code or "run_controller_blocked"
         emit(
             "agent_graph.run.blocked",
@@ -1499,14 +1371,44 @@ class AgentGraphRunner:
             execution=execution,
         )
 
+    def _normalize_execution_record(
+        self,
+        cache: GraphRunCache,
+        round_number: int,
+        execution: ExecutionRecord,
+    ) -> ExecutionRecord:
+        from coder_workbench.agent_harness.execution_verification import ensure_execution_verification
+
+        artifact_type = execution.artifact_type
+        payload = execution.artifact_payload or {
+            "artifact_type": artifact_type,
+            "round": round_number,
+            "work_item_id": execution.work_item_id,
+            "merge_index": execution.merge_index,
+            "agent_id": execution.agent_id,
+            "status": execution.status,
+            "summary": execution.execution_summary,
+            "outputs": [execution.execution_result_ref] if execution.status == "completed" else [],
+            "unexpected_issues": [] if execution.status == "completed" else ["execution_record_missing_payload"],
+            "remaining_work": [] if execution.status == "completed" else [execution.execution_summary],
+            "blocker_type": None if execution.status == "completed" else "unknown_error",
+            "continue_without_human_possible": None if execution.status == "completed" else True,
+            "verification": _fallback_verification(execution),
+        }
+        if artifact_type == "execution_result":
+            payload = ensure_execution_verification(payload)
+        payload = dict(payload)
+        payload["artifact_id"] = execution.execution_result_ref
+        normalized = execution.model_copy(update={"artifact_payload": payload})
+        cache.execution_cache[execution.work_item_id] = normalized
+        return normalized
+
     def _record_execution_artifact(
         self,
         recorder: AgentGraphArtifactRecorder,
         round_number: int,
         execution: ExecutionRecord,
     ) -> dict[str, Any]:
-        from coder_workbench.agent_harness.execution_verification import ensure_execution_verification
-
         artifact_type = execution.artifact_type
         payload = execution.artifact_payload or {
             "artifact_type": artifact_type,
@@ -1523,8 +1425,6 @@ class AgentGraphRunner:
             "continue_without_human_possible": None if execution.status == "completed" else True,
             "verification": _fallback_verification(execution),
         }
-        if artifact_type == "execution_result":
-            payload = ensure_execution_verification(payload)
         artifact_type = str(payload.get("artifact_type") or artifact_type)
         return recorder.record(
             execution.execution_result_ref,
@@ -1668,7 +1568,6 @@ class AgentGraphRunner:
         *,
         previous_bundle: PlannerInputBundle | None,
         previous_round_summary: dict[str, Any] | None,
-        planner_human_response: dict[str, Any] | None,
         skill_index: SkillIndex,
         repo_intelligence: dict[str, Any],
         round_number: int,
@@ -1678,7 +1577,6 @@ class AgentGraphRunner:
             request,
             previous_bundle=previous_bundle,
             previous_round_summary=previous_round_summary,
-            planner_human_response=planner_human_response,
             skill_index=skill_index,
             repo_intelligence=repo_intelligence,
             round_number=round_number,
@@ -1789,10 +1687,7 @@ def _normalize_resume_checkpoint(
         checkpoint_data.setdefault("blocked_work_item_ids", blocked)
     round_number = _checkpoint_round(checkpoint_data, graph_run_cache)
     payload.setdefault("checkpoint_version", 1)
-    payload.setdefault(
-        "resume_mode",
-        "planner_response" if status_code == "planner_ask_human" else "agent_graph_checkpoint",
-    )
+    payload.setdefault("resume_mode", "agent_graph_checkpoint")
     payload["data"] = checkpoint_data
     payload.setdefault("round", round_number)
     payload.setdefault("phase", phase)
@@ -2035,22 +1930,6 @@ def _fallback_verification(execution: ExecutionRecord) -> dict[str, Any]:
     }
 
 
-def _merge_replay_cache_payload(
-    data: dict[str, Any],
-    replay_effects: list[dict[str, Any]],
-    replay_outputs: dict[str, dict[str, Any]],
-) -> None:
-    graph_run_cache = data.get("graph_run_cache")
-    if not isinstance(graph_run_cache, dict):
-        return
-    hidden_effects = graph_run_cache.setdefault("hidden_effects", [])
-    if isinstance(hidden_effects, list):
-        hidden_effects.extend(replay_effects)
-    hidden_outputs = graph_run_cache.setdefault("hidden_effect_outputs", {})
-    if isinstance(hidden_outputs, dict):
-        hidden_outputs.update(replay_outputs)
-
-
 class _ExecutorAdapter:
     def __init__(self, executor: Any) -> None:
         self.executor = executor
@@ -2059,7 +1938,6 @@ class _ExecutorAdapter:
         core_kwargs = {
             "previous_bundle": kwargs.get("previous_bundle"),
             "previous_round_summary": kwargs.get("previous_round_summary"),
-            "planner_human_response": kwargs.get("planner_human_response"),
             "round_number": kwargs.get("round_number", 1),
             "emit": kwargs.get("emit"),
         }
@@ -2083,7 +1961,6 @@ class _ExecutorAdapter:
     def run_planner_decision(self, **kwargs: Any) -> dict[str, Any]:
         payload = {
             "bundle": kwargs["bundle"],
-            "planner_human_response": kwargs.get("planner_human_response"),
         }
         if kwargs.get("emit") is not None:
             payload["emit"] = kwargs["emit"]
