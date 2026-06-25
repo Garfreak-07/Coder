@@ -12,6 +12,7 @@ from .contracts import (
     harness_contract_for_id,
     harness_contracts_for_role,
 )
+from .context_preprocessor import CodeWorkerContextBudget, CodeWorkerContextPreprocessor, PreparedCodeWorkerContext
 from .observations import HarnessObservation as LegacyHarnessObservation
 from .permissions import HarnessPermissionPolicy
 from .planner import PlannerHarness
@@ -45,6 +46,8 @@ __all__ = [
     "CODE_WORKER_HARNESS",
     "CodeWorkerLoopState",
     "CodeWorkerHarness",
+    "CodeWorkerContextBudget",
+    "CodeWorkerContextPreprocessor",
     "CodeWorkerToolLoop",
     "ExecutorSelfChecker",
     "FINAL_REPORT_HARNESS",
@@ -62,6 +65,7 @@ __all__ = [
     "PLANNER_DECISION_HARNESS",
     "PLANNER_ORDER_HARNESS",
     "PromptLayer",
+    "PreparedCodeWorkerContext",
     "PlannerHarness",
     "RecoveryDecision",
     "RecoveryPolicy",

@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from typing import Any
 
 from pydantic import ValidationError
 
 from coder_workbench.actions import ActionGateway, ActionResult, RunContext
+from coder_workbench.actions.result_budget import ResultBudget, apply_result_budget
 from coder_workbench.agent_graph.artifacts import graph_artifact_id
 from coder_workbench.agent_graph.repair import parse_json_object
 from coder_workbench.agent_graph.schema import AgentTaskEnvelope, WorkItem
 from coder_workbench.agent_harness.action_protocol import HarnessActionRequest, HarnessObservation
 from coder_workbench.agent_harness.artifact_repair_pipeline import ArtifactRepairPipeline, RepairContext
+from coder_workbench.agent_harness.context_preprocessor import CodeWorkerContextPreprocessor
 from coder_workbench.agent_harness.execution_verification import ensure_blocked_contract, ensure_execution_verification
 from coder_workbench.agent_harness.recovery_policy import RecoveryPolicy
 from coder_workbench.agent_harness.self_check import ExecutorSelfChecker
@@ -41,6 +44,8 @@ class CodeWorkerToolLoop:
         self.self_checker = self_checker or ExecutorSelfChecker(self.repair_pipeline)
         self.recovery_policy = RecoveryPolicy()
         self.stop_gate = StopGate()
+        self.context_preprocessor = CodeWorkerContextPreprocessor()
+        self.result_budget = ResultBudget(max_inline_chars=4000, preview_chars=1200)
         self.max_turns = max(1, max_turns)
         self.emit = emit
 
@@ -255,11 +260,12 @@ class CodeWorkerToolLoop:
     ) -> str:
         from coder_workbench.agent_graph.prompts import build_worker_tool_loop_prompt
 
+        prepared_context = self.context_preprocessor.prepare(item=item, envelope=envelope, state=state)
         return build_worker_tool_loop_prompt(
             base_prompt=base_prompt,
             item=item,
             envelope=envelope,
-            loop_state=state.model_dump(mode="json"),
+            prepared_context=prepared_context.model_dump(mode="json"),
             capability_set=state.session.capability_set,
         )
 
@@ -308,13 +314,32 @@ class CodeWorkerToolLoop:
     def _observation_from_result(self, request: HarnessActionRequest, result: ActionResult) -> HarnessObservation:
         status = result.status
         error_code = result.error_code
-        payload = _json_preview(result.payload)
+        result_payload, budget_refs = apply_result_budget(
+            dict(result.payload),
+            data=self.run_context.mutable_data,
+            run_id=self.run_context.run_id,
+            action_id=request.action_id,
+            action_type=request.action_type,
+            budget=self.result_budget,
+        )
+        if budget_refs:
+            result_payload.setdefault("result_budget", {})["externalized_refs"] = budget_refs
+        result_payload, aggregate_ref = self._externalize_payload_if_large(request, result_payload)
+        if aggregate_ref:
+            budget_refs.append(aggregate_ref)
+        payload = _json_preview(result_payload)
         if request.action_type == "run_command_sandbox":
-            command_result = result.payload.get("result") if isinstance(result.payload.get("result"), dict) else {}
+            command_result = result_payload.get("result") if isinstance(result_payload.get("result"), dict) else {}
             if command_result and command_result.get("passed") is False and status == "ok":
                 status = "failed"
                 error_code = "command_failed"
-        output_ref = result.output_ref or _first_externalized_ref(result.payload)
+        output_ref = result.output_ref or _first_externalized_ref(result_payload)
+        summary = _bounded_result_summary(
+            result.summary or f"{request.action_type} completed with status {status}.",
+            action_type=request.action_type,
+            status=status,
+            output_ref=output_ref,
+        )
         evidence_refs = [f"harness_observation:{request.action_id}"]
         if output_ref:
             evidence_refs.append(output_ref)
@@ -322,11 +347,49 @@ class CodeWorkerToolLoop:
             action_id=request.action_id,
             action_type=request.action_type,
             status=status,
-            summary=result.summary or f"{request.action_type} completed with status {status}.",
+            summary=summary,
             output_ref=output_ref,
             evidence_refs=_unique(evidence_refs),
             payload_preview=payload,
             error_code=error_code,
+        )
+
+    def _externalize_payload_if_large(
+        self,
+        request: HarnessActionRequest,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], str | None]:
+        text = json.dumps(payload, ensure_ascii=False, default=str)
+        if len(text) <= self.result_budget.max_inline_chars:
+            return payload, None
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        blob_id = f"sha256:{digest}"
+        pending = self.run_context.mutable_data.setdefault("pending_blob_writes", {})
+        if isinstance(pending, dict):
+            pending[blob_id] = {
+                "blob_id": blob_id,
+                "ref_type": "tool-result",
+                "field_path": "payload",
+                "preview": text[: self.result_budget.preview_chars],
+                "content": text,
+                "original_chars": len(text),
+                "media_type": "application/json; charset=utf-8",
+            }
+        return (
+            {
+                "output_ref": blob_id,
+                "preview": text[: self.result_budget.preview_chars],
+                "truncated": True,
+                "original_chars": len(text),
+                "result_budget": {
+                    "externalized_refs": [
+                        blob_id,
+                    ],
+                    "action_id": request.action_id,
+                    "action_type": request.action_type,
+                },
+            },
+            blob_id,
         )
 
     def _record_observation(
@@ -710,6 +773,24 @@ def _json_preview(value: Any, *, max_chars: int = 4000) -> dict[str, Any]:
         "truncated": True,
         "original_chars": len(text),
     }
+
+
+def _bounded_result_summary(
+    summary: str,
+    *,
+    action_type: str,
+    status: str,
+    output_ref: str | None,
+    max_chars: int = 800,
+) -> str:
+    text = str(summary or "")
+    if len(text) <= max_chars:
+        return text
+    ref_text = f" Output ref: {output_ref}." if output_ref else ""
+    return (
+        f"{action_type} completed with status {status}; "
+        f"summary was {len(text)} chars and was truncated.{ref_text}"
+    )
 
 
 def _blocker_type_for_error(error_code: str | None) -> str:

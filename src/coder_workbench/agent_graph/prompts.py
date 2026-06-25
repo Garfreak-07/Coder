@@ -139,7 +139,7 @@ def build_worker_tool_loop_prompt(
     base_prompt: str,
     item: WorkItem,
     envelope: AgentTaskEnvelope,
-    loop_state: dict[str, Any],
+    prepared_context: dict[str, Any],
     capability_set: dict[str, Any] | None = None,
 ) -> str:
     return render_prompt_layers(
@@ -162,7 +162,7 @@ def build_worker_tool_loop_prompt(
             json_layer(layer_id="work_item", title="Work item JSON", value=item.model_dump(mode="json")),
             json_layer(layer_id="agent_task_envelope", title="AgentTaskEnvelope JSON", value=envelope.model_dump(mode="json")),
             json_layer(layer_id="capability_set", title="Resolved CapabilitySet JSON", value=capability_set or envelope.capability_set),
-            json_layer(layer_id="loop_state", title="CodeWorkerLoopState JSON", value=_tool_loop_state_projection(loop_state)),
+            json_layer(layer_id="prepared_context", title="Prepared CodeWorker context JSON", value=prepared_context),
             text_layer(
                 layer_id="action_schema",
                 title="Harness action schema",
@@ -337,27 +337,6 @@ def _debug_findings_text(findings: list[dict[str, Any]]) -> str:
             )
         )
     return "\n".join(lines)
-
-
-def _tool_loop_state_projection(loop_state: dict[str, Any]) -> dict[str, Any]:
-    session = loop_state.get("session") if isinstance(loop_state.get("session"), dict) else {}
-    observations = session.get("observations") if isinstance(session.get("observations"), list) else []
-    return {
-        "turn_count": loop_state.get("turn_count"),
-        "max_turns": loop_state.get("max_turns"),
-        "transition": loop_state.get("transition"),
-        "recent_observations": observations[-8:],
-        "evidence_refs": session.get("evidence_refs", []),
-        "opened_files": session.get("opened_files", []),
-        "searched_patterns": session.get("searched_patterns", []),
-        "changed_files": session.get("changed_files", []),
-        "created_files": session.get("created_files", []),
-        "deleted_files": session.get("deleted_files", []),
-        "patch_refs": session.get("patch_refs", []),
-        "command_checks": session.get("command_checks", [])[-4:],
-        "blocked_reasons": session.get("blocked_reasons", [])[-4:],
-        "recovery_attempts": session.get("recovery_attempts", [])[-4:],
-    }
 
 
 def _symbol_index_summary(value: Any) -> dict[str, Any]:
