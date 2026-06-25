@@ -416,7 +416,7 @@ export interface ExtensionManifest {
   name: string;
   version: string;
   description: string;
-  extension_type: "plugin" | "skill" | "agent_engine" | string;
+  extension_type: "plugin" | "skill" | "harness_runtime" | string;
   installed: boolean;
   enabled: boolean;
   risk_level: string;

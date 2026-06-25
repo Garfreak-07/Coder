@@ -74,7 +74,7 @@ class AgentGraphExecutorTests(unittest.TestCase):
 
         self.assertEqual(order.plan_graph.work_items[0].work_item_id, "executor-work")
 
-    def test_planner_order_prompt_includes_compact_skill_index(self) -> None:
+    def test_planner_order_runtime_context_includes_compact_skill_index(self) -> None:
         model = FakeChatModel(
             [
                 (
@@ -85,14 +85,21 @@ class AgentGraphExecutorTests(unittest.TestCase):
             ]
         )
         executor = _executor(model)
+        calls = _capture_workflow_supervisor_calls(executor)
+        skill_index = _skill_index()
 
-        executor.create_planner_order("Research", skill_index=_skill_index())
+        executor.create_planner_order("Research", skill_index=skill_index)
 
-        self.assertIn("Installed SkillIndex JSON", model.prompts[0])
-        self.assertIn("github-research", model.prompts[0])
-        self.assertNotIn("# GitHub Research", model.prompts[0])
+        self.assertEqual(model.prompts, [])
+        self.assertEqual(calls[0]["profile_id"], "openhands-workflow-supervisor-default")
+        self.assertEqual(calls[0]["context"].profile_id, "openhands-workflow-supervisor-default")
+        self.assertIs(calls[0]["input_artifacts"]["legacy_kwargs"]["skill_index"], skill_index)
+        self.assertEqual(
+            calls[0]["context"].context_packet["warm"]["capability_summary"]["skills"],
+            ["github-research"],
+        )
 
-    def test_planner_order_prompt_includes_repo_intelligence(self) -> None:
+    def test_planner_order_runtime_input_includes_repo_intelligence(self) -> None:
         model = FakeChatModel(
             [
                 (
@@ -103,38 +110,37 @@ class AgentGraphExecutorTests(unittest.TestCase):
             ]
         )
         executor = _executor(model)
-
-        executor.create_planner_order(
-            "Fix tests",
-            repo_intelligence={
-                "repo_index": {
-                    "artifact_type": "repo_index",
-                    "languages": ["python"],
-                    "frameworks": ["fastapi"],
-                    "source_dirs": ["src"],
-                    "test_dirs": ["tests"],
-                    "important_files": ["pyproject.toml"],
-                    "risk_files": [".env"],
-                    "package_managers": ["pip"],
-                    "file_count": 3,
-                    "confidence": "high",
-                },
-                "command_discovery": {
-                    "artifact_type": "command_discovery",
-                    "test_commands": [{"command": "python -m unittest discover -s tests", "cwd": ".", "confidence": "high"}],
-                    "build_commands": [],
-                    "lint_commands": [],
-                    "confidence": "high",
-                },
-                "risk_map": {"artifact_type": "risk_map", "risk_files": [".env"], "items": [], "confidence": "high"},
-                "symbol_index": {"artifact_type": "symbol_index", "files": [], "parser": "regex_fallback", "languages": ["python"], "confidence": "medium"},
+        calls = _capture_workflow_supervisor_calls(executor)
+        repo_intelligence = {
+            "repo_index": {
+                "artifact_type": "repo_index",
+                "languages": ["python"],
+                "frameworks": ["fastapi"],
+                "source_dirs": ["src"],
+                "test_dirs": ["tests"],
+                "important_files": ["pyproject.toml"],
+                "risk_files": [".env"],
+                "package_managers": ["pip"],
+                "file_count": 3,
+                "confidence": "high",
             },
-        )
+            "command_discovery": {
+                "artifact_type": "command_discovery",
+                "test_commands": [{"command": "python -m unittest discover -s tests", "cwd": ".", "confidence": "high"}],
+                "build_commands": [],
+                "lint_commands": [],
+                "confidence": "high",
+            },
+            "risk_map": {"artifact_type": "risk_map", "risk_files": [".env"], "items": [], "confidence": "high"},
+            "symbol_index": {"artifact_type": "symbol_index", "files": [], "parser": "regex_fallback", "languages": ["python"], "confidence": "medium"},
+        }
 
-        self.assertIn("RepoIndex summary JSON", model.prompts[0])
-        self.assertIn("CommandDiscovery summary JSON", model.prompts[0])
-        self.assertIn("RiskMap summary JSON", model.prompts[0])
-        self.assertIn("Use repo intelligence before creating work_items", model.prompts[0])
+        order = executor.create_planner_order("Fix tests", repo_intelligence=repo_intelligence)
+
+        self.assertEqual(model.prompts, [])
+        self.assertIs(calls[0]["input_artifacts"]["legacy_kwargs"]["repo_intelligence"], repo_intelligence)
+        self.assertEqual(calls[0]["profile_id"], "openhands-workflow-supervisor-default")
+        self.assertIn("pyproject.toml", order.plan_graph.work_items[0].task_summary)
 
     def test_valid_worker_json_becomes_execution_record(self) -> None:
         model = FakeChatModel(
@@ -232,7 +238,7 @@ class AgentGraphExecutorTests(unittest.TestCase):
         self.assertIn("Executor output failed schema validation", record.artifact_payload["planner_question"])
         self.assertIn("agent_graph.agent_call.repair_failed", [event["type"] for event in events])
 
-    def test_valid_planner_decision_json_is_validated(self) -> None:
+    def test_planner_decision_uses_workflow_supervisor_runtime(self) -> None:
         model = FakeChatModel(
             [
                 (
@@ -242,11 +248,16 @@ class AgentGraphExecutorTests(unittest.TestCase):
             ]
         )
         executor = _executor(model)
+        calls = _capture_workflow_supervisor_calls(executor)
+        bundle = _planner_bundle()
 
-        decision = executor.create_planner_decision(bundle=_planner_bundle())
+        decision = executor.create_planner_decision(bundle=bundle)
 
         self.assertEqual(decision["next_action"], "finish")
-        self.assertEqual(decision["reason"], "All work is done.")
+        self.assertEqual(decision["reason"], "Local PlannerStrategy execution artifacts are complete.")
+        self.assertEqual(model.prompts, [])
+        self.assertEqual(calls[0]["profile_id"], "openhands-workflow-supervisor-default")
+        self.assertIs(calls[0]["input_artifacts"]["legacy_kwargs"]["bundle"], bundle)
 
     def test_mock_planner_decision_continues_on_failed_verification(self) -> None:
         executor = AgentGraphExecutor(default_planner_led_agent_workflow())
@@ -298,6 +309,18 @@ def _executor(model: FakeChatModel) -> AgentGraphExecutor:
         runtime_settings=settings,
         model_factory=lambda config: model,
     )
+
+
+def _capture_workflow_supervisor_calls(executor: AgentGraphExecutor) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    original = executor.agent_run.harness_runtime_manager.run_workflow_supervisor
+
+    def tracking_run_workflow_supervisor(**kwargs: Any):
+        calls.append(kwargs)
+        return original(**kwargs)
+
+    executor.agent_run.harness_runtime_manager.run_workflow_supervisor = tracking_run_workflow_supervisor
+    return calls
 
 
 def _item() -> WorkItem:

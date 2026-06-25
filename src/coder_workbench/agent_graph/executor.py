@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
-from coder_workbench.agent_engine.runtime import AgentEngineRuntimeError, ModelFactory
 from coder_workbench.agent_graph.agent_run import AgentRun
 from coder_workbench.agent_graph.schema import (
     AgentTaskEnvelope,
@@ -18,7 +17,13 @@ from coder_workbench.llm import create_chat_model
 from coder_workbench.skills.index import SkillIndex
 
 
-AgentGraphExecutorError = AgentEngineRuntimeError
+ModelFactory = Callable[[RuntimeConfig], Any]
+
+
+class AgentGraphExecutorError(ValueError):
+    def __init__(self, message: str, *, status_code: str) -> None:
+        self.status_code = status_code
+        super().__init__(message)
 
 
 class AgentGraphExecutorProtocol(Protocol):
@@ -69,7 +74,13 @@ class AgentGraphExecutor:
         self.agent_workflow = agent_workflow
         self.runtime_settings = runtime_settings
         self.model_factory = model_factory
-        self.agent_run = agent_run or AgentRun(agent_workflow)
+        self.agent_run = agent_run or AgentRun(
+            agent_workflow,
+            runtime_settings=runtime_settings,
+            model_factory=model_factory,
+            budget_broker=budget_broker,
+            run_id=run_id,
+        )
         self.budget_broker = budget_broker
         self.run_id = run_id
 
@@ -84,20 +95,18 @@ class AgentGraphExecutor:
         round_number: int = 1,
         emit: Any | None = None,
     ) -> PlannerOrder:
-        return self.agent_run.engine_registry.planner().run_planner_order(
-            request,
-            agent_workflow=self.agent_workflow,
-            runtime_settings=self.runtime_settings,
-            model_factory=self.model_factory,
-            budget_broker=self.budget_broker,
-            run_id=self.run_id,
-            previous_bundle=previous_bundle,
-            previous_round_summary=previous_round_summary,
-            skill_index=skill_index,
-            repo_intelligence=repo_intelligence,
-            round_number=round_number,
-            emit=emit,
-        )
+        try:
+            return self.agent_run.run_planner_order(
+                request,
+                previous_bundle=previous_bundle,
+                previous_round_summary=previous_round_summary,
+                skill_index=skill_index,
+                repo_intelligence=repo_intelligence,
+                round_number=round_number,
+                emit=emit,
+            )
+        except RuntimeError as exc:
+            raise AgentGraphExecutorError(str(exc), status_code="planner_order_failed") from exc
 
     def create_execution_result(
         self,
@@ -119,15 +128,13 @@ class AgentGraphExecutor:
         bundle: PlannerInputBundle,
         emit: Any | None = None,
     ) -> dict[str, Any]:
-        return self.agent_run.engine_registry.planner().run_planner_decision(
-            agent_workflow=self.agent_workflow,
-            bundle=bundle,
-            runtime_settings=self.runtime_settings,
-            model_factory=self.model_factory,
-            budget_broker=self.budget_broker,
-            run_id=self.run_id,
-            emit=emit,
-        )
+        try:
+            return self.agent_run.run_planner_decision(
+                bundle=bundle,
+                emit=emit,
+            )
+        except RuntimeError as exc:
+            raise AgentGraphExecutorError(str(exc), status_code="planner_decision_failed") from exc
 
     def _chat_model(self) -> Any | None:
         config = self._runtime_config()

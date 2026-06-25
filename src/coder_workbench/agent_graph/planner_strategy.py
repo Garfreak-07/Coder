@@ -37,14 +37,6 @@ class PlannerStrategy(Protocol):
         ...
 
 
-class FullPlannerStrategy:
-    def create_order(self, context: PlannerStrategyContext) -> PlannerOrder | None:
-        return None
-
-    def create_decision(self, context: PlannerStrategyContext) -> dict[str, Any] | None:
-        return None
-
-
 class ReplayPlannerStrategy:
     def create_order(self, context: PlannerStrategyContext) -> PlannerOrder | None:
         value = (context.initial_data or {}).get("planner_order")
@@ -106,11 +98,11 @@ def planner_strategy_for_mode(mode: str | None) -> PlannerStrategy:
     normalized = (mode or "full").strip().lower()
     if normalized == "replay":
         return ReplayPlannerStrategy()
-    if normalized == "simple":
+    if normalized in {"full", "simple"}:
         return SimplePlannerStrategy()
     if normalized == "single_executor":
         return SimplePlannerStrategy(single_executor=True)
-    return FullPlannerStrategy()
+    return SimplePlannerStrategy()
 
 
 def planner_mode_from(initial_data: dict[str, Any] | None, runtime_settings: Any | None) -> str:

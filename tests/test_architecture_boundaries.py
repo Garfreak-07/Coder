@@ -12,16 +12,15 @@ from fastapi.testclient import TestClient
 
 from coder_workbench.actions import ActionGateway, ActionResult
 from coder_workbench.actions.schema import ACTION_TYPES
-from coder_workbench.agent_engine import CodeWorkerEngine, HarnessBlock, HarnessGraph, HarnessValidator, default_agent_engine_registry
-from coder_workbench.agent_engine.schema import AgentEngineSpec
 from coder_workbench.agent_graph.cache import GraphRunCache
 from coder_workbench.agent_graph.agent_run import AgentRun
 from coder_workbench.agent_graph.effects import apply_hidden_effects
-from coder_workbench.agent_graph.executor import AgentGraphExecutor, AgentGraphExecutorError
+from coder_workbench.agent_graph.executor import AgentGraphExecutor
 from coder_workbench.agent_graph.runner import AgentGraphRunner
 from coder_workbench.agent_graph.schema import ExecutionRecord
-from coder_workbench.agent_model import AgentRecipe, RuntimeProfileCompiler, TokenBudget
-from coder_workbench.budget import BudgetBroker, BudgetLimit
+from coder_workbench.agent_harness import CodeWorkerHarness
+from coder_workbench.agent_model import AgentRecipe, RuntimeProfileCompiler
+from coder_workbench.budget import BudgetLimit
 from coder_workbench.core import AgentWorkflowSpec, default_planner_led_agent_workflow, validate_agent_workflow_payload
 from coder_workbench.server.storage import RunStore
 from coder_workbench.server.settings import ProviderSettings
@@ -99,17 +98,17 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         self.assertIn("RuntimeProfileCache", source)
         self.assertIn("compile_or_get", source)
 
-    def test_code_work_item_uses_agent_engine_path(self) -> None:
+    def test_code_work_item_uses_harness_runtime_fallback_path(self) -> None:
         calls: list[str] = []
-        original = CodeWorkerEngine.run_execution
+        original = CodeWorkerHarness.create_execution_result
 
-        def tracking_run(self: CodeWorkerEngine, **kwargs: Any):
+        def tracking_run(self: CodeWorkerHarness, **kwargs: Any):
             calls.append(kwargs["item"].work_item_id)
             return original(self, **kwargs)
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(CodeWorkerEngine, "run_execution", tracking_run):
-                result = AgentGraphRunner(default_planner_led_agent_workflow()).run("Use engine path.", tmp)
+            with patch.object(CodeWorkerHarness, "create_execution_result", tracking_run):
+                result = AgentGraphRunner(default_planner_led_agent_workflow()).run("Use harness runtime path.", tmp)
 
         self.assertEqual(result.status, "completed")
         self.assertIn("executor-work", calls)
@@ -231,35 +230,6 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         self.assertIn("propose_patch", action_types)
         self.assertTrue(any(record["status"] == "patch_preview_created" for record in records))
 
-    def test_real_model_calls_reserve_budget_before_invocation(self) -> None:
-        class ExplodingModel:
-            invoked = False
-
-            def invoke(self, prompt: str):  # pragma: no cover - budget should block first
-                self.invoked = True
-                raise AssertionError("model should not be invoked after budget denial")
-
-        model = ExplodingModel()
-        settings = ProviderSettings(
-            default_provider="openai",
-            default_model="fake-model",
-            api_keys={"openai": "test-key"},
-            mock_mode=False,
-        )
-        executor = AgentGraphExecutor(
-            default_planner_led_agent_workflow(),
-            runtime_settings=settings,
-            model_factory=lambda config: model,
-            budget_broker=BudgetBroker(BudgetLimit(max_model_calls=0)),
-            run_id="run",
-        )
-
-        with self.assertRaises(AgentGraphExecutorError) as raised:
-            executor.create_planner_order("Plan with live model.")
-
-        self.assertEqual(raised.exception.status_code, "model_call_budget_exceeded")
-        self.assertFalse(model.invoked)
-
     def test_round_budget_preflight_blocks_before_worker_wave(self) -> None:
         model = CountingChatModel(
             [
@@ -299,7 +269,7 @@ class ArchitectureBoundaryTests(unittest.TestCase):
 
         self.assertEqual(result.status, "blocked")
         self.assertEqual(result.status_code, "round_model_call_budget_exceeded")
-        self.assertEqual(model.invocation_count, 1)
+        self.assertEqual(model.invocation_count, 0)
         self.assertIn("planner.order.produced", event_types)
         self.assertNotIn("agent_graph.wave.started", event_types)
         self.assertNotIn("action.started", event_types)
@@ -307,48 +277,16 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         self.assertFalse(result.data["budget_preflight"][0]["approved"])
         self.assertEqual(result.data["budget_preflight"][0]["reason"], "round_model_call_budget_exceeded")
 
-    def test_model_artifact_validation_and_repair_route_through_action_gateway(self) -> None:
-        class InvalidModel:
-            def invoke(self, prompt: str):
-                return type("Response", (), {"content": "not json"})()
+    def test_agent_run_no_longer_imports_obsolete_agent_engine_package(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        agent_engine_dir = root / "src" / "coder_workbench" / "agent_engine"
+        source = inspect.getsource(__import__("coder_workbench.agent_graph.agent_run", fromlist=["_"]))
 
-        action_types: list[str] = []
-        repaired_order = {
-            "artifact_type": "planner_order",
-            "round": 1,
-            "round_goal": "Repair planner output.",
-            "plan_graph": {"work_items": []},
-        }
-        original = ActionGateway.run
-
-        def tracking_run(self: ActionGateway, spec, *, run_context):
-            action_types.append(spec.action_type)
-            if spec.action_type == "validate_artifact":
-                return ActionResult(status="failed", summary="invalid artifact")
-            if spec.action_type == "repair_artifact":
-                return ActionResult(status="ok", summary="repaired", payload={"artifact": repaired_order})
-            return original(self, spec, run_context=run_context)
-
-        settings = ProviderSettings(
-            default_provider="openai",
-            default_model="fake-model",
-            api_keys={"openai": "test-key"},
-            mock_mode=False,
-        )
-        with patch.object(ActionGateway, "run", tracking_run):
-            order = default_agent_engine_registry().planner().run_planner_order(
-                "Repair planner output.",
-                agent_workflow=default_planner_led_agent_workflow(),
-                runtime_settings=settings,
-                model_factory=lambda config: InvalidModel(),
-                budget_broker=BudgetBroker(),
-                action_gateway=ActionGateway(),
-                run_id="run",
-            )
-
-        self.assertEqual(order.round_goal, "Repair planner output.")
-        self.assertIn("validate_artifact", action_types)
-        self.assertIn("repair_artifact", action_types)
+        self.assertFalse(any(agent_engine_dir.glob("*.py")))
+        self.assertNotIn("agent_engine", source)
+        self.assertNotIn("engine_registry", source)
+        self.assertIn("HarnessRuntimeManager", source)
+        self.assertIn("InternalFallbackProvider", source)
 
     def test_ordinary_ui_does_not_expose_legacy_runtime_json_editor(self) -> None:
         app_source = (Path(__file__).parents[1] / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
@@ -463,53 +401,13 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         self.assertEqual(validation.status, "pass")
         self.assertIn("return_execution_result", workflow.agents[1].capabilities)
 
-    def test_harness_validator_enforces_engine_boundaries(self) -> None:
-        valid_worker = AgentEngineSpec(
-            id="code-worker-engine",
-            name="Code Worker Engine",
-            engine_type="executor",
-            harness_graph=HarnessGraph(
-                nodes=[
-                    HarnessBlock(id="context", type="context_builder"),
-                    HarnessBlock(id="loop", type="model_loop", config={"max_steps": 4}),
-                    HarnessBlock(id="validate", type="artifact_validator"),
-                    HarnessBlock(id="out", type="output_artifact"),
-                ],
-                edges=[("context", "loop"), ("loop", "validate"), ("validate", "out")],
-            ),
-            allowed_artifacts=["execution_result"],
-            token_budget=TokenBudget(max_input_tokens=8000),
-        )
-        worker_asks_human = valid_worker.model_copy(
-            update={
-                "harness_graph": HarnessGraph(
-                    nodes=[
-                        *valid_worker.harness_graph.nodes,
-                        HarnessBlock(id="ask", type="interrupt_gate", config={"ask_human": True}),
-                    ]
-                )
-            }
-        )
-        validator = HarnessValidator()
-
-        self.assertTrue(validator.validate(valid_worker).valid)
-        self.assertIn("non_planner_ask_human", {issue.code for issue in validator.validate(worker_asks_human).issues})
-        with self.assertRaises(Exception):
-            AgentEngineSpec.model_validate(
-                {
-                    **valid_worker.model_dump(mode="python"),
-                    "id": "legacy-engine",
-                    "engine_type": "tester",
-                }
-            )
-
     def test_repair_logic_is_centralized_outside_executor_classes(self) -> None:
         executor_source = inspect.getsource(AgentGraphExecutor)
-        runtime_source = inspect.getsource(__import__("coder_workbench.agent_engine.runtime", fromlist=["_"]))
+        agent_run_source = inspect.getsource(__import__("coder_workbench.agent_graph.agent_run", fromlist=["_"]))
 
         self.assertNotIn("def _repair_once", executor_source)
         self.assertNotIn("ArtifactRepairService", executor_source)
-        self.assertNotIn("ArtifactRepairService", runtime_source)
+        self.assertNotIn("ArtifactRepairService", agent_run_source)
         self.assertNotIn("build_planner_order_prompt", executor_source)
         self.assertNotIn("build_planner_decision_prompt", executor_source)
 
@@ -523,7 +421,7 @@ class ArchitectureBoundaryTests(unittest.TestCase):
         self.assertEqual(plugins.status_code, 200)
         self.assertEqual(skills.status_code, 200)
         self.assertEqual(search.status_code, 200)
-        self.assertTrue(any(item["extension_type"] in {"plugin", "agent_engine"} for item in plugins.json()["plugins"]))
+        self.assertTrue(any(item["extension_type"] in {"plugin", "harness_runtime"} for item in plugins.json()["plugins"]))
 
     def test_legacy_patch_tools_route_through_patch_service(self) -> None:
         registry_source = inspect.getsource(__import__("coder_workbench.tools.registry", fromlist=["_"]))

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from coder_workbench.actions import ActionGateway
-from coder_workbench.agent_engine import AgentEngineRegistry, default_agent_engine_registry
+from coder_workbench.agent_graph.prompts import build_worker_execution_prompt
 from coder_workbench.agent_graph.planner_strategy import (
     PlannerStrategyContext,
     planner_mode_from,
@@ -31,13 +31,12 @@ ModelFactory = Any
 
 
 class AgentRun:
-    """Runs one Agent work item through a compiled runtime profile and AgentEngine."""
+    """Runs Agent work through HarnessRuntimeManager and compatibility fallback providers."""
 
     def __init__(
         self,
         agent_workflow: AgentWorkflowSpec,
         *,
-        engine_registry: AgentEngineRegistry | None = None,
         profile_compiler: RuntimeProfileCompiler | None = None,
         profile_cache: RuntimeProfileCache | None = None,
         runtime_settings: Any | None = None,
@@ -48,7 +47,6 @@ class AgentRun:
         initial_data: dict[str, Any] | None = None,
     ) -> None:
         self.agent_workflow = agent_workflow
-        self.engine_registry = engine_registry or default_agent_engine_registry()
         self.profile_compiler = profile_compiler or RuntimeProfileCompiler()
         self.profile_cache = profile_cache or RuntimeProfileCache()
         self.runtime_settings = runtime_settings
@@ -81,6 +79,7 @@ class AgentRun:
     ) -> Any:
         planner = self._agent(self.agent_workflow.primary_planner_id)
         profile = self._profile_for_agent(planner)
+        profile_id = _runtime_profile_id(profile, "openhands-workflow-supervisor-default")
         state_view = self._planner_state_view()
         capability_set = resolve_capabilities(
             agent=planner,
@@ -99,7 +98,7 @@ class AgentRun:
             agent_id=planner.id,
             harness_id="conversation-harness",
             mode="workflow_supervisor",
-            profile_id="internal-fallback-workflow-supervisor",
+            profile_id=profile_id,
             round_number=round_number,
             state_view=state_view,
             capability_set=capability_set.model_dump(mode="json"),
@@ -107,7 +106,7 @@ class AgentRun:
         )
         result = self.harness_runtime_manager.run_workflow_supervisor(
             context=context,
-            profile_id="internal-fallback-workflow-supervisor",
+            profile_id=profile_id,
             input_artifacts={
                 "legacy_operation": "planner_order",
                 "legacy_kwargs": {
@@ -158,23 +157,7 @@ class AgentRun:
         if order is not None:
             self._emit_strategy_used(emit, mode, "planner_order", round_number)
             return order
-        return self.engine_registry.planner().run_planner_order(
-            request,
-            agent_workflow=self.agent_workflow,
-            runtime_settings=self.runtime_settings,
-            model_factory=self.model_factory,
-            budget_broker=self.budget_broker,
-            action_gateway=self.action_gateway,
-            run_id=self.run_id,
-            previous_bundle=previous_bundle,
-            previous_round_summary=previous_round_summary,
-            skill_index=skill_index,
-            repo_intelligence=repo_intelligence,
-            state_view=state_view,
-            capability_set=capability_set,
-            round_number=round_number,
-            emit=emit,
-        )
+        raise RuntimeError(f"PlannerStrategy mode {mode!r} did not produce a planner_order")
 
     def run_execution(
         self,
@@ -186,6 +169,7 @@ class AgentRun:
     ) -> ExecutionRecord:
         agent = self._agent(item.assignee_agent_id)
         profile = self._profile_for_agent(agent)
+        profile_id = _runtime_profile_id(profile, "openhands-task-executor-default")
         state_view = self._executor_state_view(item.work_item_id)
         harness_id = profile.harness_id or CODE_WORKER_HARNESS.harness_id
         capability_set = resolve_capabilities(
@@ -207,7 +191,7 @@ class AgentRun:
             agent_id=agent.id,
             harness_id="task-execution-harness",
             mode="task_execution",
-            profile_id="internal-fallback-task-executor",
+            profile_id=profile_id,
             round_number=envelope.round,
             state_view=state_view,
             capability_set=capability_payload,
@@ -216,7 +200,7 @@ class AgentRun:
         )
         result = self.harness_runtime_manager.run_task_execution(
             context=context,
-            profile_id="internal-fallback-task-executor",
+            profile_id=profile_id,
             input_artifacts={
                 "legacy_operation": "task_execution",
                 "legacy_kwargs": {
@@ -246,13 +230,20 @@ class AgentRun:
         model: Any | None = None,
         emit: Any | None = None,
     ) -> ExecutionRecord:
-        engine = self.engine_registry.get(engine_id)
-        return engine.run_execution(
-            agent=agent,
+        from coder_workbench.agent_harness import CodeWorkerHarness
+
+        active_model = model or self._chat_model()
+        return CodeWorkerHarness(model=active_model).create_execution_result(
             item=item,
             envelope=envelope,
+            coding_context_packet=envelope.coding_context_packet if active_model is not None else None,
+            prompt=build_worker_execution_prompt(
+                agent=agent,
+                item=item,
+                envelope=envelope,
+                capability_set=capability_set,
+            ),
             capability_set=capability_set,
-            model=model or self._chat_model(),
             repo_root=str(self.initial_data.get("repo_root") or "."),
             sandbox_root=_optional_string(self.initial_data.get("sandbox_root")),
             scopes=_scopes_from_data(self.initial_data),
@@ -270,6 +261,7 @@ class AgentRun:
     ) -> dict[str, Any]:
         planner = self._agent(self.agent_workflow.primary_planner_id)
         profile = self._profile_for_agent(planner)
+        profile_id = _runtime_profile_id(profile, "openhands-workflow-supervisor-default")
         state_view = self._planner_state_view()
         capability_set = resolve_capabilities(
             agent=planner,
@@ -291,7 +283,7 @@ class AgentRun:
             agent_id=planner.id,
             harness_id="conversation-harness",
             mode="workflow_supervisor",
-            profile_id="internal-fallback-workflow-supervisor",
+            profile_id=profile_id,
             round_number=round_number,
             state_view=state_view,
             capability_set=capability_set.model_dump(mode="json"),
@@ -308,7 +300,7 @@ class AgentRun:
         )
         result = self.harness_runtime_manager.run_workflow_supervisor(
             context=context,
-            profile_id="internal-fallback-workflow-supervisor",
+            profile_id=profile_id,
             input_artifacts={
                 "legacy_operation": "planner_decision",
                 "legacy_kwargs": {
@@ -345,18 +337,7 @@ class AgentRun:
         if decision is not None:
             self._emit_strategy_used(emit, mode, "planner_decision", int(getattr(bundle, "round", 1) or 1))
             return decision
-        return self.engine_registry.planner().run_planner_decision(
-            agent_workflow=self.agent_workflow,
-            bundle=bundle,
-            runtime_settings=self.runtime_settings,
-            model_factory=self.model_factory,
-            budget_broker=self.budget_broker,
-            action_gateway=self.action_gateway,
-            run_id=self.run_id,
-            state_view=state_view,
-            capability_set=capability_set,
-            emit=emit,
-        )
+        raise RuntimeError(f"PlannerStrategy mode {mode!r} did not produce a planner_decision")
 
     def _agent(self, agent_id: str) -> AgentWorkflowAgent:
         for agent in self.agent_workflow.agents:
@@ -519,6 +500,11 @@ class AgentRun:
 def _optional_string(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _runtime_profile_id(profile: Any, default: str) -> str:
+    value = str(getattr(profile, "harness_runtime_profile_id", "") or "").strip()
+    return value or default
 
 
 def _scopes_from_data(data: dict[str, Any]) -> list[str]:

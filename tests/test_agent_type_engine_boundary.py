@@ -1,6 +1,5 @@
 import unittest
 
-from coder_workbench.agent_engine import default_agent_engine_registry
 from coder_workbench.agent_model import AgentRecipe, RuntimeProfileCompiler
 from coder_workbench.core import default_planner_led_agent_workflow, role_card_registry
 
@@ -13,13 +12,6 @@ class AgentTypeEngineBoundaryTests(unittest.TestCase):
         self.assertEqual(cards["executor"].role, "executor")
         self.assertEqual(cards["executor"].engine_id, "code-worker-engine")
 
-    def test_default_registry_has_no_tester_engine(self) -> None:
-        registry = default_agent_engine_registry()
-
-        self.assertEqual(registry.ids(), ["code-worker-engine", "planner-engine"])
-        with self.assertRaises(KeyError):
-            registry.get("tester-engine")
-
     def test_runtime_profile_compiler_maps_executor_to_execution_result(self) -> None:
         compiler = RuntimeProfileCompiler()
         planner = compiler.compile(AgentRecipe(id="planner", name="Planner", role="planner"))
@@ -27,9 +19,11 @@ class AgentTypeEngineBoundaryTests(unittest.TestCase):
 
         self.assertEqual(planner.engine_id, "planner-engine")
         self.assertIsNone(planner.harness_id)
+        self.assertEqual(planner.harness_runtime_profile_id, "openhands-workflow-supervisor-default")
         self.assertEqual(planner.allowed_artifacts, ["run_contract", "planner_order", "planner_decision", "round_summary"])
         self.assertEqual(executor.engine_id, "code-worker-engine")
         self.assertEqual(executor.harness_id, "code-worker-harness")
+        self.assertEqual(executor.harness_runtime_profile_id, "openhands-task-executor-default")
         self.assertEqual(executor.allowed_artifacts, ["execution_result"])
         self.assertTrue(executor.tool_policy["run_commands"])
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from coder_workbench.agent_engine import default_agent_engine_registry
+from coder_workbench.agent_graph.planner_strategy import PlannerStrategyContext, planner_strategy_for_mode
 from coder_workbench.agent_graph.schema import PlannerInputBundle
 from coder_workbench.core import default_planner_led_agent_workflow
 from coder_workbench.coding import build_run_coding_eval
@@ -47,25 +47,30 @@ class CodingEvalGateTests(unittest.TestCase):
         self.assertEqual(details["blocked_runtime_actions"], 1)
 
     def test_failed_check_effect_pushes_planner_replan(self) -> None:
-        decision = default_agent_engine_registry().planner().run_planner_decision(
-            agent_workflow=default_planner_led_agent_workflow(),
-            bundle=PlannerInputBundle(
-                round=1,
-                planner_order_ref="planner_order_round_1",
-                plan_status="completed",
-                items=[],
-                effects=[
-                    {
-                        "effect_type": "optional_check_command",
-                        "action_type": "run_command_sandbox",
-                        "status": "failed",
-                        "passed": False,
-                        "reason": "Unit test failed.",
-                    }
-                ],
-            ),
+        bundle = PlannerInputBundle(
+            round=1,
+            planner_order_ref="planner_order_round_1",
+            plan_status="completed",
+            items=[],
+            effects=[
+                {
+                    "effect_type": "optional_check_command",
+                    "action_type": "run_command_sandbox",
+                    "status": "failed",
+                    "passed": False,
+                    "reason": "Unit test failed.",
+                }
+            ],
+        )
+        decision = planner_strategy_for_mode("simple").create_decision(
+            PlannerStrategyContext(
+                agent_workflow=default_planner_led_agent_workflow(),
+                bundle=bundle,
+            )
         )
 
+        self.assertIsNotNone(decision)
+        assert decision is not None
         self.assertEqual(decision["next_action"], "continue")
         self.assertFalse(decision["task_done"])
         self.assertIn("check", decision["reason"].lower())

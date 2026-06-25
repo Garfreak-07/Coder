@@ -102,7 +102,7 @@ class AgentGraphInterventionTests(unittest.TestCase):
         self.assertEqual(decision["final_status"], "blocked")
         self.assertFalse(decision["requires_human_confirmation"])
 
-    def test_planner_decision_prompt_receives_interrupts(self) -> None:
+    def test_planner_decision_runtime_input_receives_interrupts(self) -> None:
         model = FakeChatModel(
             [
                 (
@@ -117,14 +117,16 @@ class AgentGraphInterventionTests(unittest.TestCase):
             runtime_settings=ProviderSettings(api_keys={"openai": "test-key"}, mock_mode=False),
             model_factory=lambda config: model,
         )
+        calls = _capture_workflow_supervisor_calls(executor)
+        bundle = _bundle_with_interrupt(continue_without_human_possible=True)
 
-        decision = executor.create_planner_decision(
-            bundle=_bundle_with_interrupt(continue_without_human_possible=True),
-        )
+        decision = executor.create_planner_decision(bundle=bundle)
 
         self.assertEqual(decision["next_action"], "continue")
-        self.assertIn('"interrupts"', model.prompts[0])
-        self.assertIn("Do not ignore interrupts", model.prompts[0])
+        self.assertEqual(model.prompts, [])
+        self.assertEqual(calls[0]["profile_id"], "openhands-workflow-supervisor-default")
+        self.assertIs(calls[0]["input_artifacts"]["legacy_kwargs"]["bundle"], bundle)
+        self.assertEqual(calls[0]["input_artifacts"]["legacy_kwargs"]["bundle"].interrupts[0].work_item_id, "A")
 
     def test_planner_continue_runs_second_round(self) -> None:
         executor = MultiRoundExecutor()
@@ -508,6 +510,18 @@ def _bundle_with_interrupt(*, continue_without_human_possible: bool) -> PlannerI
             ],
         }
     )
+
+
+def _capture_workflow_supervisor_calls(executor: AgentGraphExecutor) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    original = executor.agent_run.harness_runtime_manager.run_workflow_supervisor
+
+    def tracking_run_workflow_supervisor(**kwargs: Any):
+        calls.append(kwargs)
+        return original(**kwargs)
+
+    executor.agent_run.harness_runtime_manager.run_workflow_supervisor = tracking_run_workflow_supervisor
+    return calls
 
 
 if __name__ == "__main__":

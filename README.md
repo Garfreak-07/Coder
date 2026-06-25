@@ -64,7 +64,7 @@ user, commit, push, deploy, or write long-term memory directly.
 ## Runtime Hardening
 
 The AgentGraph runtime now includes a hardened execution layer while preserving
-the Planner -> Execution Engine -> Planner authority model:
+the Planner -> Task Execution Harness -> Planner authority model:
 
 - `ActionGateway` can route low-level tool effects through an internal
   `ToolExecutionService` with ordered results, conservative concurrency,
@@ -179,9 +179,9 @@ blocked `final_report`.
 ```text
 src/coder_workbench/
   actions/           ActionSpec and ActionGateway for controlled effects
-  agent_engine/      Planner and execution engine boundary
   agent_graph/       Planner-led graph runner, scheduling, working set, merge logic
   agent_harness/     Legacy/fallback harness loops and JSON artifact repair
+  agent_model/       Agent recipes and runtime profile compilation
   harness_runtime/   Canonical harness contracts, providers, safety, sandbox, native events
   budget/            BudgetBroker reservations and round preflight
   coding/            Repo intelligence, patching, command checks, diagnostics

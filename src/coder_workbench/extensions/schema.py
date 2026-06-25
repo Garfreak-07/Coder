@@ -12,7 +12,7 @@ class ExtensionManifest(BaseModel):
     name: str
     version: str = "builtin"
     description: str = ""
-    extension_type: Literal["plugin", "skill", "agent_engine"]
+    extension_type: Literal["plugin", "skill", "harness_runtime"]
     installed: bool = True
     enabled: bool = True
     risk_level: str = "low"
@@ -21,7 +21,7 @@ class ExtensionManifest(BaseModel):
 
 
 class PluginManifest(ExtensionManifest):
-    extension_type: Literal["plugin", "agent_engine"] = "plugin"
+    extension_type: Literal["plugin", "harness_runtime"] = "plugin"
     operations: list[str] = Field(default_factory=list)
     external_effect: bool = False
     requires_preview: bool = False

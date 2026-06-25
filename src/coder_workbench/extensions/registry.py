@@ -26,12 +26,12 @@ def builtin_plugin_manifests() -> list[PluginManifest]:
             tags=["coding", "files"],
         ),
         PluginManifest(
-            id="code-worker-engine",
-            name="Code Worker Engine",
-            description="AgentEngine package for coding work items.",
-            extension_type="agent_engine",
-            operations=["agent_engine.run"],
-            tags=["agent_engine", "coding"],
+            id="openhands-task-executor-runtime",
+            name="OpenHands Task Executor Runtime",
+            description="Harness runtime provider for coding work items.",
+            extension_type="harness_runtime",
+            operations=["harness_runtime.run_task_execution"],
+            tags=["harness_runtime", "executor", "coding"],
         ),
     ]
 
