@@ -9,6 +9,8 @@ from .contracts import (
     resolve_harness_id,
 )
 from .manager import HarnessRuntimeManager
+from .artifact_projector import ArtifactProjectionError, ArtifactProjector
+from .native_events import NativeRuntimeEvent
 from .profiles import (
     DEFAULT_HARNESS_RUNTIME_PROFILES,
     HarnessBindings,
@@ -18,6 +20,7 @@ from .profiles import (
     harness_runtime_profile_for_id,
 )
 from .runtime_context import HarnessRunRequest, HarnessRunResult, HarnessRuntimeContext
+from .store import NativeRuntimeStore
 
 __all__ = [
     "CONVERSATION_HARNESS",
@@ -32,6 +35,10 @@ __all__ = [
     "HarnessRuntimeManager",
     "HarnessRuntimeProfile",
     "LEGACY_HARNESS_ALIASES",
+    "ArtifactProjectionError",
+    "ArtifactProjector",
+    "NativeRuntimeEvent",
+    "NativeRuntimeStore",
     "TASK_EXECUTION_HARNESS",
     "TASK_EXECUTION_HARNESS_ID",
     "default_harness_runtime_profiles",
