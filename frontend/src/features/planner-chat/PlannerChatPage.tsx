@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import type { PlannerChatDraft } from "../../types";
 
 export type PlannerStrength = "fast" | "balanced" | "strong";
 
@@ -11,7 +12,10 @@ interface PlannerChatPageProps {
   runStatus: string;
   scopesText: string;
   submittedRequest: string;
+  planDraft: PlannerChatDraft | null;
   plannerStrength: PlannerStrength;
+  onCancelDraft: () => void;
+  onConfirmDraft: () => void;
   onRepoChange: (value: string) => void;
   onRequestChange: (value: string) => void;
   onScopesTextChange: (value: string) => void;
@@ -28,7 +32,10 @@ export function PlannerChatPage({
   runStatus,
   scopesText,
   submittedRequest,
+  planDraft,
   plannerStrength,
+  onCancelDraft,
+  onConfirmDraft,
   onRepoChange,
   onRequestChange,
   onScopesTextChange,
@@ -36,7 +43,7 @@ export function PlannerChatPage({
   onSubmitRequest
 }: PlannerChatPageProps) {
   const inputValue = request;
-  const inputDisabled = runLoading;
+  const inputDisabled = runLoading || planDraft !== null;
   const canSend = request.trim().length > 0 && !inputDisabled;
 
   function submit() {
@@ -47,7 +54,7 @@ export function PlannerChatPage({
   return (
     <main className="chat-page">
       <section className="chat-thread" aria-label="Planner conversation">
-        {!submittedRequest && !activeRunId ? (
+        {!submittedRequest && !activeRunId && !planDraft ? (
           <div className="chat-empty">
             <h2>What should the Planner work on?</h2>
             <p>Send a request and the Planner will coordinate the Executor.</p>
@@ -69,6 +76,24 @@ export function PlannerChatPage({
                 </div>
                 {activeRunId && <p>Running the Planner-led AgentGraph.</p>}
               </div>
+              {planDraft && (
+                <div className="plan-draft-card">
+                  <div className="plan-draft-header">
+                    <span>Plan draft</span>
+                    <code>{planDraft.draft_id.slice(0, 8)}</code>
+                  </div>
+                  <p>{planDraft.summary}</p>
+                  <DraftList title="Scope" items={planDraft.proposed_scope.length > 0 ? planDraft.proposed_scope : ["Whole project"]} />
+                  <DraftList title="Success criteria" items={planDraft.success_criteria} />
+                  <DraftList title="Risks" items={planDraft.risks} />
+                  <div className="draft-actions">
+                    <button onClick={onCancelDraft} disabled={runLoading}>Discard</button>
+                    <button onClick={onConfirmDraft} disabled={runLoading}>
+                      {runLoading ? "Starting..." : "Confirm and run"}
+                    </button>
+                  </div>
+                </div>
+              )}
               {evidence}
             </article>
           </>
@@ -115,11 +140,24 @@ export function PlannerChatPage({
               </select>
             </label>
             <button onClick={submit} disabled={!canSend}>
-              {runLoading ? "Sending..." : "Send"}
+              {runLoading ? "Drafting..." : "Draft plan"}
             </button>
           </div>
         </div>
       </section>
     </main>
+  );
+}
+
+function DraftList({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div className="draft-list">
+      <div>{title}</div>
+      <ul>
+        {items.map((item, index) => (
+          <li key={`${title}-${index}`}>{item}</li>
+        ))}
+      </ul>
+    </div>
   );
 }

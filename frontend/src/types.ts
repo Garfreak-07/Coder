@@ -105,6 +105,22 @@ export interface AgentWorkflowValidationResult {
   summary: Record<string, unknown>;
 }
 
+export interface PlannerChatDraft {
+  draft_id: string;
+  artifact_type: "project_plan_draft";
+  summary: string;
+  proposed_scope: string[];
+  success_criteria: string[];
+  risks: string[];
+  requires_confirmation: boolean;
+}
+
+export interface PlannerChatConfirmResult {
+  draft_id?: string;
+  run_id?: string;
+  status: string;
+}
+
 export interface ProviderKeyState {
   configured: boolean;
   source: string;

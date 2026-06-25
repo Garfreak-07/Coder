@@ -11,6 +11,8 @@ import type {
   InstalledSkillsPayload,
   LibraryIndex,
   LiveRunDetail,
+  PlannerChatConfirmResult,
+  PlannerChatDraft,
   ProviderSettings,
   ProviderStatus,
   PluginManifest,
@@ -256,6 +258,36 @@ export async function saveAgentWorkflow(agentWorkflow: AgentWorkflowSpec): Promi
     body: JSON.stringify(agentWorkflow)
   });
   return payload.agent_workflow;
+}
+
+export function createPlannerChatDraft(input: {
+  repo: string;
+  request: string;
+  workflow_id: string;
+  planner_agent_id: string;
+  agent_workflow: AgentWorkflowSpec;
+  scopes: string[];
+}): Promise<PlannerChatDraft> {
+  return requestJson("/api/v2/planner-chat/draft", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify(input)
+  });
+}
+
+export function confirmPlannerChatDraft(input: {
+  draft_id: string;
+  approved: boolean;
+  repo?: string;
+  scopes?: string[];
+  edits?: Record<string, unknown>;
+  initial_data?: Record<string, unknown>;
+}): Promise<PlannerChatConfirmResult> {
+  return requestJson("/api/v2/planner-chat/confirm", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify(input)
+  });
 }
 
 export async function startLiveAgentRun(input: {

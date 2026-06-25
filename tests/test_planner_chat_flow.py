@@ -5,6 +5,7 @@ import unittest
 
 from fastapi.testclient import TestClient
 
+from coder_workbench.core import default_planner_led_agent_workflow
 from coder_workbench.core.artifacts import validate_artifact
 from coder_workbench.server.app import create_app
 
@@ -86,6 +87,28 @@ class PlannerChatFlowTests(unittest.TestCase):
             self.assertEqual(confirm_response.status_code, 200)
             self.assertIn("run_id", confirm)
             self.assertIn(confirm["status"], {"queued", "running", "completed", "blocked", "failed"})
+
+    def test_draft_can_use_supplied_workflow_payload(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as store, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as repo:
+            client = TestClient(create_app(store_root=store, frontend_dist=store))
+            workflow = default_planner_led_agent_workflow().model_dump(mode="json", by_alias=True, exclude_none=True)
+            workflow["id"] = "unsaved-workflow"
+            workflow["name"] = "Unsaved Workflow"
+
+            response = client.post(
+                "/api/v2/planner-chat/draft",
+                json={
+                    "request": "Use the current edited workflow.",
+                    "workflow_id": "missing-from-library",
+                    "planner_agent_id": "planner",
+                    "repo": repo,
+                    "agent_workflow": workflow,
+                },
+            )
+            draft = response.json()
+
+            self.assertEqual(response.status_code, 200)
+            self.assertIn("Unsaved Workflow", draft["summary"])
 
 
 if __name__ == "__main__":

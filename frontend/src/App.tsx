@@ -9,6 +9,8 @@ import {
   type NodeChange
 } from "@xyflow/react";
 import {
+  confirmPlannerChatDraft,
+  createPlannerChatDraft,
   deleteRun,
   getAgentWorkflow,
   getDefaultAgentWorkflow,
@@ -19,7 +21,6 @@ import {
   getToolResult,
   rollbackPatch,
   saveAgentWorkflow,
-  startLiveAgentRun,
   subscribeRunEvents,
   validateAgentWorkflow
 } from "./api";
@@ -51,6 +52,7 @@ import type {
   AgentWorkflowSpec,
   LibraryIndex,
   LiveRunDetail,
+  PlannerChatDraft,
   RunEvent,
   StoredRunDetail
 } from "./types";
@@ -77,6 +79,7 @@ export function App() {
   const [eventHasMore, setEventHasMore] = useState(false);
   const [eventsLoadingMore, setEventsLoadingMore] = useState(false);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [plannerDraft, setPlannerDraft] = useState<PlannerChatDraft | null>(null);
   const [newAgentRoleCard, setNewAgentRoleCard] = useState("executor");
   const [connectionFrom, setConnectionFrom] = useState("planner");
   const [connectionTo, setConnectionTo] = useState("executor");
@@ -543,22 +546,71 @@ export function App() {
       setEventHasMore(false);
       setEventsLoadingMore(false);
       setActiveRunId(null);
-      setStatus("Starting Agent workflow run...");
-      setSubmittedRequest(requestText);
-      setRequest("");
-      const run = await startLiveAgentRun({
+      setSelectedRunDetail(null);
+      setSelectedRunKind(null);
+      setPlannerDraft(null);
+      setStatus("Drafting plan...");
+      const draft = await createPlannerChatDraft({
         repo,
         request: requestText,
+        workflow_id: workflow.id,
+        planner_agent_id: workflow.primary_planner_id,
         agent_workflow: workflow,
-        approved: false,
         scopes
       });
+      setPlannerDraft(draft);
+      setSubmittedRequest(requestText);
+      setRequest("");
+      setStatus("Plan draft ready for confirmation.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRunLoading(false);
+    }
+  }
+
+  async function confirmDraft() {
+    if (!plannerDraft) return;
+    setRunLoading(true);
+    setStatus("Starting confirmed Agent workflow run...");
+    try {
+      const run = await confirmPlannerChatDraft({
+        draft_id: plannerDraft.draft_id,
+        approved: true,
+        repo,
+        scopes: linesToList(scopesText)
+      });
+      if (!run.run_id) {
+        throw new Error("Draft confirmation did not start a run.");
+      }
+      setPlannerDraft(null);
       setActiveRunId(run.run_id);
       setSelectedRunKind("live");
       setSelectedRunDetail(null);
+      setEvents([]);
+      subscribeToRun(run.run_id, `/api/v2/live-agent-runs/${run.run_id}/events`);
       setStatus(`Live Agent run ${run.run_id}: ${run.status}`);
-      subscribeToRun(run.run_id, run.events_url);
       refreshRuntimeInfo();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRunLoading(false);
+    }
+  }
+
+  async function cancelDraft() {
+    if (!plannerDraft) return;
+    setRunLoading(true);
+    setStatus("Discarding plan draft...");
+    try {
+      await confirmPlannerChatDraft({
+        draft_id: plannerDraft.draft_id,
+        approved: false
+      });
+      setPlannerDraft(null);
+      setRequest(submittedRequest);
+      setSubmittedRequest("");
+      setStatus("Plan draft discarded.");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -676,7 +728,10 @@ export function App() {
           runStatus={chatRunStatus}
           scopesText={scopesText}
           submittedRequest={submittedRequest}
+          planDraft={plannerDraft}
           plannerStrength={plannerStrength}
+          onCancelDraft={cancelDraft}
+          onConfirmDraft={confirmDraft}
           onRepoChange={setRepo}
           onRequestChange={setRequest}
           onScopesTextChange={setScopesText}

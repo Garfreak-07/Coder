@@ -60,6 +60,7 @@ class PlannerChatDraftRequest(BaseModel):
     request: str
     workflow_id: str = "default-planner-led"
     planner_agent_id: str = "planner"
+    agent_workflow: dict[str, Any] | None = None
     knowledge_pack_ids: list[str] = Field(default_factory=list)
     skill_pack_ids: list[str] = Field(default_factory=list)
     memory_pack_ids: list[str] = Field(default_factory=list)
@@ -447,8 +448,13 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
         if not body.request.strip():
             raise HTTPException(status_code=400, detail="request is required")
         try:
-            agent_workflow = _load_agent_workflow_for_planner_chat(library, body.workflow_id)
-            _raise_agent_workflow_validation(agent_workflow.model_dump(mode="json", by_alias=True, exclude_none=True))
+            if body.agent_workflow is None:
+                agent_workflow = _load_agent_workflow_for_planner_chat(library, body.workflow_id)
+                workflow_payload = agent_workflow.model_dump(mode="json", by_alias=True, exclude_none=True)
+            else:
+                workflow_payload = body.agent_workflow
+                agent_workflow = AgentWorkflowSpec.model_validate(workflow_payload)
+            _raise_agent_workflow_validation(workflow_payload)
         except AgentWorkflowValidationError as exc:
             raise HTTPException(status_code=400, detail=exc.result.model_dump(mode="json")) from exc
         except Exception as exc:

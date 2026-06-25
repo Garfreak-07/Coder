@@ -289,6 +289,55 @@ label {
   margin-bottom: 8px;
 }
 
+.plan-draft-card {
+  background: #101826;
+  border: 1px solid #334155;
+  border-radius: 12px;
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px;
+}
+
+.plan-draft-header {
+  align-items: center;
+  color: #dbeafe;
+  display: flex;
+  font-size: 12px;
+  font-weight: 700;
+  gap: 8px;
+  justify-content: space-between;
+  text-transform: uppercase;
+}
+
+.draft-list {
+  display: grid;
+  gap: 6px;
+}
+
+.draft-list > div {
+  color: #93c5fd;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.draft-list ul {
+  color: #cbd5e1;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.draft-list li {
+  margin: 4px 0;
+}
+
+.draft-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .chat-evidence-stack {
   display: grid;
   gap: 10px;
