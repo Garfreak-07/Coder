@@ -138,6 +138,115 @@ export interface PlannerChatConfirmResult {
   status: string;
 }
 
+export type PlannerInteractionMode = "discuss" | "work";
+
+export interface PlannerPlanStep {
+  id: string;
+  summary: string;
+  depends_on: string[];
+  status: "draft" | "ready" | "executing" | "done" | "blocked";
+}
+
+export interface PlannerTaskState {
+  goal?: string | null;
+  user_intent?: string | null;
+  scope: string[];
+  constraints: string[];
+  success_criteria: string[];
+  known_context: string[];
+  missing_context: string[];
+  open_questions: string[];
+  assumptions: string[];
+  risks: string[];
+  plan_steps: PlannerPlanStep[];
+  readiness: "not_ready" | "needs_clarification" | "ready_to_plan" | "ready_to_execute";
+}
+
+export interface PlannerVisibleThinking {
+  phase:
+    | "understanding"
+    | "gathering_context"
+    | "clarifying"
+    | "planning"
+    | "checking_readiness"
+    | "ready_to_start"
+    | "reporting";
+  summary: string;
+}
+
+export interface PlannerWorkflowHandoff {
+  workflow_request: string;
+  scope: string[];
+  success_criteria: string[];
+  risks: string[];
+}
+
+export interface PlannerChatTurn {
+  artifact_id?: string | null;
+  artifact_type: "planner_chat_turn";
+  assistant_message: string;
+  interaction_mode: PlannerInteractionMode;
+  decision:
+    | "continue_chat"
+    | "produce_plan"
+    | "answer_without_workflow"
+    | "start_workflow"
+    | "blocked_needs_clarification";
+  visible_thinking: PlannerVisibleThinking;
+  task_state: PlannerTaskState;
+  handoff?: PlannerWorkflowHandoff | null;
+}
+
+export interface PlannerChatMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+  created_at?: string | null;
+}
+
+export interface PlannerChatSession {
+  session_id: string;
+  workflow_id: string;
+  planner_agent_id: string;
+  agent_workflow: AgentWorkflowSpec;
+  repo?: string | null;
+  scopes: string[];
+  knowledge_pack_ids: string[];
+  skill_pack_ids: string[];
+  memory_pack_ids: string[];
+  interaction_mode: PlannerInteractionMode;
+  messages: PlannerChatMessage[];
+  task_state: PlannerTaskState;
+  generation: number;
+  last_turn?: PlannerChatTurn | null;
+  run_id?: string | null;
+  status: "chatting" | "ready" | "running" | "completed" | "blocked";
+}
+
+export interface PlannerChatTurnResponse {
+  session_id: string;
+  generation: number;
+  status: PlannerChatSession["status"];
+  run_id?: string | null;
+  turn: PlannerChatTurn;
+  session: PlannerChatSession;
+}
+
+export interface WorkflowActivityStep {
+  id: string;
+  label: string;
+  status: "done" | "active" | "pending" | "blocked" | "failed";
+}
+
+export interface WorkflowActivityUpdate {
+  artifact_id?: string | null;
+  artifact_type: "workflow_activity_update";
+  visible_phase: "planning" | "assigning_work" | "executing" | "checking" | "summarizing" | "completed" | "blocked" | "failed";
+  user_message: string;
+  steps: WorkflowActivityStep[];
+  safety: Record<string, string>[];
+  technical_refs: Record<string, unknown>;
+}
+
 export interface ProviderKeyState {
   configured: boolean;
   source: string;

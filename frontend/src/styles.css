@@ -282,6 +282,7 @@ label {
 }
 
 .user-message p,
+.planner-message > p,
 .message-card {
   background: #151c27;
   border: 1px solid #263244;
@@ -297,6 +298,23 @@ label {
   gap: 8px;
   justify-content: space-between;
   margin-bottom: 8px;
+}
+
+.planner-state-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.planner-state-strip span {
+  background: #0b1220;
+  border: 1px solid #263244;
+  border-radius: 999px;
+  color: #cbd5e1;
+  font-size: 11px;
+  padding: 4px 8px;
+  text-transform: capitalize;
 }
 
 .plan-draft-card {
@@ -496,8 +514,32 @@ label {
 .composer-footer {
   align-items: end;
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   justify-content: flex-end;
+}
+
+.mode-toggle {
+  background: #0b1220;
+  border: 1px solid #263244;
+  border-radius: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(84px, 1fr));
+  margin-right: auto;
+  overflow: hidden;
+}
+
+.mode-toggle button {
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  color: #aeb8c7;
+  min-height: 36px;
+}
+
+.mode-toggle button.selected {
+  background: #1d4ed8;
+  color: #eff6ff;
 }
 
 .strength-control {

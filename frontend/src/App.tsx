@@ -11,6 +11,7 @@ import {
 import {
   confirmPlannerChatDraft,
   createPlannerChatDraft,
+  createPlannerChatSession,
   deleteRun,
   getAgentWorkflow,
   getDefaultAgentWorkflow,
@@ -21,6 +22,7 @@ import {
   getToolResult,
   rollbackPatch,
   saveAgentWorkflow,
+  sendPlannerChatTurn,
   subscribeRunEvents,
   validateAgentWorkflow
 } from "./api";
@@ -57,6 +59,8 @@ import type {
   LibraryIndex,
   LiveRunDetail,
   PlannerChatDraft,
+  PlannerChatSession,
+  PlannerInteractionMode,
   RunEvent,
   StoredRunDetail
 } from "./types";
@@ -84,6 +88,8 @@ export function App() {
   const [eventsLoadingMore, setEventsLoadingMore] = useState(false);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
   const [plannerDraft, setPlannerDraft] = useState<PlannerChatDraft | null>(null);
+  const [plannerSession, setPlannerSession] = useState<PlannerChatSession | null>(null);
+  const [plannerInteractionMode, setPlannerInteractionMode] = useState<PlannerInteractionMode>("discuss");
   const [draftRequestText, setDraftRequestText] = useState("");
   const [draftScopesText, setDraftScopesText] = useState("");
   const [draftSuccessCriteriaText, setDraftSuccessCriteriaText] = useState("");
@@ -559,6 +565,7 @@ export function App() {
       setActiveRunId(null);
       setSelectedRunDetail(null);
       setSelectedRunKind(null);
+      setPlannerSession(null);
       setPlannerDraft(null);
       setDraftRequestText("");
       setDraftScopesText("");
@@ -582,6 +589,69 @@ export function App() {
       setSubmittedRequest(requestText);
       setRequest("");
       setStatus("Plan draft ready for confirmation.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRunLoading(false);
+    }
+  }
+
+  async function sendPlannerTurn() {
+    const requestText = request.trim();
+    if (!requestText) return;
+    setRunLoading(true);
+    setStatus("Sending message to Planner...");
+    try {
+      const workflow = normalizeAgentWorkflow(agentWorkflow);
+      const validation = await validateAgentWorkflow(workflow);
+      setAgentWorkflowValidation(validation);
+      setCurrentAgentWorkflow(workflow);
+      if (validation.status === "error") {
+        setStatus("Planner chat blocked by Agent workflow validation errors.");
+        return;
+      }
+      const scopes = linesToList(scopesText);
+      let session = plannerSession;
+      if (!session) {
+        session = await createPlannerChatSession({
+          repo,
+          workflow_id: workflow.id,
+          planner_agent_id: workflow.primary_planner_id,
+          agent_workflow: workflow,
+          scopes,
+          skill_pack_ids: plannerChatWorkflowSummary.skillPackIds,
+          knowledge_pack_ids: plannerChatWorkflowSummary.knowledgePackIds,
+          memory_pack_ids: plannerChatWorkflowSummary.memoryPackIds,
+          interaction_mode: plannerInteractionMode
+        });
+      }
+      const response = await sendPlannerChatTurn({
+        session_id: session.session_id,
+        message: requestText,
+        interaction_mode: plannerInteractionMode,
+        start_if_ready: true
+      });
+      setPlannerSession(response.session);
+      setPlannerDraft(null);
+      setDraftRequestText("");
+      setDraftScopesText("");
+      setDraftSuccessCriteriaText("");
+      setSubmittedRequest(requestText);
+      setRequest("");
+      if (response.run_id) {
+        setActiveRunId(response.run_id);
+        setSelectedRunKind("live");
+        setSelectedRunDetail(null);
+        setEvents([]);
+        setEventCursor(0);
+        setEventHasMore(false);
+        setEventsLoadingMore(false);
+        subscribeToRun(response.run_id, `/api/v2/live-agent-runs/${response.run_id}/events`);
+        setStatus(`Run ${response.status}.`);
+        refreshRuntimeInfo();
+      } else {
+        setStatus(`Planner ${response.turn.decision.replaceAll("_", " ")}.`);
+      }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
@@ -776,18 +846,22 @@ export function App() {
           scopesText={scopesText}
           submittedRequest={submittedRequest}
           planDraft={plannerDraft}
+          plannerInteractionMode={plannerInteractionMode}
+          plannerSession={plannerSession}
           plannerStrength={plannerStrength}
           workflowSummary={plannerChatWorkflowSummary}
           onCancelDraft={cancelDraft}
           onConfirmDraft={confirmDraft}
+          onDraftPlan={runWorkflow}
           onDraftRequestTextChange={setDraftRequestText}
           onDraftScopesTextChange={setDraftScopesText}
           onDraftSuccessCriteriaTextChange={setDraftSuccessCriteriaText}
+          onPlannerInteractionModeChange={setPlannerInteractionMode}
           onRepoChange={setRepo}
           onRequestChange={setRequest}
           onScopesTextChange={setScopesText}
           onPlannerStrengthChange={updatePlannerStrength}
-          onSubmitRequest={runWorkflow}
+          onSubmitRequest={sendPlannerTurn}
         />
       ) : activeSection === "workflow" ? (
         <AgentWorkflowPage

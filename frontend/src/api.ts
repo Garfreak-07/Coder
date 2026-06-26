@@ -13,6 +13,9 @@ import type {
   LiveRunDetail,
   PlannerChatConfirmResult,
   PlannerChatDraft,
+  PlannerChatSession,
+  PlannerChatTurnResponse,
+  PlannerInteractionMode,
   ProviderSettings,
   ProviderStatus,
   PluginManifest,
@@ -291,6 +294,45 @@ export function confirmPlannerChatDraft(input: {
     headers: jsonHeaders,
     body: JSON.stringify(input)
   });
+}
+
+export function createPlannerChatSession(input: {
+  repo?: string;
+  workflow_id: string;
+  planner_agent_id: string;
+  agent_workflow: AgentWorkflowSpec;
+  scopes: string[];
+  knowledge_pack_ids?: string[];
+  skill_pack_ids?: string[];
+  memory_pack_ids?: string[];
+  interaction_mode: PlannerInteractionMode;
+}): Promise<PlannerChatSession> {
+  return requestJson("/api/v2/planner-chat/sessions", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify(input)
+  });
+}
+
+export function sendPlannerChatTurn(input: {
+  session_id: string;
+  message: string;
+  interaction_mode: PlannerInteractionMode;
+  start_if_ready?: boolean;
+}): Promise<PlannerChatTurnResponse> {
+  return requestJson(`/api/v2/planner-chat/sessions/${encodeURIComponent(input.session_id)}/turn`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      message: input.message,
+      interaction_mode: input.interaction_mode,
+      start_if_ready: input.start_if_ready ?? true
+    })
+  });
+}
+
+export function getPlannerChatSession(sessionId: string): Promise<PlannerChatSession> {
+  return requestJson(`/api/v2/planner-chat/sessions/${encodeURIComponent(sessionId)}`);
 }
 
 export async function startLiveAgentRun(input: {

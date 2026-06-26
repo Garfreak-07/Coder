@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { PlannerChatDraft } from "../../types";
+import type { PlannerChatDraft, PlannerChatSession, PlannerInteractionMode } from "../../types";
 
 export type PlannerStrength = "fast" | "balanced" | "strong";
 
@@ -26,13 +26,17 @@ interface PlannerChatPageProps {
   scopesText: string;
   submittedRequest: string;
   planDraft: PlannerChatDraft | null;
+  plannerInteractionMode: PlannerInteractionMode;
+  plannerSession: PlannerChatSession | null;
   plannerStrength: PlannerStrength;
   workflowSummary: PlannerChatWorkflowSummary;
   onCancelDraft: () => void;
   onConfirmDraft: () => void;
+  onDraftPlan: () => void;
   onDraftRequestTextChange: (value: string) => void;
   onDraftScopesTextChange: (value: string) => void;
   onDraftSuccessCriteriaTextChange: (value: string) => void;
+  onPlannerInteractionModeChange: (value: PlannerInteractionMode) => void;
   onRepoChange: (value: string) => void;
   onRequestChange: (value: string) => void;
   onScopesTextChange: (value: string) => void;
@@ -53,13 +57,17 @@ export function PlannerChatPage({
   scopesText,
   submittedRequest,
   planDraft,
+  plannerInteractionMode,
+  plannerSession,
   plannerStrength,
   workflowSummary,
   onCancelDraft,
   onConfirmDraft,
+  onDraftPlan,
   onDraftRequestTextChange,
   onDraftScopesTextChange,
   onDraftSuccessCriteriaTextChange,
+  onPlannerInteractionModeChange,
   onRepoChange,
   onRequestChange,
   onScopesTextChange,
@@ -69,12 +77,20 @@ export function PlannerChatPage({
   const inputValue = request;
   const inputDisabled = runLoading || planDraft !== null;
   const canSend = request.trim().length > 0 && !inputDisabled;
+  const canDraft = request.trim().length > 0 && !runLoading && !plannerSession;
   const canConfirmDraft = draftRequestText.trim().length > 0 && !runLoading;
   const statusMessage = planDraft ? "Plan ready for review" : formatRunStatus(runStatus);
+  const sessionMessages = plannerSession?.messages ?? [];
+  const hasSessionMessages = sessionMessages.length > 0;
 
   function submit() {
     if (!canSend) return;
     onSubmitRequest();
+  }
+
+  function draftPlan() {
+    if (!canDraft) return;
+    onDraftPlan();
   }
 
   function confirmDraft() {
@@ -85,18 +101,30 @@ export function PlannerChatPage({
   return (
     <main className="chat-page">
       <section className="chat-thread" aria-label="Planner conversation">
-        {!submittedRequest && !activeRunId && !planDraft ? (
+        {!submittedRequest && !activeRunId && !planDraft && !hasSessionMessages ? (
           <div className="chat-empty">
             <h2>What should the Planner work on?</h2>
             <p>Send a request and the Planner will coordinate the Executor.</p>
           </div>
         ) : (
           <>
-            {submittedRequest && (
-              <article className="chat-message user-message">
-                <div className="message-role">You</div>
-                <p>{submittedRequest}</p>
-              </article>
+            {hasSessionMessages ? (
+              sessionMessages.map((message, index) => (
+                <article
+                  key={`${message.created_at ?? index}-${message.role}`}
+                  className={`chat-message ${message.role === "user" ? "user-message" : "planner-message"}`}
+                >
+                  <div className="message-role">{message.role === "user" ? "You" : "Planner"}</div>
+                  <p>{message.content}</p>
+                </article>
+              ))
+            ) : (
+              submittedRequest && (
+                <article className="chat-message user-message">
+                  <div className="message-role">You</div>
+                  <p>{submittedRequest}</p>
+                </article>
+              )
             )}
             <article className="chat-message planner-message">
               <div className="message-role">Planner</div>
@@ -105,6 +133,9 @@ export function PlannerChatPage({
                   <span>{statusMessage}</span>
                 </div>
                 {activeRunId && <p>The confirmed workflow is running. Results will appear here as they arrive.</p>}
+                {plannerSession?.last_turn && (
+                  <PlannerTaskStateSummary session={plannerSession} />
+                )}
               </div>
               {planDraft && (
                 <div className="plan-draft-card">
@@ -183,6 +214,22 @@ export function PlannerChatPage({
             rows={4}
           />
           <div className="composer-footer">
+            <div className="mode-toggle" aria-label="Planner interaction mode">
+              <button
+                type="button"
+                className={plannerInteractionMode === "discuss" ? "selected" : ""}
+                onClick={() => onPlannerInteractionModeChange("discuss")}
+              >
+                Discuss
+              </button>
+              <button
+                type="button"
+                className={plannerInteractionMode === "work" ? "selected" : ""}
+                onClick={() => onPlannerInteractionModeChange("work")}
+              >
+                Work
+              </button>
+            </div>
             <label className="strength-control">
               Planner strength
               <select
@@ -194,13 +241,31 @@ export function PlannerChatPage({
                 <option value="strong">Strong</option>
               </select>
             </label>
-            <button onClick={submit} disabled={!canSend}>
-              {runLoading ? "Drafting..." : "Draft plan"}
+            <button onClick={draftPlan} disabled={!canDraft}>
+              Draft plan
+            </button>
+            <button className="primary-action" onClick={submit} disabled={!canSend}>
+              {runLoading ? "Sending..." : "Send"}
             </button>
           </div>
         </div>
       </section>
     </main>
+  );
+}
+
+function PlannerTaskStateSummary({ session }: { session: PlannerChatSession }) {
+  const state = session.task_state;
+  const criteria = state.success_criteria.length;
+  const questions = state.open_questions.length;
+
+  return (
+    <div className="planner-state-strip">
+      <span>{session.interaction_mode === "work" ? "Work" : "Discuss"}</span>
+      <span>{state.readiness.replaceAll("_", " ")}</span>
+      <span>{criteria} criteria</span>
+      <span>{questions} questions</span>
+    </div>
   );
 }
 
