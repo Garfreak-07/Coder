@@ -85,6 +85,37 @@ class PlannerChatArtifactTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "needs_clarification"):
             PlannerChatTurn.model_validate(payload)
 
+    def test_workflow_activity_update_validates(self) -> None:
+        artifact = validate_artifact(
+            {
+                "artifact_type": "workflow_activity_update",
+                "visible_phase": "executing",
+                "user_message": "Executor work is in progress.",
+                "steps": [
+                    {"id": "plan", "label": "Plan", "status": "done"},
+                    {"id": "execute", "label": "Execute", "status": "active"},
+                ],
+                "safety": [{"policy": "readonly_supervisor", "status": "enforced"}],
+                "technical_refs": {"evidence_refs": ["event-1"]},
+            },
+            expected_type="workflow_activity_update",
+        )
+
+        self.assertEqual(artifact["visible_phase"], "executing")
+
+    def test_workflow_activity_update_rejects_full_technical_payloads(self) -> None:
+        with self.assertRaises(ArtifactValidationError):
+            validate_artifact(
+                {
+                    "artifact_type": "workflow_activity_update",
+                    "visible_phase": "checking",
+                    "user_message": "Checking the result.",
+                    "steps": [{"id": "check", "label": "Check", "status": "active"}],
+                    "technical_refs": {"full_diff": "diff --git ..."},
+                },
+                expected_type="workflow_activity_update",
+            )
+
 
 def _ready_start_turn(*, interaction_mode: str = "work", decision: str = "start_workflow") -> dict:
     return {

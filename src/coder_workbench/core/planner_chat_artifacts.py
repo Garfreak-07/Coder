@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Literal
 
+import json
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -83,6 +86,58 @@ class PlannerChatTurn(BaseModel):
         return validate_planner_chat_turn_for_mode(self)
 
 
+class WorkflowActivityStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    status: Literal["done", "active", "pending", "blocked", "failed"]
+
+
+class WorkflowActivityUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    artifact_id: str | None = None
+    artifact_type: Literal["workflow_activity_update"] = "workflow_activity_update"
+    visible_phase: Literal[
+        "planning",
+        "assigning_work",
+        "executing",
+        "checking",
+        "summarizing",
+        "completed",
+        "blocked",
+        "failed",
+    ]
+    user_message: str = Field(min_length=1, max_length=800)
+    steps: list[WorkflowActivityStep]
+    safety: list[dict[str, str]] = Field(default_factory=list)
+    technical_refs: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def reject_full_technical_payloads(self) -> "WorkflowActivityUpdate":
+        forbidden_keys = {
+            "full_log",
+            "full_logs",
+            "raw_log",
+            "raw_logs",
+            "full_diff",
+            "raw_diff",
+            "full_prompt",
+            "raw_prompt",
+            "model_output",
+            "raw_runtime_json",
+        }
+        lowered_keys = {str(key).lower() for key in self.technical_refs}
+        blocked = sorted(lowered_keys.intersection(forbidden_keys))
+        if blocked:
+            raise ValueError(f"technical_refs must not include full technical payload keys: {blocked}")
+        text = json.dumps(self.technical_refs, sort_keys=True, default=str)
+        if len(text) > 4000:
+            raise ValueError("technical_refs must stay compact and reference-oriented")
+        return self
+
+
 def validate_planner_chat_turn_for_mode(turn: PlannerChatTurn) -> PlannerChatTurn:
     """Enforce Coder's user-facing Discuss/Work semantics for Planner chat."""
 
@@ -113,21 +168,29 @@ def validate_planner_chat_turn_for_mode(turn: PlannerChatTurn) -> PlannerChatTur
 
 PLANNER_CHAT_ARTIFACT_MODELS: dict[str, type[BaseModel]] = {
     "planner_chat_turn": PlannerChatTurn,
+    "workflow_activity_update": WorkflowActivityUpdate,
 }
 
 
 def planner_chat_artifact_summary(artifact: dict) -> dict:
-    if artifact.get("artifact_type") != "planner_chat_turn":
-        return {}
-    task_state = artifact.get("task_state") if isinstance(artifact.get("task_state"), dict) else {}
-    return {
-        "interaction_mode": artifact.get("interaction_mode"),
-        "decision": artifact.get("decision"),
-        "readiness": task_state.get("readiness"),
-        "goal": task_state.get("goal"),
-        "open_questions": len(task_state.get("open_questions", [])),
-        "has_handoff": bool(artifact.get("handoff")),
-    }
+    if artifact.get("artifact_type") == "planner_chat_turn":
+        task_state = artifact.get("task_state") if isinstance(artifact.get("task_state"), dict) else {}
+        return {
+            "interaction_mode": artifact.get("interaction_mode"),
+            "decision": artifact.get("decision"),
+            "readiness": task_state.get("readiness"),
+            "goal": task_state.get("goal"),
+            "open_questions": len(task_state.get("open_questions", [])),
+            "has_handoff": bool(artifact.get("handoff")),
+        }
+    if artifact.get("artifact_type") == "workflow_activity_update":
+        return {
+            "visible_phase": artifact.get("visible_phase"),
+            "user_message": artifact.get("user_message"),
+            "steps": len(artifact.get("steps", [])),
+            "technical_refs": len(artifact.get("technical_refs", {})),
+        }
+    return {}
 
 
 def _present(value: str | None) -> bool:
@@ -144,6 +207,8 @@ __all__ = [
     "PlannerTaskState",
     "PlannerVisibleThinking",
     "PlannerWorkflowHandoff",
+    "WorkflowActivityStep",
+    "WorkflowActivityUpdate",
     "planner_chat_artifact_summary",
     "validate_planner_chat_turn_for_mode",
 ]

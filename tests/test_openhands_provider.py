@@ -573,6 +573,120 @@ class OpenHandsRuntimeProviderTests(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         self.assertEqual([tool.name for tool in state["agent"]["tools"]], ["task_tracker"])
 
+    def test_workflow_supervisor_prompt_contains_planner_task_state(self) -> None:
+        state: dict[str, Any] = {}
+        provider = OpenHandsRuntimeProvider(
+            native_store=NativeRuntimeStore(),
+            sdk_loader=lambda: _fake_sdk(
+                state,
+                run_output={
+                    "artifact_type": "final_report",
+                    "status": "completed",
+                    "summary": "Done.",
+                    "checks": [],
+                    "completed": ["Done."],
+                },
+            ),
+        )
+        context_packet = {
+            "hot": {"confirmed_goal": "Run a ready plan."},
+            "warm": {"planner_task_state": {"goal": "Run a ready plan.", "readiness": "ready_to_execute"}},
+        }
+
+        with _env("LLM_API_KEY", "test-key"):
+            result = provider.run(_request(input_artifacts={"requested_artifact_type": "final_report"}, context_packet=context_packet))
+
+        self.assertEqual(result.status, "completed")
+        self.assertIn("Planner task state", state["conversation"]["prompt"])
+        self.assertIn("Run a ready plan.", state["conversation"]["prompt"])
+
+    def test_final_report_does_not_turn_skipped_verification_into_pass(self) -> None:
+        state: dict[str, Any] = {}
+        provider = OpenHandsRuntimeProvider(
+            native_store=NativeRuntimeStore(),
+            sdk_loader=lambda: _fake_sdk(
+                state,
+                run_output={
+                    "artifact_type": "final_report",
+                    "status": "completed",
+                    "summary": "Done.",
+                    "checks": [{"command": "python -m unittest", "status": "passed", "summary": "Tests passed."}],
+                    "completed": ["Done."],
+                },
+            ),
+        )
+        context_packet = {
+            "hot": {"confirmed_goal": "Run checks."},
+            "warm": {
+                "verification_summaries": [
+                    {
+                        "work_item_id": "work",
+                        "status": "skipped",
+                        "evidence_refs": [],
+                        "no_check_rationale": "No checks were run.",
+                    }
+                ]
+            },
+        }
+
+        with _env("LLM_API_KEY", "test-key"):
+            result = provider.run(_request(input_artifacts={"requested_artifact_type": "final_report"}, context_packet=context_packet))
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.artifact["checks"][0]["status"], "skipped")
+        self.assertIn("Skipped verification", result.artifact["warnings"][0])
+
+    def test_blocked_execution_result_becomes_clear_final_report_blocker(self) -> None:
+        state: dict[str, Any] = {}
+        provider = OpenHandsRuntimeProvider(
+            native_store=NativeRuntimeStore(),
+            sdk_loader=lambda: _fake_sdk(
+                state,
+                run_output={
+                    "artifact_type": "final_report",
+                    "status": "completed",
+                    "summary": "Done.",
+                    "checks": [],
+                    "completed": ["Done."],
+                    "blocked_by": [],
+                },
+            ),
+        )
+        context_packet = {
+            "hot": {"confirmed_goal": "Run blocked work."},
+            "warm": {"blocked_reasons": ["pytest is unavailable in the sandbox."]},
+        }
+
+        with _env("LLM_API_KEY", "test-key"):
+            result = provider.run(_request(input_artifacts={"requested_artifact_type": "final_report"}, context_packet=context_packet))
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.artifact["status"], "blocked")
+        self.assertIn("pytest is unavailable in the sandbox.", result.artifact["blocked_by"])
+
+    def test_workflow_activity_update_output_can_succeed(self) -> None:
+        state: dict[str, Any] = {}
+        provider = OpenHandsRuntimeProvider(
+            native_store=NativeRuntimeStore(),
+            sdk_loader=lambda: _fake_sdk(
+                state,
+                run_output={
+                    "artifact_type": "workflow_activity_update",
+                    "visible_phase": "executing",
+                    "user_message": "Executor work is in progress.",
+                    "steps": [{"id": "execute", "label": "Execute", "status": "active"}],
+                    "technical_refs": {"evidence_refs": ["event-1"]},
+                },
+            ),
+        )
+
+        with _env("LLM_API_KEY", "test-key"):
+            result = provider.run(_request(input_artifacts={"requested_artifact_type": "workflow_activity_update"}))
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.artifact_type, "workflow_activity_update")
+        self.assertIn("Workflow Activity Update Contract", state["conversation"]["prompt"])
+
     def test_completed_planner_order_records_loop_trace_events(self) -> None:
         store = NativeRuntimeStore()
         state: dict[str, Any] = {}
@@ -926,14 +1040,17 @@ def _context() -> HarnessRuntimeContext:
     )
 
 
-def _request(input_artifacts: dict[str, Any] | None = None) -> HarnessRunRequest:
+def _request(input_artifacts: dict[str, Any] | None = None, context_packet: dict[str, Any] | None = None) -> HarnessRunRequest:
     manager = HarnessRuntimeManager()
+    context = _context()
+    if context_packet is not None:
+        context = context.model_copy(update={"context_packet": context_packet})
     return manager._request(
         request_id="request-1",
         contract_id="conversation-harness",
         mode="workflow_supervisor",
         profile_id="openhands-workflow-supervisor-default",
-        context=_context(),
+        context=context,
         input_artifacts=input_artifacts or {},
     )
 

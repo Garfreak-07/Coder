@@ -29,6 +29,9 @@ _INSUFFICIENT_EXECUTION_RESULT_MESSAGE = (
 _INSUFFICIENT_PLANNER_CHAT_TURN_MESSAGE = (
     "OpenHands planning chat did not return exactly one structured planner_chat_turn artifact."
 )
+_INSUFFICIENT_WORKFLOW_ACTIVITY_UPDATE_MESSAGE = (
+    "OpenHands workflow supervisor did not return exactly one structured workflow_activity_update artifact."
+)
 
 _BLOCKER_TYPES = {
     "test_failed",
@@ -327,7 +330,7 @@ class OpenHandsRuntimeProvider:
                     )
 
                 summary = _summarize_run_output(run_output)
-                if artifact_type in {"execution_result", "planner_chat_turn"}:
+                if artifact_type in {"execution_result", "planner_chat_turn", "workflow_activity_update"}:
                     structured_artifact, execution_extract_error = _extract_single_structured_artifact(
                         run_output,
                         artifact_type=str(artifact_type),
@@ -633,6 +636,92 @@ class OpenHandsRuntimeProvider:
                             "artifact_type": "planner_chat_turn",
                             "decision": chat_artifact.get("decision"),
                             "interaction_mode": chat_artifact.get("interaction_mode"),
+                        },
+                    )
+                    facts["native_event_refs"] = _dedupe([*facts["native_event_refs"], validation_event.event_id])
+                if artifact_type == "workflow_activity_update":
+                    if execution_extract_error is not None:
+                        validation_event = self._record_loop_event(
+                            request,
+                            phase="artifact_validation",
+                            status="failed",
+                            summary="OpenHands workflow_activity_update validation failed.",
+                            payload={
+                                "artifact_target": artifact_type,
+                                "validation_status": "failed",
+                                "reason": execution_extract_error,
+                            },
+                        )
+                        facts["native_event_refs"] = _dedupe([*facts["native_event_refs"], validation_event.event_id])
+                        return self._failed(
+                            request,
+                            emit=emit,
+                            code="insufficient_structured_workflow_activity_update",
+                            message=_INSUFFICIENT_WORKFLOW_ACTIVITY_UPDATE_MESSAGE,
+                            native_type="workflow_activity_update.insufficient",
+                            status="blocked",
+                            refs=[
+                                selected_event.event_id,
+                                sandbox_event.event_id,
+                                started_event.event_id,
+                                *facts["native_event_refs"],
+                            ],
+                            payload={
+                                "code": "insufficient_structured_workflow_activity_update",
+                                "message": _INSUFFICIENT_WORKFLOW_ACTIVITY_UPDATE_MESSAGE,
+                                "reason": execution_extract_error,
+                                "structured_artifact_found": structured_artifact is not None,
+                                "output_type": type(run_output).__name__,
+                            },
+                        )
+                    activity_artifact, activity_error = _workflow_activity_update_artifact_from_structured(
+                        structured_artifact
+                    )
+                    if activity_error is not None:
+                        validation_event = self._record_loop_event(
+                            request,
+                            phase="artifact_validation",
+                            status="failed",
+                            summary="OpenHands workflow_activity_update validation failed.",
+                            payload={
+                                "artifact_target": artifact_type,
+                                "validation_status": "failed",
+                                "reason": activity_error,
+                            },
+                        )
+                        facts["native_event_refs"] = _dedupe([*facts["native_event_refs"], validation_event.event_id])
+                        return self._failed(
+                            request,
+                            emit=emit,
+                            code="insufficient_structured_workflow_activity_update",
+                            message=_INSUFFICIENT_WORKFLOW_ACTIVITY_UPDATE_MESSAGE,
+                            native_type="workflow_activity_update.insufficient",
+                            status="blocked",
+                            refs=[
+                                selected_event.event_id,
+                                sandbox_event.event_id,
+                                started_event.event_id,
+                                *facts["native_event_refs"],
+                            ],
+                            payload={
+                                "code": "insufficient_structured_workflow_activity_update",
+                                "message": _INSUFFICIENT_WORKFLOW_ACTIVITY_UPDATE_MESSAGE,
+                                "reason": activity_error,
+                                "structured_artifact_found": structured_artifact is not None,
+                                "output_type": type(run_output).__name__,
+                            },
+                        )
+                    structured_artifact = activity_artifact
+                    validation_event = self._record_loop_event(
+                        request,
+                        phase="artifact_validation",
+                        status="completed",
+                        summary="OpenHands workflow_activity_update validation passed.",
+                        payload={
+                            "artifact_target": artifact_type,
+                            "validation_status": "passed",
+                            "artifact_type": "workflow_activity_update",
+                            "visible_phase": activity_artifact.get("visible_phase"),
                         },
                     )
                     facts["native_event_refs"] = _dedupe([*facts["native_event_refs"], validation_event.event_id])
@@ -1144,6 +1233,7 @@ def _prompt_for_request(request: HarnessRunRequest) -> str:
             ]
         )
         _append_section(lines, "Confirmed goal", _dig(context_packet, "hot", "confirmed_goal") or _dig(context_packet, "hot", "user_goal"))
+        _append_section(lines, "Planner task state", _dig(context_packet, "warm", "planner_task_state"))
         _append_section(lines, "Round state", request.context.round_working_set or _dig(context_packet, "warm", "run_state_summary"))
         _append_section(lines, "Round summary", _dig(context_packet, "warm", "round_summary"))
         _append_section(lines, "Execution summaries", _dig(context_packet, "warm", "execution_result_summaries"))
@@ -1154,6 +1244,15 @@ def _prompt_for_request(request: HarnessRunRequest) -> str:
         _append_section(lines, "Native runtime refs", _cold_refs(context_packet, "native_runtime"))
         _append_section(lines, "Diff refs", _cold_refs(context_packet, "diff"))
         _append_section(lines, "Log refs", _cold_refs(context_packet, "log"))
+        if artifact_target == "final_report":
+            lines.extend(
+                [
+                    "Final report evidence rules:",
+                    "- Do not claim tests passed unless execution_result verification has pass evidence.",
+                    "- If verification was skipped, report it as skipped or unchecked, not passed.",
+                    "- If any executor result is blocked, produce a clear user-facing blocker.",
+                ]
+            )
         _append_artifact_output_contract(lines, artifact_target)
         return "\n\n".join(lines)
     lines.extend(
@@ -1195,10 +1294,37 @@ def _append_artifact_output_contract(lines: list[str], artifact_target: str) -> 
         _append_execution_result_output_contract(lines)
     elif artifact_target == "planner_chat_turn":
         _append_planner_chat_turn_output_contract(lines)
+    elif artifact_target == "workflow_activity_update":
+        _append_workflow_activity_update_output_contract(lines)
 
 
 def artifact_output_contract_available(artifact_target: str) -> bool:
-    return artifact_target in {"planner_order", "execution_result", "planner_chat_turn"}
+    return artifact_target in {"planner_order", "execution_result", "planner_chat_turn", "workflow_activity_update"}
+
+
+def _append_workflow_activity_update_output_contract(lines: list[str]) -> None:
+    lines.extend(
+        [
+            "OpenHands Workflow Activity Update Contract v1:",
+            "Return exactly one JSON object.",
+            "Do not return prose before or after the JSON object.",
+            'The JSON object must have "artifact_type": "workflow_activity_update".',
+            "Use concise user-facing status. Do not include full logs, full diffs, raw prompts, raw runtime JSON, or model outputs.",
+            _safe_json(
+                {
+                    "artifact_type": "workflow_activity_update",
+                    "visible_phase": "executing",
+                    "user_message": "Executor work is in progress.",
+                    "steps": [
+                        {"id": "plan", "label": "Plan", "status": "done"},
+                        {"id": "execute", "label": "Execute", "status": "active"},
+                    ],
+                    "safety": [{"policy": "readonly_supervisor", "status": "enforced"}],
+                    "technical_refs": {"evidence_refs": ["native-event-ref"]},
+                }
+            ),
+        ]
+    )
 
 
 def _append_planner_chat_turn_output_contract(lines: list[str]) -> None:
@@ -1636,7 +1762,7 @@ def _validate_requested_artifact_type(mode: str, artifact_type: str) -> tuple[st
     allowed = {
         "planning_chat": {"project_plan_draft", "planner_chat_turn"},
         "task_execution": {"execution_result"},
-        "workflow_supervisor": {"planner_order", "planner_decision", "final_report"},
+        "workflow_supervisor": {"planner_order", "planner_decision", "final_report", "workflow_activity_update"},
     }.get(mode, set())
     if artifact_type in allowed:
         return artifact_type, None
@@ -1661,10 +1787,17 @@ def _artifact_for_success(
         if artifact_type == "planner_decision":
             return _planner_decision_artifact_from_structured(structured_artifact, request=request, summary=summary)
         if artifact_type == "final_report":
-            return _final_report_artifact_from_structured(structured_artifact, summary=summary, evidence_refs=evidence_refs)
+            return _final_report_artifact_from_structured(
+                structured_artifact,
+                request=request,
+                summary=summary,
+                evidence_refs=evidence_refs,
+            )
         if artifact_type == "project_plan_draft":
             return _project_plan_draft_from_structured(structured_artifact, request=request, summary=summary)
         if artifact_type == "planner_chat_turn":
+            return dict(structured_artifact)
+        if artifact_type == "workflow_activity_update":
             return dict(structured_artifact)
 
     if artifact_type == "execution_result":
@@ -2457,9 +2590,22 @@ def _planner_decision_artifact_from_structured(
     return artifact
 
 
+def _workflow_activity_update_artifact_from_structured(
+    structured_artifact: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if structured_artifact is None:
+        return None, "no structured workflow_activity_update artifact was found"
+    try:
+        artifact = validate_artifact(dict(structured_artifact), expected_type="workflow_activity_update")
+    except ArtifactValidationError as exc:
+        return None, str(exc.errors)
+    return artifact, None
+
+
 def _final_report_artifact_from_structured(
     structured_artifact: dict[str, Any],
     *,
+    request: HarnessRunRequest,
     summary: str,
     evidence_refs: list[str],
 ) -> dict[str, Any]:
@@ -2475,6 +2621,57 @@ def _final_report_artifact_from_structured(
     artifact.setdefault("notes", [])
     artifact.setdefault("next_steps", [])
     artifact.setdefault("evidence_refs", evidence_refs)
+    return _normalize_final_report_artifact(artifact, request=request)
+
+
+def _normalize_final_report_artifact(artifact: dict[str, Any], *, request: HarnessRunRequest) -> dict[str, Any]:
+    context_packet = request.context.context_packet or {}
+    verification_summaries = _dig(context_packet, "warm", "verification_summaries")
+    blocked_reasons = _string_list_or_single(_dig(context_packet, "warm", "blocked_reasons"))
+
+    if isinstance(verification_summaries, list) and verification_summaries:
+        has_pass_evidence = any(
+            isinstance(item, dict)
+            and item.get("status") == "pass"
+            and bool(_string_list_or_single(item.get("evidence_refs")))
+            for item in verification_summaries
+        )
+        if not has_pass_evidence:
+            checks = []
+            downgraded = False
+            for check in artifact.get("checks") or []:
+                if not isinstance(check, dict):
+                    continue
+                normalized = dict(check)
+                if str(normalized.get("status") or "").lower() in {"pass", "passed"}:
+                    normalized["status"] = "skipped"
+                    normalized["summary"] = (
+                        "Verification was skipped or unchecked; no passing execution evidence was available."
+                    )
+                    downgraded = True
+                checks.append(normalized)
+            artifact["checks"] = checks
+            if downgraded:
+                warnings = _string_list_or_single(artifact.get("warnings"))
+                warning = "Skipped verification was not reported as passed."
+                if warning not in warnings:
+                    warnings.append(warning)
+                artifact["warnings"] = warnings
+
+    if blocked_reasons:
+        artifact["status"] = "blocked"
+        blocked_by = _string_list_or_single(artifact.get("blocked_by"))
+        for reason in blocked_reasons:
+            if reason not in blocked_by:
+                blocked_by.append(reason)
+        artifact["blocked_by"] = blocked_by
+        if not artifact.get("summary"):
+            artifact["summary"] = blocked_by[0]
+        next_steps = _string_list_or_single(artifact.get("next_steps"))
+        next_step = "Resolve the executor blocker before treating the workflow as complete."
+        if next_step not in next_steps:
+            next_steps.append(next_step)
+        artifact["next_steps"] = next_steps
     return artifact
 
 

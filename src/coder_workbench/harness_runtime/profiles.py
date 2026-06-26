@@ -125,7 +125,7 @@ DEFAULT_HARNESS_RUNTIME_PROFILES: dict[str, HarnessRuntimeProfile] = {
             harness_id=CONVERSATION_HARNESS_ID,
             mode="workflow_supervisor",
             context_profile="workflow-supervisor",
-            allowed_artifacts=["planner_order", "planner_decision", "final_report"],
+            allowed_artifacts=["planner_order", "planner_decision", "final_report", "workflow_activity_update"],
             tool_policy={"write_files": False, "run_commands": False},
             memory_policy={"read": True, "write": False},
             skill_policy={"inspect": True},
@@ -160,7 +160,7 @@ DEFAULT_HARNESS_RUNTIME_PROFILES: dict[str, HarnessRuntimeProfile] = {
             harness_id=CONVERSATION_HARNESS_ID,
             mode="workflow_supervisor",
             context_profile="workflow-supervisor",
-            allowed_artifacts=["planner_order", "planner_decision", "final_report"],
+            allowed_artifacts=["planner_order", "planner_decision", "final_report", "workflow_activity_update"],
             tool_policy={"write_files": False, "run_commands": False},
         ),
         _profile(

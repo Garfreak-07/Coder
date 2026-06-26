@@ -29,6 +29,7 @@ def build_harness_context_packet(
     selected_memory_pack_summaries: list[dict[str, Any]] | None = None,
     project_summary: dict[str, Any] | None = None,
     run_contract: dict[str, Any] | None = None,
+    planner_task_state: dict[str, Any] | None = None,
     round_summary: dict[str, Any] | None = None,
     execution_results: list[dict[str, Any]] | None = None,
     verification_summaries: list[dict[str, Any]] | None = None,
@@ -95,6 +96,8 @@ def build_harness_context_packet(
         packet["hot"]["current_decision_needed"] = current_decision_needed or "decide_continue_or_finish"
         packet["warm"]["run_state_summary"] = _state_summary(state_view or {})
         packet["warm"]["capability_summary"] = _capability_summary(capability_set or {})
+        if planner_task_state:
+            packet["warm"]["planner_task_state"] = _compact_value(planner_task_state)
         if run_contract:
             packet["warm"]["run_contract"] = _compact_value(run_contract)
         if round_summary:

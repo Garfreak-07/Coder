@@ -122,6 +122,7 @@ class AgentRun:
             profile_id=profile_id,
             input_artifacts={
                 "requested_artifact_type": "planner_order",
+                "planner_task_state": _planner_task_state_from_data(self.initial_data),
                 "legacy_operation": "planner_order",
                 "legacy_kwargs": {
                     "request": request,
@@ -326,6 +327,7 @@ class AgentRun:
             profile_id=profile_id,
             input_artifacts={
                 "requested_artifact_type": "planner_decision",
+                "planner_task_state": _planner_task_state_from_data(self.initial_data),
                 "legacy_operation": "planner_decision",
                 "legacy_kwargs": {
                     "bundle": bundle,
@@ -493,6 +495,7 @@ class AgentRun:
             workflow_id=self.agent_workflow.id,
             agent_id=agent_id,
             round_number=round_number,
+            planner_task_state=_planner_task_state_from_data(self.initial_data),
             work_item=work_item,
             task_envelope=task_envelope,
             state_view=state_view,
@@ -588,6 +591,11 @@ class AgentRun:
 def _optional_string(value: Any) -> str | None:
     text = str(value or "").strip()
     return text or None
+
+
+def _planner_task_state_from_data(data: dict[str, Any]) -> dict[str, Any] | None:
+    value = data.get("planner_task_state")
+    return dict(value) if isinstance(value, dict) else None
 
 
 def _harness_result_message(result: HarnessRunResult, default: str) -> str:

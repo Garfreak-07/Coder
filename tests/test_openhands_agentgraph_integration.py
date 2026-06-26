@@ -54,6 +54,30 @@ class OpenHandsAgentGraphIntegrationTests(unittest.TestCase):
         self.assertEqual(provider.calls_by_target["planner_order"], 1)
         self.assertEqual(agent_run.harness_runtime_manager.providers[INTERNAL_FALLBACK_PROVIDER_ID].calls, 0)
 
+    def test_planner_task_state_is_available_to_workflow_supervisor(self) -> None:
+        provider = FakeOpenHandsProvider()
+        agent_run = _agent_run(
+            provider,
+            initial_data={
+                "repo_root": ".",
+                "planner_task_state": {
+                    "goal": "Implement the planned task.",
+                    "success_criteria": ["Planner state is visible to the supervisor."],
+                    "readiness": "ready_to_execute",
+                },
+            },
+        )
+
+        with _env("CODER_ENABLE_OPENHANDS_RUNTIME", "1"):
+            agent_run.run_planner_order("Create one executor task.")
+
+        request = provider.requests[0]
+        self.assertEqual(request.input_artifacts["planner_task_state"]["goal"], "Implement the planned task.")
+        self.assertEqual(
+            request.context.context_packet["warm"]["planner_task_state"]["readiness"],
+            "ready_to_execute",
+        )
+
     def test_run_planner_decision_requests_and_consumes_openhands_planner_decision(self) -> None:
         provider = FakeOpenHandsProvider()
         agent_run = _agent_run(provider)
@@ -244,8 +268,8 @@ class _env:
             os.environ[self.key] = self.old
 
 
-def _agent_run(provider: FakeOpenHandsProvider) -> AgentRun:
-    agent_run = AgentRun(default_planner_led_agent_workflow(), initial_data={"repo_root": "."})
+def _agent_run(provider: FakeOpenHandsProvider, initial_data: dict[str, Any] | None = None) -> AgentRun:
+    agent_run = AgentRun(default_planner_led_agent_workflow(), initial_data=initial_data or {"repo_root": "."})
     agent_run.harness_runtime_manager = HarnessRuntimeManager(
         providers=[provider, FailingFallbackProvider()]
     )
