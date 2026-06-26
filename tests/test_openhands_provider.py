@@ -95,7 +95,8 @@ class OpenHandsRuntimeProviderTests(unittest.TestCase):
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.artifact_type, "execution_result")
-        self.assertEqual(result.artifact["verification"]["status"], "pass")
+        self.assertEqual(result.artifact["verification"]["status"], "skipped")
+        self.assertIn("no explicit passing check evidence", result.artifact["verification"]["no_check_rationale"])
         self.assertEqual(result.artifact["changed_files"], ["src/app.py"])
         self.assertEqual(result.artifact["patch_refs"], ["diff-ref"])
         self.assertEqual(result.diff_refs, ["diff-ref"])
@@ -172,6 +173,31 @@ class OpenHandsRuntimeProviderTests(unittest.TestCase):
         self.assertEqual(result.artifact_type, "final_report")
         self.assertEqual([tool.name for tool in state["agent"]["tools"]], ["task_tracker"])
         self.assertIn("Do not write files or run commands", state["conversation"]["prompt"])
+
+    def test_workflow_supervisor_requested_artifact_target_drives_output(self) -> None:
+        state: dict[str, Any] = {}
+        provider = OpenHandsRuntimeProvider(native_store=NativeRuntimeStore(), sdk_loader=lambda: _fake_sdk(state))
+
+        with _env("LLM_API_KEY", "test-key"):
+            result = provider.run(_request(input_artifacts={"requested_artifact_type": "planner_order"}))
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.artifact_type, "planner_order")
+        self.assertEqual(result.artifact["artifact_type"], "planner_order")
+        self.assertIn("Current Coder artifact target: planner_order", state["conversation"]["prompt"])
+        self.assertIn("Do not write files or run commands", state["conversation"]["prompt"])
+        self.assertEqual([tool.name for tool in state["agent"]["tools"]], ["task_tracker"])
+
+    def test_invalid_requested_artifact_target_fails_closed(self) -> None:
+        state: dict[str, Any] = {}
+        provider = OpenHandsRuntimeProvider(native_store=NativeRuntimeStore(), sdk_loader=lambda: _fake_sdk(state))
+
+        with _env("LLM_API_KEY", "test-key"):
+            result = provider.run(_request(input_artifacts={"requested_artifact_type": "execution_result"}))
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.error["code"], "invalid_requested_artifact_type")
+        self.assertNotIn("conversation", state)
 
     def test_openhands_provider_records_failed_conversation(self) -> None:
         store = NativeRuntimeStore()
@@ -263,7 +289,7 @@ def _context() -> HarnessRuntimeContext:
     )
 
 
-def _request() -> HarnessRunRequest:
+def _request(input_artifacts: dict[str, Any] | None = None) -> HarnessRunRequest:
     manager = HarnessRuntimeManager()
     return manager._request(
         request_id="request-1",
@@ -271,7 +297,7 @@ def _request() -> HarnessRunRequest:
         mode="workflow_supervisor",
         profile_id="openhands-workflow-supervisor-default",
         context=_context(),
-        input_artifacts={},
+        input_artifacts=input_artifacts or {},
     )
 
 

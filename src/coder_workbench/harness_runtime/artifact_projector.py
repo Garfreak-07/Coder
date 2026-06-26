@@ -224,8 +224,6 @@ def _error_summary(result: HarnessRunResult) -> str:
 def _verification_status_for_result(result: HarnessRunResult) -> str:
     if result.status != "completed":
         return "blocked"
-    if result.evidence_refs or result.diff_refs or result.log_refs:
-        return "pass"
     return "skipped"
 
 
@@ -249,13 +247,14 @@ def _normalize_completed_execution_payload(payload: dict[str, Any], result: Harn
             payload.get("no_op_rationale"),
         ]
     )
+    has_passing_check = any(isinstance(check, dict) and check.get("status") == "pass" for check in checks_run)
     status = verification.get("status")
     if status not in {"pass", "skipped"}:
-        verification["status"] = "pass" if has_runtime_signal else "skipped"
-    if verification.get("status") == "pass" and not has_runtime_signal:
+        verification["status"] = "pass" if has_passing_check else "skipped"
+    if verification.get("status") == "pass" and not has_passing_check:
         verification["status"] = "skipped"
-    if verification.get("status") == "skipped" and not verification.get("no_check_rationale") and not evidence_refs:
-        verification["no_check_rationale"] = "Provider completed without extracted check evidence."
+    if verification.get("status") == "skipped" and not verification.get("no_check_rationale"):
+        verification["no_check_rationale"] = "Provider completed without explicit passing check evidence."
     verification.setdefault("checks_run", [])
     verification.setdefault("confidence", "medium")
     payload["verification"] = verification

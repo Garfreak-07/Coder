@@ -57,6 +57,16 @@ class OpenHandsRuntimeProvider:
                 native_type="sdk.unavailable",
             )
 
+        artifact_type, artifact_error = _artifact_type_for_request(request)
+        if artifact_error is not None:
+            return self._failed(
+                request,
+                emit=emit,
+                code="invalid_requested_artifact_type",
+                message=artifact_error,
+                native_type="artifact_target.invalid",
+            )
+
         self._emit(
             emit,
             "harness_runtime.openhands.started",
@@ -204,8 +214,14 @@ class OpenHandsRuntimeProvider:
         )
         return HarnessRunResult(
             status="completed",
-            artifact_type=_artifact_type_for_request(request),
-            artifact=_artifact_for_success(request, summary=summary, evidence_refs=evidence_refs, facts=facts),
+            artifact_type=artifact_type,
+            artifact=_artifact_for_success(
+                request,
+                artifact_type=artifact_type,
+                summary=summary,
+                evidence_refs=evidence_refs,
+                facts=facts,
+            ),
             native_event_refs=refs,
             evidence_refs=evidence_refs,
             diff_refs=facts["diff_refs"],
@@ -332,7 +348,7 @@ class OpenHandsRuntimeProvider:
         native_event_refs = [*(refs or []), event.event_id]
         return HarnessRunResult(
             status=status,
-            artifact_type=_artifact_type_for_request(request) if status == "blocked" else None,
+            artifact_type=_artifact_type_for_request(request)[0] if status == "blocked" else None,
             artifact=_artifact_for_blocked(request, message=message, evidence_refs=native_event_refs)
             if status == "blocked"
             else None,
@@ -392,19 +408,24 @@ def _normalize_deepseek_model(model: str, *, base_url: str | None) -> str:
 
 def _prompt_for_request(request: HarnessRunRequest) -> str:
     context_packet = request.context.context_packet or {}
+    artifact_type, _artifact_error = _artifact_type_for_request(request)
+    artifact_target = artifact_type or "unknown"
     lines = [
         f"Runtime mode: {request.mode}",
         f"Workflow: {request.context.workflow_id}",
         f"Agent: {request.context.agent_id}",
+        f"Current Coder artifact target: {artifact_target}",
     ]
     if request.mode == "task_execution":
         lines.extend(
             [
                 "You are the Task Execution Harness.",
                 "Stay inside the provided workspace.",
+                "Perform only bounded task execution inside the sandbox workspace.",
                 "Do not ask the user any questions.",
                 "Do not commit, push, deploy, publish externally, or write long-term memory.",
-                "Return a concise completion summary with verification evidence.",
+                "Return enough structured information for Coder to project a valid execution_result artifact.",
+                "Return a concise completion summary and verification evidence.",
             ]
         )
         _append_section(lines, "Work item", request.input_artifacts.get("work_item") or _dig(context_packet, "hot", "work_item"))
@@ -421,6 +442,7 @@ def _prompt_for_request(request: HarnessRunRequest) -> str:
             [
                 "You are the Workflow Supervisor Harness.",
                 "Do not write files or run commands.",
+                f"Return enough structured information for Coder to project a valid {artifact_target} artifact.",
                 "Use execution summaries and evidence refs to decide whether the workflow should continue or finish.",
             ]
         )
@@ -440,6 +462,7 @@ def _prompt_for_request(request: HarnessRunRequest) -> str:
         [
             "You are the Planning Chat Harness.",
             "Produce a draft only.",
+            "Return enough structured information for Coder to project a valid project_plan_draft artifact.",
             "Do not execute commands, modify files, or start the live run.",
         ]
     )
@@ -484,24 +507,61 @@ def _cold_refs(context_packet: dict[str, Any], ref_type: str) -> list[str]:
     return refs
 
 
-def _artifact_type_for_request(request: HarnessRunRequest) -> str:
+def _artifact_type_for_request(request: HarnessRunRequest) -> tuple[str | None, str | None]:
+    requested = request.input_artifacts.get("requested_artifact_type")
+    if requested:
+        return _validate_requested_artifact_type(request.mode, str(requested))
+
+    legacy_operation = str(request.input_artifacts.get("legacy_operation") or "")
+    mapped = _artifact_type_from_legacy_operation(legacy_operation)
+    if mapped:
+        return _validate_requested_artifact_type(request.mode, mapped)
+
     if request.mode == "task_execution":
-        return "execution_result"
+        return "execution_result", None
     if request.mode == "planning_chat":
-        return "project_plan_draft"
-    return "final_report"
+        return "project_plan_draft", None
+    return "final_report", None
+
+
+def _artifact_type_from_legacy_operation(operation: str) -> str | None:
+    return {
+        "planner_order": "planner_order",
+        "planner_decision": "planner_decision",
+        "final_report": "final_report",
+        "task_execution": "execution_result",
+        "planning_chat": "project_plan_draft",
+    }.get(operation)
+
+
+def _validate_requested_artifact_type(mode: str, artifact_type: str) -> tuple[str | None, str | None]:
+    allowed = {
+        "planning_chat": {"project_plan_draft"},
+        "task_execution": {"execution_result"},
+        "workflow_supervisor": {"planner_order", "planner_decision", "final_report"},
+    }.get(mode, set())
+    if artifact_type in allowed:
+        return artifact_type, None
+    expected = ", ".join(sorted(allowed)) or "none"
+    return None, f"{artifact_type!r} is not a valid artifact target for mode {mode!r}; expected one of: {expected}."
 
 
 def _artifact_for_success(
     request: HarnessRunRequest,
     *,
+    artifact_type: str,
     summary: str,
     evidence_refs: list[str],
-    facts: dict[str, list[str]],
+    facts: dict[str, Any],
 ) -> dict[str, Any]:
-    if request.mode == "task_execution":
-        verification_status = "pass" if _has_runtime_evidence(facts) else "skipped"
-        no_check_rationale = None if verification_status == "pass" else "OpenHands conversation completed; explicit check extraction is not wired yet."
+    if artifact_type == "execution_result":
+        checks_run = _check_records(facts.get("checks_run"))
+        verification_status = "pass" if _has_passing_check(checks_run) else "skipped"
+        no_check_rationale = (
+            None
+            if verification_status == "pass"
+            else "OpenHands conversation completed; no explicit passing check evidence was extracted."
+        )
         return {
             "artifact_type": "execution_result",
             "round": request.context.round or 1,
@@ -513,16 +573,20 @@ def _artifact_for_success(
             "created_files": facts["created_files"],
             "deleted_files": facts["deleted_files"],
             "patch_refs": facts["diff_refs"],
+            "attempted_actions": facts["commands_run"],
             "evidence_refs": evidence_refs,
+            "no_op_rationale": None
+            if _has_runtime_evidence(facts)
+            else "OpenHands conversation completed without extracted file changes, command results, or check evidence.",
             "verification": {
                 "status": verification_status,
-                "checks_run": [],
+                "checks_run": checks_run,
                 "evidence_refs": evidence_refs,
                 "confidence": "medium",
                 "no_check_rationale": no_check_rationale,
             },
         }
-    if request.mode == "planning_chat":
+    if artifact_type == "project_plan_draft":
         draft_id = str(request.input_artifacts.get("draft_id") or request.request_id)
         return {
             "artifact_type": "project_plan_draft",
@@ -532,6 +596,35 @@ def _artifact_for_success(
             "success_criteria": ["Confirm the draft before execution."],
             "risks": [],
             "requires_confirmation": True,
+        }
+    if artifact_type == "planner_order":
+        return {
+            "artifact_type": "planner_order",
+            "round": request.context.round or 1,
+            "round_goal": summary or "Workflow supervisor found no executor work.",
+            "plan_graph": {"work_items": []},
+            "instructions_for_executor": [
+                "No task_execution work item was created because OpenHands returned only supervisor-level information."
+            ],
+            "allowed_actions": [],
+            "forbidden_actions": ["write_files", "run_commands"],
+            "expected_outputs": ["No executor output is expected for this no-work planner_order."],
+            "risk_level": "low",
+            "requires_human_confirmation": False,
+        }
+    if artifact_type == "planner_decision":
+        return {
+            "artifact_type": "planner_decision",
+            "round": request.context.round or 1,
+            "task_done": True,
+            "next_action": "finish",
+            "final_status": "completed",
+            "risk_level": "low",
+            "requires_human_confirmation": False,
+            "reason": summary or "OpenHands workflow supervisor completed.",
+            "next_round_goal": "",
+            "remaining_auto_rounds": 0,
+            "human_message": None,
         }
     return {
         "artifact_type": "final_report",
@@ -549,7 +642,8 @@ def _artifact_for_success(
 
 
 def _artifact_for_blocked(request: HarnessRunRequest, *, message: str, evidence_refs: list[str]) -> dict[str, Any]:
-    if request.mode == "task_execution":
+    artifact_type = _artifact_type_for_request(request)[0]
+    if artifact_type == "execution_result":
         return {
             "artifact_type": "execution_result",
             "round": request.context.round or 1,
@@ -573,7 +667,7 @@ def _artifact_for_blocked(request: HarnessRunRequest, *, message: str, evidence_
                 "remaining_work": ["Resolve the OpenHands runtime blocker."],
             },
         }
-    if request.mode == "planning_chat":
+    if artifact_type == "project_plan_draft":
         draft_id = str(request.input_artifacts.get("draft_id") or request.request_id)
         return {
             "artifact_type": "project_plan_draft",
@@ -583,6 +677,33 @@ def _artifact_for_blocked(request: HarnessRunRequest, *, message: str, evidence_
             "success_criteria": [],
             "risks": [message],
             "requires_confirmation": True,
+        }
+    if artifact_type == "planner_order":
+        return {
+            "artifact_type": "planner_order",
+            "round": request.context.round or 1,
+            "round_goal": f"OpenHands workflow supervisor blocked: {message}",
+            "plan_graph": {"work_items": []},
+            "instructions_for_executor": [message],
+            "allowed_actions": [],
+            "forbidden_actions": ["write_files", "run_commands"],
+            "expected_outputs": ["Resolve the OpenHands runtime blocker before creating executor work."],
+            "risk_level": "medium",
+            "requires_human_confirmation": False,
+        }
+    if artifact_type == "planner_decision":
+        return {
+            "artifact_type": "planner_decision",
+            "round": request.context.round or 1,
+            "task_done": False,
+            "next_action": "finish",
+            "final_status": "blocked",
+            "risk_level": "medium",
+            "requires_human_confirmation": False,
+            "reason": message,
+            "next_round_goal": "",
+            "remaining_auto_rounds": 0,
+            "human_message": None,
         }
     return {
         "artifact_type": "final_report",
@@ -611,7 +732,7 @@ def _summarize_run_output(run_output: Any) -> str:
     return "OpenHands conversation completed."
 
 
-def _runtime_facts(run_output: Any) -> dict[str, list[str]]:
+def _runtime_facts(run_output: Any) -> dict[str, Any]:
     return {
         "changed_files": _string_list_fact(run_output, "changed_files"),
         "created_files": _string_list_fact(run_output, "created_files"),
@@ -619,11 +740,13 @@ def _runtime_facts(run_output: Any) -> dict[str, list[str]]:
         "diff_refs": _string_list_fact(run_output, "diff_refs", "patch_refs"),
         "log_refs": _string_list_fact(run_output, "log_refs"),
         "evidence_refs": _string_list_fact(run_output, "evidence_refs"),
+        "commands_run": _string_list_fact(run_output, "commands_run", "attempted_actions"),
+        "checks_run": _check_records(_fact_value(run_output, "checks_run")),
         "native_event_refs": [],
     }
 
 
-def _empty_runtime_facts() -> dict[str, list[str]]:
+def _empty_runtime_facts() -> dict[str, Any]:
     return {
         "changed_files": [],
         "created_files": [],
@@ -631,22 +754,36 @@ def _empty_runtime_facts() -> dict[str, list[str]]:
         "diff_refs": [],
         "log_refs": [],
         "evidence_refs": [],
+        "commands_run": [],
+        "checks_run": [],
         "native_event_refs": [],
     }
 
 
-def _merge_runtime_facts(*records: dict[str, list[str]]) -> dict[str, list[str]]:
+def _merge_runtime_facts(*records: dict[str, Any]) -> dict[str, Any]:
     merged = _empty_runtime_facts()
     for record in records:
         for key in merged:
-            merged[key] = _dedupe([*merged[key], *record.get(key, [])])
+            if key == "checks_run":
+                merged[key] = _dedupe_checks([*merged[key], *record.get(key, [])])
+            else:
+                merged[key] = _dedupe([*merged[key], *record.get(key, [])])
     return merged
 
 
-def _has_runtime_evidence(facts: dict[str, list[str]]) -> bool:
+def _has_runtime_evidence(facts: dict[str, Any]) -> bool:
     return any(
         facts.get(key)
-        for key in ("changed_files", "created_files", "deleted_files", "diff_refs", "log_refs", "evidence_refs")
+        for key in (
+            "changed_files",
+            "created_files",
+            "deleted_files",
+            "diff_refs",
+            "log_refs",
+            "evidence_refs",
+            "commands_run",
+            "checks_run",
+        )
     )
 
 
@@ -664,6 +801,58 @@ def _fact_value(run_output: Any, name: str) -> Any:
     if isinstance(run_output, dict):
         return run_output.get(name)
     return getattr(run_output, name, None)
+
+
+def _check_records(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    records: list[dict[str, Any]] = []
+    for index, item in enumerate(value, start=1):
+        if isinstance(item, str):
+            records.append(
+                {
+                    "check_id": f"check-{index}",
+                    "kind": "command",
+                    "status": "pass" if "pass" in item.lower() else "skipped",
+                    "summary": item,
+                }
+            )
+            continue
+        if not isinstance(item, dict):
+            continue
+        record = dict(item)
+        record["status"] = _check_status(record.get("status"))
+        record.setdefault("kind", "command" if record.get("command") else "model")
+        record.setdefault("summary", str(record.get("command") or record.get("check_id") or f"Check {index}"))
+        records.append(record)
+    return records
+
+
+def _check_status(value: Any) -> str:
+    status = str(value or "").strip().lower()
+    if status in {"pass", "passed", "success", "succeeded", "ok"}:
+        return "pass"
+    if status in {"fail", "failed", "failure", "error"}:
+        return "fail"
+    if status == "blocked":
+        return "blocked"
+    return "skipped"
+
+
+def _has_passing_check(checks_run: list[dict[str, Any]]) -> bool:
+    return any(check.get("status") == "pass" for check in checks_run)
+
+
+def _dedupe_checks(values: list[Any]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    output: list[dict[str, Any]] = []
+    for record in _check_records(values):
+        key = json.dumps(record, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(record)
+    return output
 
 
 def _dedupe(values: list[str]) -> list[str]:

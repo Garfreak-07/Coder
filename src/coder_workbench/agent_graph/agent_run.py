@@ -9,7 +9,7 @@ from coder_workbench.agent_graph.planner_strategy import (
     planner_mode_from,
     planner_strategy_for_mode,
 )
-from coder_workbench.agent_graph.schema import AgentTaskEnvelope, ExecutionRecord, WorkItem
+from coder_workbench.agent_graph.schema import AgentTaskEnvelope, ExecutionRecord, PlannerOrder, WorkItem
 from coder_workbench.agent_harness.contracts import (
     CODE_WORKER_HARNESS,
     PLANNER_DECISION_HARNESS,
@@ -20,7 +20,13 @@ from coder_workbench.budget import BudgetBroker
 from coder_workbench.config import RuntimeConfig, load_runtime_config
 from coder_workbench.context import build_harness_context_packet
 from coder_workbench.core import AgentWorkflowAgent, AgentWorkflowSpec
-from coder_workbench.harness_runtime import HarnessRuntimeContext, HarnessRuntimeManager, OpenHandsRuntimeProvider
+from coder_workbench.harness_runtime import (
+    ArtifactProjector,
+    HarnessRunResult,
+    HarnessRuntimeContext,
+    HarnessRuntimeManager,
+    OpenHandsRuntimeProvider,
+)
 from coder_workbench.harness_runtime.fallback_provider import InternalFallbackProvider
 from coder_workbench.llm import create_chat_model
 from coder_workbench.runtime_capabilities import CapabilitySet, resolve_capabilities
@@ -65,6 +71,7 @@ class AgentRun:
                 )
             ]
         )
+        self.artifact_projector = ArtifactProjector()
 
     def run_planner_order(
         self,
@@ -108,6 +115,7 @@ class AgentRun:
             context=context,
             profile_id=profile_id,
             input_artifacts={
+                "requested_artifact_type": "planner_order",
                 "legacy_operation": "planner_order",
                 "legacy_kwargs": {
                     "request": request,
@@ -125,7 +133,7 @@ class AgentRun:
         legacy_output = getattr(result, "_legacy_output", None)
         if legacy_output is not None:
             return legacy_output
-        return result.artifact
+        return self._planner_order_from_harness_result(result)
 
     def _run_planner_order_legacy(
         self,
@@ -202,6 +210,10 @@ class AgentRun:
             context=context,
             profile_id=profile_id,
             input_artifacts={
+                "requested_artifact_type": "execution_result",
+                "work_item_id": item.work_item_id,
+                "work_item": item.model_dump(mode="json"),
+                "task_envelope": envelope.model_dump(mode="json"),
                 "legacy_operation": "task_execution",
                 "legacy_kwargs": {
                     "agent": agent,
@@ -217,7 +229,12 @@ class AgentRun:
         legacy_output = getattr(result, "_legacy_output", None)
         if legacy_output is not None:
             return legacy_output
-        raise RuntimeError("HarnessRuntimeManager did not return an ExecutionRecord")
+        return self._execution_record_from_harness_result(
+            result=result,
+            item=item,
+            envelope=envelope,
+            agent=agent,
+        )
 
     def _run_execution_legacy(
         self,
@@ -302,6 +319,7 @@ class AgentRun:
             context=context,
             profile_id=profile_id,
             input_artifacts={
+                "requested_artifact_type": "planner_decision",
                 "legacy_operation": "planner_decision",
                 "legacy_kwargs": {
                     "bundle": bundle,
@@ -314,7 +332,66 @@ class AgentRun:
         legacy_output = getattr(result, "_legacy_output", None)
         if legacy_output is not None:
             return legacy_output
-        return result.artifact or {}
+        return self._planner_decision_from_harness_result(result)
+
+    def _planner_order_from_harness_result(self, result: HarnessRunResult) -> PlannerOrder:
+        artifact = self.artifact_projector.project(result, artifact_type="planner_order")
+        graph_payload = {
+            "artifact_type": "planner_order",
+            "round": artifact.get("round") or 1,
+            "round_goal": artifact.get("round_goal") or artifact.get("summary") or "No executor work requested.",
+            "plan_graph": artifact.get("plan_graph") or {"work_items": []},
+        }
+        return PlannerOrder.model_validate(graph_payload)
+
+    def _planner_decision_from_harness_result(self, result: HarnessRunResult) -> dict[str, Any]:
+        return self.artifact_projector.project(result, artifact_type="planner_decision")
+
+    def _execution_record_from_harness_result(
+        self,
+        *,
+        result: HarnessRunResult,
+        item: WorkItem,
+        envelope: AgentTaskEnvelope,
+        agent: AgentWorkflowAgent,
+    ) -> ExecutionRecord:
+        artifact = self.artifact_projector.project(
+            result,
+            artifact_type="execution_result",
+            artifact_id=f"execution_result_{item.work_item_id}",
+        )
+        artifact.setdefault("round", envelope.round)
+        artifact["work_item_id"] = item.work_item_id
+        artifact["merge_index"] = item.merge_index
+        artifact["agent_id"] = agent.id
+        artifact["evidence_refs"] = _unique_strings(
+            [
+                *_string_list(artifact.get("evidence_refs")),
+                *result.evidence_refs,
+                *result.native_event_refs,
+                *result.diff_refs,
+                *result.log_refs,
+            ]
+        )
+        verification = dict(artifact.get("verification") or {})
+        verification["evidence_refs"] = _unique_strings(
+            [*_string_list(verification.get("evidence_refs")), *artifact["evidence_refs"]]
+        )
+        artifact["verification"] = verification
+        artifact = self.artifact_projector.project(
+            result.model_copy(update={"artifact": artifact, "artifact_type": "execution_result"}),
+            artifact_type="execution_result",
+            artifact_id=f"execution_result_{item.work_item_id}",
+        )
+        return ExecutionRecord(
+            work_item_id=item.work_item_id,
+            merge_index=item.merge_index,
+            agent_id=agent.id,
+            status=artifact["status"],
+            execution_summary=str(artifact.get("summary") or result.error or "Execution completed."),
+            execution_result_ref=str(artifact.get("artifact_id") or f"execution_result_{item.work_item_id}"),
+            artifact_payload=artifact,
+        )
 
     def _run_planner_decision_legacy(
         self,
