@@ -1302,6 +1302,9 @@ def _prompt_for_request(request: HarnessRunRequest) -> str:
                 "Do not open editors, pagers, or interactive commands.",
                 "Return enough structured information for Coder to project a valid execution_result artifact.",
                 "Return a concise completion summary and verification evidence.",
+                "Prefer native repo search/read tools for current code facts.",
+                "Use RAG only for external docs or project knowledge.",
+                "Verify any code-like RAG result with repo search/read before editing.",
             ]
         )
         _append_artifact_output_contract(lines, artifact_target)
@@ -1313,6 +1316,8 @@ def _prompt_for_request(request: HarnessRunRequest) -> str:
         )
         _append_section(lines, "Constraints", _dig(context_packet, "hot", "constraints"))
         _append_section(lines, "Success criteria", request.input_artifacts.get("success_criteria"))
+        _append_section(lines, "Repo evidence", _dig(context_packet, "warm", "repo_evidence"))
+        _append_section(lines, "Knowledge hints", _dig(context_packet, "warm", "knowledge_hints"))
         return "\n\n".join(lines)
     if request.mode == "workflow_supervisor":
         lines.extend(
@@ -1321,6 +1326,8 @@ def _prompt_for_request(request: HarnessRunRequest) -> str:
                 "Do not write files or run commands.",
                 f"Return enough structured information for Coder to project a valid {artifact_target} artifact.",
                 "Use execution summaries and evidence refs to decide whether the workflow should continue or finish.",
+                "Use execution results, verification summaries, repo evidence, and run evidence for completion decisions.",
+                "Treat RAG and notes as hints only.",
             ]
         )
         _append_section(lines, "Confirmed goal", _dig(context_packet, "hot", "confirmed_goal") or _dig(context_packet, "hot", "user_goal"))
@@ -1331,6 +1338,8 @@ def _prompt_for_request(request: HarnessRunRequest) -> str:
         _append_section(lines, "Verification summaries", _dig(context_packet, "warm", "verification_summaries"))
         _append_section(lines, "Blocked reasons", _dig(context_packet, "warm", "blocked_reasons"))
         _append_section(lines, "Changed files summary", _dig(context_packet, "warm", "changed_files_summary"))
+        _append_section(lines, "Repo evidence", _dig(context_packet, "warm", "repo_evidence"))
+        _append_section(lines, "Knowledge hints", _dig(context_packet, "warm", "knowledge_hints"))
         _append_section(lines, "Evidence refs", request.input_artifacts.get("evidence_refs") or _cold_refs(context_packet, "evidence"))
         _append_section(lines, "Native runtime refs", _cold_refs(context_packet, "native_runtime"))
         _append_section(lines, "Diff refs", _cold_refs(context_packet, "diff"))
@@ -1350,6 +1359,7 @@ def _prompt_for_request(request: HarnessRunRequest) -> str:
         [
             "You are the Planning Chat Harness.",
             "Do not execute commands, modify files, or start the live run.",
+            "Use RAG and project notes for planning context, but use repo evidence for claims about current code.",
         ]
     )
     if artifact_target == "planner_chat_turn":
@@ -1372,6 +1382,8 @@ def _prompt_for_request(request: HarnessRunRequest) -> str:
         )
     _append_section(lines, "User request", request.input_artifacts.get("user_request") or _dig(context_packet, "hot", "user_goal"))
     _append_section(lines, "Workflow summary", _dig(context_packet, "warm", "workflow_summary"))
+    _append_section(lines, "Repo evidence", _dig(context_packet, "warm", "repo_evidence"))
+    _append_section(lines, "Knowledge hints", _dig(context_packet, "warm", "knowledge_hints"))
     _append_section(lines, "Selected knowledge pack IDs", _dig(context_packet, "hot", "selected_knowledge_pack_ids"))
     _append_section(lines, "Selected skill pack IDs", _dig(context_packet, "hot", "selected_skill_pack_ids"))
     _append_section(lines, "Selected memory pack IDs", _dig(context_packet, "hot", "selected_memory_pack_ids"))

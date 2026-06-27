@@ -216,6 +216,8 @@ class OpenHandsRuntimeProviderTests(unittest.TestCase):
         self.assertIn('"executor_recovery_exhausted"', prompt)
         self.assertIn('"planner_recommendation"', prompt)
         self.assertIn("verification.status may be pass only when an explicit check command actually passed", prompt)
+        self.assertIn("Prefer native repo search/read tools for current code facts", prompt)
+        self.assertIn("Verify any code-like RAG result with repo search/read before editing", prompt)
 
     def test_structured_execution_result_json_is_accepted(self) -> None:
         state: dict[str, Any] = {}
@@ -460,6 +462,7 @@ class OpenHandsRuntimeProviderTests(unittest.TestCase):
         self.assertEqual(state["agent"]["tools"][-1].params["requested_context"], "workflow_supervision")
         self.assertEqual(_native_types(store).count("harness_permission.allowed"), 5)
         self.assertIn("Do not write files or run commands", state["conversation"]["prompt"])
+        self.assertIn("Treat RAG and notes as hints only", state["conversation"]["prompt"])
 
     def test_workflow_supervisor_requested_artifact_target_drives_output(self) -> None:
         state: dict[str, Any] = {}
@@ -618,6 +621,7 @@ class OpenHandsRuntimeProviderTests(unittest.TestCase):
         )
         self.assertEqual(state["agent"]["tools"][-1].params["role"], "planning_chat")
         self.assertEqual(state["agent"]["tools"][-1].params["requested_context"], "assistant_message")
+        self.assertIn("use repo evidence for claims about current code", state["conversation"]["prompt"])
 
     def test_task_execution_rag_tool_params_use_confirmed_scope(self) -> None:
         state: dict[str, Any] = {}

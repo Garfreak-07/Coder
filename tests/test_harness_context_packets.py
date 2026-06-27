@@ -194,7 +194,9 @@ class HarnessContextPacketTests(unittest.TestCase):
         packet = context.context_packet or {}
         self.assertEqual(packet["mode"], "task_execution")
         self.assertEqual(packet["hot"]["work_item"]["work_item_id"], "executor-work")
-        self.assertEqual(packet["cold_refs"], [{"ref_type": "upstream", "refs": ["upstream-ref"]}, {"ref_type": "planner_order", "refs": ["planner-order-ref"]}])
+        self.assertIn({"ref_type": "upstream", "refs": ["upstream-ref"]}, packet["cold_refs"])
+        self.assertIn({"ref_type": "planner_order", "refs": ["planner-order-ref"]}, packet["cold_refs"])
+        self.assertTrue(any(ref.get("ref_type") == "repo_evidence" for ref in packet["cold_refs"]))
 
 
 if __name__ == "__main__":

@@ -221,6 +221,26 @@ agent-scoped memory plane:
 See [docs/hybrid_rag_tool.md](docs/hybrid_rag_tool.md) for reindexing,
 optional dependency, retrieval, ACL, and OpenHands custom tool details.
 
+## Native Code Context Plane
+
+Coder separates current repository evidence from knowledge hints:
+
+- native repo discovery/search/read, test output, and diffs are evidence for
+  current code facts;
+- hybrid RAG, memory, external docs, project notes, roadmaps, and future
+  Obsidian notes are knowledge hints;
+- RAG results that mention code must be verified with native repo search/read
+  before they are used as current code facts.
+
+Native context services write refs under `.coder/runs/{run_id}/repo_evidence/`
+and inject compact records into `warm.repo_evidence`. Knowledge hints remain in
+`warm.knowledge_hints` or the existing memory/knowledge fields. OpenHands gets
+read-only `coder_repo_find_files`, `coder_repo_search_text`, and
+`coder_repo_read_file` tools in addition to `coder_hybrid_rag_search`.
+
+See [docs/retrieval_policy.md](docs/retrieval_policy.md) and
+[docs/native_code_context.md](docs/native_code_context.md).
+
 Most low-level runtime behavior is feature-flagged during rollout:
 
 ```powershell
@@ -275,7 +295,7 @@ src/coder_workbench/
   extensions/        Plugin and skill manifests, routing, runtime
   memory/            Legacy workflow memory plus agent-scoped memory stores,
                      retrieval, hybrid RAG indexes, run snapshots, imports
-  openhands_tools/   Coder custom tools registered into OpenHands SDK
+  openhands_tools/   Coder custom RAG and repo-context tools registered into OpenHands SDK
   observability/     Tracing and evaluation support
   runtime_capabilities/
                      Harness capability resolver, tool/MCP/skill registries
@@ -440,6 +460,11 @@ npm.cmd run build
 - Budget-affecting work should use `BudgetBroker` preflight and reservations.
 - Large text should be persisted through `BlobStore`; do not add another durable
   context or tool-result ref format.
+- Current code facts must be grounded in repo evidence: native search/read,
+  tests, logs, or diffs. RAG, memory, future Obsidian notes, and external docs
+  are hints until verified against the current repo.
+- Future MCP retrieval adapters must call Coder retrieval services and ACLs;
+  do not expose raw Chroma/BM25 or a global unscoped query engine.
 - The ordinary UI should not expose runtime JSON, engine knobs, harness graphs,
   context policies, token budgets, manual capability checklists, or advanced
   edge editing.
