@@ -11,6 +11,7 @@ use coder_config::{
     validate_project_config, ProjectConfig, ValidationIssue, ValidationLevel, ValidationReport,
 };
 use coder_core::{FinalReport, RunId, RunState, RunStatus};
+use coder_harness::{validate_mcp_manifest, McpManifestValidation};
 use coder_memory::{
     load_project_memory_file, memory_read_event, memory_write_proposed_event, MemoryError,
     MemoryRecord, MemoryScope, ProjectMemoryFile,
@@ -47,6 +48,7 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/api/v3/config/validate", post(validate_config))
         .route("/api/v3/workflows/validate", post(validate_workflow))
+        .route("/api/v3/mcp/manifests/validate", post(validate_mcp))
         .route("/api/v3/runs", get(list_runs))
         .route("/api/v3/runs/preview", post(preview_run))
         .route(
@@ -171,6 +173,12 @@ async fn validate_workflow(
         )));
     }
     Ok(Json(report))
+}
+
+async fn validate_mcp(
+    Json(request): Json<McpManifestValidationRequest>,
+) -> Json<McpManifestValidation> {
+    Json(validate_mcp_manifest(&request.manifest))
 }
 
 async fn run_mock_workflow(
@@ -566,6 +574,11 @@ pub struct ConfigValidationRequest {
 pub struct WorkflowValidationRequest {
     pub config: ProjectConfig,
     pub workflow_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpManifestValidationRequest {
+    pub manifest: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1106,6 +1119,41 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["status"], "pass");
+    }
+
+    #[tokio::test]
+    async fn mcp_manifest_validate_endpoint_forces_defaults_off() {
+        let app = test_router();
+        let response = post_json(
+            app,
+            "/api/v3/mcp/manifests/validate",
+            json!({
+                "manifest": {
+                    "server_id": "github",
+                    "name": "GitHub",
+                    "enabled_by_default": true,
+                    "operations": [
+                        {
+                            "name": "search_issues",
+                            "risk": "low",
+                            "side_effect": "read",
+                            "enabled_by_default": true
+                        }
+                    ]
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["manifest"]["enabled_by_default"], false);
+        assert_eq!(
+            body["manifest"]["operations"][0]["enabled_by_default"],
+            false
+        );
+        assert!(body["warnings"].as_array().unwrap().len() >= 2);
     }
 
     #[tokio::test]

@@ -30,6 +30,8 @@ import type {
   RustPatchApplyResponse,
   RustPatchPreview,
   RustPatchPreviewRequest,
+  RustMcpManifestValidation,
+  RustMcpManifestValidationRequest,
   RustProjectMemoryLoadRequest,
   RustProjectMemoryLoadResponse,
   RustProjectMemoryWriteProposalRequest,
@@ -327,6 +329,16 @@ export function proposeRustProjectMemoryWrite(
       body: JSON.stringify(request)
     }
   );
+}
+
+export function validateRustMcpManifest(
+  request: RustMcpManifestValidationRequest
+): Promise<RustMcpManifestValidation> {
+  return requestJson<RustMcpManifestValidation>("/api/v3/mcp/manifests/validate", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify(request)
+  });
 }
 
 export async function getRustRuns(): Promise<RustRunSummary[]> {

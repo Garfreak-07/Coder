@@ -583,7 +583,9 @@ npm.cmd run build
   parsed and validated locally and are never enabled by default. The Rust
   `coder-harness` crate now mirrors that MCP manifest validation baseline:
   server and operation default enablement are forced off, and MCP operations
-  remain approval-required policy entries.
+  remain approval-required policy entries. Rust API callers can validate MCP
+  manifests through `POST /api/v3/mcp/manifests/validate` before any install or
+  enablement flow exists.
 - Budget-affecting work should use `BudgetBroker` preflight and reservations.
 - Large text should be persisted through `BlobStore`; do not add another durable
   context or tool-result ref format.

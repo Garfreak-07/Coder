@@ -157,6 +157,35 @@ export interface RustProjectMemoryWriteProposalResponse {
   event: RustCoderEvent;
 }
 
+export type RustMcpRiskLevel = "low" | "medium" | "high";
+export type RustMcpSideEffectLevel = "none" | "read" | "write" | "external";
+
+export interface RustMcpManifestOperation {
+  name: string;
+  description: string;
+  risk: RustMcpRiskLevel;
+  side_effect: RustMcpSideEffectLevel;
+  enabled_by_default: boolean;
+}
+
+export interface RustMcpServerManifest {
+  server_id: string;
+  name: string;
+  operations: RustMcpManifestOperation[];
+  enabled_by_default: boolean;
+}
+
+export interface RustMcpManifestValidationRequest {
+  manifest: unknown;
+}
+
+export interface RustMcpManifestValidation {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+  manifest?: RustMcpServerManifest | null;
+}
+
 export interface RustAgentSpec {
   role: string;
   model: string;

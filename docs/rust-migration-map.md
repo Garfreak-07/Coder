@@ -48,7 +48,7 @@ behavior is covered by a Rust equivalent and tests listed here.
 | Knowledge import/RAG | `memory/knowledge_import.py`, `hybrid_*` | `coder-memory`, `coder-rag` | Port lexical retrieval first, dense optional later | ACL and hint-only behavior covered |
 | Extensions/plugins | `extensions/*` | Rust plugin registry | Preserve API shape, port manifest validation | External-effect approval and manifest tests pass |
 | Skills | `skills/*` | Rust skill store/router | Preserve discover/install/update/pin/rollback | Skill lifecycle tests pass |
-| MCP | `tools/mcp.py`, registries | Rust MCP registry/server/client | Rust `coder-harness` now validates MCP manifests, forces server/operation default enablement off, and keeps operations approval-required; execution/client support remains later | Manifest validation and no-auto-enable tests pass |
+| MCP | `tools/mcp.py`, registries | Rust MCP registry/server/client | Rust `coder-harness` and v3 API now validate MCP manifests, force server/operation default enablement off, and keep operations approval-required; execution/client support remains later | Manifest validation and no-auto-enable tests pass |
 | Provider settings | `server/settings.py`, frontend settings | `coder-model` profiles and Rust settings API | Keep secret refs only, redact values | Provider status/test behavior has Rust parity |
 | Python CLI | `cli.py` | `coder-cli` | Add Rust commands while keeping Python CLI | Rust CLI can run and inspect mock/OpenHands spike workflows |
 | FastAPI server | `server/app.py` | `coder-server` Axum API v3 | Added v3 health, validation, run/event/report/store reads, command preview, and patch preview/apply endpoints; preserve v2 until frontend migrates | Frontend can run against Rust server for main flow |
