@@ -142,6 +142,8 @@ enum ToolsCommand {
         #[arg(long, default_value_t = coder_tools::DEFAULT_MAX_FILE_BYTES)]
         max_file_bytes: u64,
         path: PathBuf,
+        #[command(flatten)]
+        evidence: EvidenceRecordArgs,
     },
     ReadFileRange {
         #[arg(long, default_value = ".")]
@@ -612,17 +614,39 @@ async fn main() -> anyhow::Result<()> {
                     repo,
                     max_file_bytes,
                     path,
+                    evidence,
                 },
         } => {
+            let requested_path = path.display().to_string();
             let output = read_file(
-                repo,
+                &repo,
                 path,
                 &RepoToolConfig {
                     max_file_bytes,
                     max_search_matches: coder_tools::DEFAULT_MAX_SEARCH_MATCHES,
                 },
             )?;
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            let payload = json!({
+                "evidence_kind": "repo_evidence",
+                "operation": "read_file",
+                "path": requested_path,
+                "file": {
+                    "path": output.path,
+                    "size_bytes": output.size_bytes,
+                    "content_chars": output.content.chars().count(),
+                    "content_stored": false,
+                    "content_note": "full file content is omitted from stored read_file evidence; use read_file_range for bounded content evidence",
+                    "evidence_kind": output.evidence_kind
+                },
+            });
+            let evidence_ref = write_optional_repo_evidence(
+                &evidence,
+                RepoEvidenceKind::RepoRead,
+                &repo,
+                format!("Read {}.", output.path),
+                payload,
+            )?;
+            print_tool_output(serde_json::to_value(&output)?, evidence_ref)?;
         }
         Command::Tools {
             command:

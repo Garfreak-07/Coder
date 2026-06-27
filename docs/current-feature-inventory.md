@@ -125,5 +125,6 @@ Classification values:
   bounded line-range reads, bounded text search, read-only git status evidence,
   and bounded git diff previews. The first Rust slice skips runtime/vendor
   directories and sensitive repo paths. The CLI can optionally record
-  find/read-range/search/diff outputs into `coder-store` repo evidence refs.
+  find/read metadata/read-range/search/diff outputs into `coder-store` repo
+  evidence refs.
 - Frontend adapter: legacy canvas to `WorkflowSpec` and back.
