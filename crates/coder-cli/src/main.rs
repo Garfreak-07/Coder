@@ -12,8 +12,8 @@ use coder_openhands::{
 use coder_server::{serve, ApiState};
 use coder_store::{RepoEvidenceKind, RepoEvidenceRef, RunStore};
 use coder_tools::{
-    find_files, git_diff, git_status, preview_patch_file, read_file, read_file_range, search_text,
-    RepoToolConfig,
+    find_files, git_diff, git_status, preview_patch_file, read_file, read_file_range, run_command,
+    search_text, CommandRunEvidence, CommandRunRequest, RepoToolConfig,
 };
 use coder_workflow::MockWorkflowRunner;
 use serde_json::json;
@@ -201,6 +201,26 @@ enum ToolsCommand {
         #[arg(long, default_value_t = coder_tools::DEFAULT_MAX_PATCH_BYTES)]
         max_patch_bytes: usize,
         patch_file: PathBuf,
+        #[command(flatten)]
+        evidence: EvidenceRecordArgs,
+    },
+    RunCommand {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, default_value = ".")]
+        cwd: PathBuf,
+        #[arg(long, default_value_t = coder_tools::DEFAULT_COMMAND_TIMEOUT_SECONDS)]
+        timeout_seconds: u64,
+        #[arg(long, default_value_t = coder_tools::DEFAULT_MAX_COMMAND_OUTPUT_BYTES)]
+        max_output_bytes: usize,
+        #[arg(long, default_value = "model")]
+        source: String,
+        #[arg(long, default_value_t = false)]
+        sandbox: bool,
+        #[arg(long, default_value_t = false)]
+        approved: bool,
+        #[arg(required = true, trailing_var_arg = true, num_args = 1..)]
+        argv: Vec<String>,
         #[command(flatten)]
         evidence: EvidenceRecordArgs,
     },
@@ -560,6 +580,81 @@ fn print_tool_output(
     Ok(())
 }
 
+fn record_command_events(
+    store: &RunStore,
+    run_id: &RunId,
+    output: &CommandRunEvidence,
+    evidence_ref: &RepoEvidenceRef,
+) -> anyhow::Result<()> {
+    let mut sequence = store.read_events(run_id)?.len() as u64 + 1;
+    let evidence_uri = format!("repo-evidence://{}", evidence_ref.ref_id);
+    if output.blocked && output.requires_approval {
+        store.append_event(
+            run_id,
+            &CoderEvent::new(
+                run_id.clone(),
+                sequence,
+                "approval.requested",
+                json!({
+                    "approval_type": "command",
+                    "approval_key": &output.approval_key,
+                    "command": &output.command,
+                    "cwd": &output.cwd,
+                    "policy": &output.policy,
+                    "evidence_ref": &evidence_ref.ref_id,
+                }),
+            )
+            .with_ref("command_evidence", evidence_uri),
+        )?;
+        return Ok(());
+    }
+
+    store.append_event(
+        run_id,
+        &CoderEvent::new(
+            run_id.clone(),
+            sequence,
+            "command.started",
+            json!({
+                "command": &output.command,
+                "argv": &output.argv,
+                "cwd": &output.cwd,
+                "approval_key": &output.approval_key,
+                "policy": &output.policy,
+                "evidence_ref": &evidence_ref.ref_id,
+            }),
+        )
+        .with_ref("command_evidence", evidence_uri.clone()),
+    )?;
+    sequence += 1;
+    let kind = match output.status.as_str() {
+        "completed" => "command.completed",
+        "timeout" => "command.failed",
+        _ => "command.failed",
+    };
+    store.append_event(
+        run_id,
+        &CoderEvent::new(
+            run_id.clone(),
+            sequence,
+            kind,
+            json!({
+                "command": &output.command,
+                "cwd": &output.cwd,
+                "status": &output.status,
+                "passed": output.passed,
+                "returncode": output.returncode,
+                "timed_out": output.timed_out,
+                "output_preview": &output.output,
+                "output_truncated": output.output_truncated,
+                "evidence_ref": &evidence_ref.ref_id,
+            }),
+        )
+        .with_ref("command_evidence", evidence_uri),
+    )?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -894,6 +989,56 @@ async fn main() -> anyhow::Result<()> {
                 format!("Previewed patch touching {} file(s).", output.file_count),
                 payload,
             )?;
+            print_tool_output(serde_json::to_value(&output)?, evidence_ref)?;
+        }
+        Command::Tools {
+            command:
+                ToolsCommand::RunCommand {
+                    repo,
+                    cwd,
+                    timeout_seconds,
+                    max_output_bytes,
+                    source,
+                    sandbox,
+                    approved,
+                    argv,
+                    evidence,
+                },
+        } => {
+            let output = run_command(
+                &repo,
+                CommandRunRequest {
+                    cwd,
+                    argv,
+                    timeout_seconds,
+                    max_output_bytes,
+                    source,
+                    sandbox,
+                    approved,
+                },
+            )?;
+            let output_json = serde_json::to_value(&output)?;
+            let evidence_ref = write_optional_repo_evidence(
+                &evidence,
+                RepoEvidenceKind::RepoTest,
+                &repo,
+                format!("Command {}: {}.", output.status, output.command),
+                json!({
+                    "evidence_kind": "command_evidence",
+                    "operation": "run_command",
+                    "result": output_json,
+                }),
+            )?;
+            if let (Some(store), Some(run_id), Some(reference)) =
+                (&evidence.store, &evidence.run_id, &evidence_ref)
+            {
+                record_command_events(
+                    &RunStore::new(store.clone()),
+                    &RunId::from_string(run_id.clone()),
+                    &output,
+                    reference,
+                )?;
+            }
             print_tool_output(serde_json::to_value(&output)?, evidence_ref)?;
         }
         Command::Server { host, port, store } => {

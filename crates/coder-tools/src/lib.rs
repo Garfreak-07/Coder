@@ -2,10 +2,13 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const DEFAULT_MAX_FILE_BYTES: u64 = 64 * 1024;
@@ -13,6 +16,8 @@ pub const DEFAULT_MAX_FILE_RESULTS: usize = 200;
 pub const DEFAULT_MAX_SEARCH_MATCHES: usize = 50;
 pub const DEFAULT_MAX_GIT_OUTPUT_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_PATCH_BYTES: usize = 256 * 1024;
+pub const DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 120;
+pub const DEFAULT_MAX_COMMAND_OUTPUT_BYTES: usize = 8 * 1024;
 
 const SKIPPED_DIRS: &[&str] = &[
     ".git",
@@ -37,6 +42,10 @@ const SENSITIVE_FILE_NAMES: &[&str] = &[
 const SENSITIVE_FILE_SUFFIXES: &[&str] = &[".pem", ".p12", ".pfx", ".key"];
 const ALWAYS_DENIED_DIRS: &[&str] = &[
     ".git", ".ssh", ".aws", ".kube", ".azure", ".gnupg", ".docker",
+];
+const SHELL_META_CHARS: &[&str] = &["&&", "||", "|", ";", ">", "<", "$(", "`"];
+const HIGH_RISK_COMMAND_TOKENS: &[&str] = &[
+    "rm", "del", "rmdir", "format", "sudo", "chmod", "chown", "curl", "wget", "ssh", "scp",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +135,58 @@ pub struct PatchFilePreview {
     pub additions: usize,
     pub deletions: usize,
     pub target_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CommandRunRequest {
+    pub cwd: PathBuf,
+    pub argv: Vec<String>,
+    pub timeout_seconds: u64,
+    pub max_output_bytes: usize,
+    pub source: String,
+    pub sandbox: bool,
+    pub approved: bool,
+}
+
+impl Default for CommandRunRequest {
+    fn default() -> Self {
+        Self {
+            cwd: PathBuf::from("."),
+            argv: Vec::new(),
+            timeout_seconds: DEFAULT_COMMAND_TIMEOUT_SECONDS,
+            max_output_bytes: DEFAULT_MAX_COMMAND_OUTPUT_BYTES,
+            source: "model".to_owned(),
+            sandbox: false,
+            approved: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandPolicyDecision {
+    pub allowed: bool,
+    pub requires_approval: bool,
+    pub risk: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandRunEvidence {
+    pub repo_root: String,
+    pub cwd: String,
+    pub argv: Vec<String>,
+    pub command: String,
+    pub status: String,
+    pub passed: bool,
+    pub blocked: bool,
+    pub requires_approval: bool,
+    pub approval_key: String,
+    pub returncode: Option<i32>,
+    pub output: String,
+    pub output_truncated: bool,
+    pub timed_out: bool,
+    pub policy: CommandPolicyDecision,
+    pub evidence_kind: String,
 }
 
 pub fn read_file(
@@ -329,6 +390,150 @@ pub fn preview_patch_file(
         return Err(RepoToolError::PatchNoFiles(relative_patch));
     }
     Ok(evidence)
+}
+
+pub fn run_command(
+    repo_root: impl AsRef<Path>,
+    request: CommandRunRequest,
+) -> Result<CommandRunEvidence, RepoToolError> {
+    if request.argv.is_empty() || request.argv.iter().any(|item| item.trim().is_empty()) {
+        return Err(RepoToolError::EmptyCommandArgv);
+    }
+    let root = canonical_repo_root(repo_root)?;
+    let workdir = resolve_repo_dir(&root, &request.cwd)?;
+    let cwd = relative_dir_display(&root, &workdir);
+    let command_text = request.argv.join(" ");
+    let policy = evaluate_command_policy(&request.argv, &request.source, request.sandbox);
+    let approval_key = command_approval_key(&command_text, &cwd);
+    if policy.requires_approval && !request.approved {
+        return Ok(CommandRunEvidence {
+            repo_root: root.display().to_string(),
+            cwd,
+            argv: request.argv,
+            command: command_text.clone(),
+            status: "blocked".to_owned(),
+            passed: false,
+            blocked: true,
+            requires_approval: true,
+            approval_key,
+            returncode: None,
+            output: format!("Check command requires explicit approval: {command_text}"),
+            output_truncated: false,
+            timed_out: false,
+            policy,
+            evidence_kind: "command_evidence".to_owned(),
+        });
+    }
+
+    let timeout = request
+        .timeout_seconds
+        .clamp(1, DEFAULT_COMMAND_TIMEOUT_SECONDS);
+    let max_output_bytes = request
+        .max_output_bytes
+        .clamp(1, DEFAULT_MAX_COMMAND_OUTPUT_BYTES);
+    let mut child = Command::new(&request.argv[0])
+        .args(&request.argv[1..])
+        .current_dir(&workdir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(RepoToolError::CommandIo)?;
+    let started = Instant::now();
+    let mut timed_out = false;
+    loop {
+        if child
+            .try_wait()
+            .map_err(RepoToolError::CommandIo)?
+            .is_some()
+        {
+            break;
+        }
+        if started.elapsed() >= Duration::from_secs(timeout) {
+            timed_out = true;
+            let _ = child.kill();
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().map_err(RepoToolError::CommandIo)?;
+    let returncode = output.status.code();
+    let mut combined = output.stdout;
+    combined.extend_from_slice(&output.stderr);
+    let (output_text, output_truncated) = bounded_tail_text(&combined, max_output_bytes);
+    let passed = !timed_out && output.status.success();
+    let status = if timed_out {
+        "timeout"
+    } else if passed {
+        "completed"
+    } else {
+        "failed"
+    };
+
+    Ok(CommandRunEvidence {
+        repo_root: root.display().to_string(),
+        cwd,
+        argv: request.argv,
+        command: command_text,
+        status: status.to_owned(),
+        passed,
+        blocked: false,
+        requires_approval: false,
+        approval_key,
+        returncode,
+        output: output_text,
+        output_truncated,
+        timed_out,
+        policy,
+        evidence_kind: "command_evidence".to_owned(),
+    })
+}
+
+pub fn evaluate_command_policy(
+    argv: &[String],
+    source: &str,
+    sandbox: bool,
+) -> CommandPolicyDecision {
+    let text = argv.join(" ");
+    let lower = text.to_lowercase();
+    if contains_high_risk_command(&lower) {
+        return CommandPolicyDecision {
+            allowed: true,
+            requires_approval: true,
+            risk: "high".to_owned(),
+            reason: "Command contains high-risk token.".to_owned(),
+        };
+    }
+    if SHELL_META_CHARS.iter().any(|meta| text.contains(meta)) {
+        return CommandPolicyDecision {
+            allowed: true,
+            requires_approval: !sandbox,
+            risk: "medium".to_owned(),
+            reason: "Shell-like command boundary requires approval outside sandbox.".to_owned(),
+        };
+    }
+    if source == "model" && !sandbox {
+        return CommandPolicyDecision {
+            allowed: true,
+            requires_approval: true,
+            risk: "medium".to_owned(),
+            reason: "Model-generated command requires approval outside sandbox.".to_owned(),
+        };
+    }
+    CommandPolicyDecision {
+        allowed: true,
+        requires_approval: false,
+        risk: "low".to_owned(),
+        reason: String::new(),
+    }
+}
+
+pub fn command_approval_key(command: &str, cwd: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(cwd.as_bytes());
+    hasher.update([0]);
+    hasher.update(command.as_bytes());
+    format!("cmd:{:x}", hasher.finalize())
 }
 
 fn preview_patch_text(
@@ -619,6 +824,22 @@ fn run_git(
     })
 }
 
+fn contains_high_risk_command(lower: &str) -> bool {
+    lower
+        .split_whitespace()
+        .any(|token| HIGH_RISK_COMMAND_TOKENS.contains(&token))
+}
+
+fn bounded_tail_text(bytes: &[u8], max_bytes: usize) -> (String, bool) {
+    let truncated = bytes.len() > max_bytes;
+    let slice = if truncated {
+        &bytes[bytes.len() - max_bytes..]
+    } else {
+        bytes
+    };
+    (String::from_utf8_lossy(slice).into_owned(), truncated)
+}
+
 fn canonical_repo_root(repo_root: impl AsRef<Path>) -> Result<PathBuf, RepoToolError> {
     let root =
         fs::canonicalize(repo_root.as_ref()).map_err(|source| RepoToolError::InvalidRoot {
@@ -629,6 +850,34 @@ fn canonical_repo_root(repo_root: impl AsRef<Path>) -> Result<PathBuf, RepoToolE
         return Err(RepoToolError::InvalidRootKind(root.display().to_string()));
     }
     Ok(root)
+}
+
+fn resolve_repo_dir(
+    root: &Path,
+    requested_path: impl AsRef<Path>,
+) -> Result<PathBuf, RepoToolError> {
+    let requested = requested_path.as_ref();
+    if requested.is_absolute() {
+        return Err(RepoToolError::PathOutsideRepo(
+            requested.display().to_string(),
+        ));
+    }
+    let resolved =
+        fs::canonicalize(root.join(requested)).map_err(|source| RepoToolError::PathNotFound {
+            path: requested.display().to_string(),
+            source,
+        })?;
+    if !resolved.starts_with(root) {
+        return Err(RepoToolError::PathOutsideRepo(
+            requested.display().to_string(),
+        ));
+    }
+    if !resolved.is_dir() {
+        return Err(RepoToolError::NotADirectory(relative_display(
+            root, &resolved,
+        )));
+    }
+    Ok(resolved)
 }
 
 fn normalize_patch_path(root: &Path, raw_path: &str) -> Result<Option<String>, RepoToolError> {
@@ -668,6 +917,15 @@ fn normalize_patch_path(root: &Path, raw_path: &str) -> Result<Option<String>, R
         return Err(RepoToolError::PathOutsideRepo(normalized));
     }
     Ok(Some(normalized))
+}
+
+fn relative_dir_display(root: &Path, path: &Path) -> String {
+    let relative = relative_display(root, path);
+    if relative.is_empty() {
+        ".".to_owned()
+    } else {
+        relative
+    }
 }
 
 fn resolve_existing_repo_path(
@@ -806,6 +1064,8 @@ pub enum RepoToolError {
     PathOutsideRepo(String),
     #[error("path is not a file: {0}")]
     NotAFile(String),
+    #[error("path is not a directory: {0}")]
+    NotADirectory(String),
     #[error("path is sensitive and cannot be read as repo evidence: {0}")]
     SensitivePath(String),
     #[error("binary files cannot be read as repo evidence: {0}")]
@@ -829,6 +1089,10 @@ pub enum RepoToolError {
     GitFailed { status: Option<i32>, stderr: String },
     #[error("patch file has no unified diff file entries: {0}")]
     PatchNoFiles(String),
+    #[error("command argv must contain at least one non-empty argument")]
+    EmptyCommandArgv,
+    #[error("failed to run command: {0}")]
+    CommandIo(std::io::Error),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -1130,6 +1394,90 @@ diff --git a/.env b/.env
     }
 
     #[test]
+    fn run_command_executes_discovered_argv_without_shell() {
+        let root = temp_repo();
+
+        let evidence = run_command(
+            &root,
+            CommandRunRequest {
+                argv: platform_echo_args("argv-ok"),
+                source: "discovered".to_owned(),
+                ..CommandRunRequest::default()
+            },
+        )
+        .unwrap();
+
+        assert!(evidence.passed);
+        assert_eq!(evidence.status, "completed");
+        assert!(!evidence.requires_approval);
+        assert!(evidence.output.contains("argv-ok"));
+        assert_eq!(evidence.policy.risk, "low");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_command_blocks_model_command_without_approval() {
+        let root = temp_repo();
+
+        let evidence = run_command(
+            &root,
+            CommandRunRequest {
+                argv: platform_echo_args("blocked"),
+                source: "model".to_owned(),
+                ..CommandRunRequest::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(evidence.status, "blocked");
+        assert!(evidence.blocked);
+        assert!(evidence.requires_approval);
+        assert_eq!(evidence.policy.risk, "medium");
+        assert!(evidence.approval_key.starts_with("cmd:"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_command_reports_nonzero_exit() {
+        let root = temp_repo();
+
+        let evidence = run_command(
+            &root,
+            CommandRunRequest {
+                argv: platform_exit_args(7),
+                source: "discovered".to_owned(),
+                approved: true,
+                ..CommandRunRequest::default()
+            },
+        )
+        .unwrap();
+
+        assert!(!evidence.passed);
+        assert_eq!(evidence.status, "failed");
+        assert_eq!(evidence.returncode, Some(7));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_command_rejects_cwd_escape() {
+        let root = temp_repo();
+
+        let error = run_command(
+            &root,
+            CommandRunRequest {
+                cwd: PathBuf::from(".."),
+                argv: platform_echo_args("nope"),
+                source: "discovered".to_owned(),
+                ..CommandRunRequest::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, RepoToolError::PathOutsideRepo(_)));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn git_status_rejects_non_git_directory() {
         let root = temp_repo();
 
@@ -1153,6 +1501,33 @@ diff --git a/.env b/.env
 
     fn init_git_repo(root: &Path) {
         git(root, &["init"]);
+    }
+
+    fn platform_echo_args(text: &str) -> Vec<String> {
+        if cfg!(windows) {
+            vec![
+                "cmd.exe".to_owned(),
+                "/C".to_owned(),
+                "echo".to_owned(),
+                text.to_owned(),
+            ]
+        } else {
+            vec!["sh".to_owned(), "-c".to_owned(), format!("printf {text}")]
+        }
+    }
+
+    fn platform_exit_args(code: i32) -> Vec<String> {
+        if cfg!(windows) {
+            vec![
+                "cmd.exe".to_owned(),
+                "/C".to_owned(),
+                "exit".to_owned(),
+                "/B".to_owned(),
+                code.to_string(),
+            ]
+        } else {
+            vec!["sh".to_owned(), "-c".to_owned(), format!("exit {code}")]
+        }
     }
 
     fn git(root: &Path, args: &[&str]) {
