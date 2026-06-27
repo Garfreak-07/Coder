@@ -12,7 +12,8 @@ use coder_openhands::{
 use coder_server::{serve, ApiState};
 use coder_store::{RepoEvidenceKind, RepoEvidenceRef, RunStore};
 use coder_tools::{
-    find_files, git_diff, git_status, read_file, read_file_range, search_text, RepoToolConfig,
+    find_files, git_diff, git_status, preview_patch_file, read_file, read_file_range, search_text,
+    RepoToolConfig,
 };
 use coder_workflow::MockWorkflowRunner;
 use serde_json::json;
@@ -191,6 +192,15 @@ enum ToolsCommand {
         repo: PathBuf,
         #[arg(long, default_value_t = coder_tools::DEFAULT_MAX_GIT_OUTPUT_BYTES)]
         max_output_bytes: usize,
+        #[command(flatten)]
+        evidence: EvidenceRecordArgs,
+    },
+    PatchPreview {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, default_value_t = coder_tools::DEFAULT_MAX_PATCH_BYTES)]
+        max_patch_bytes: usize,
+        patch_file: PathBuf,
         #[command(flatten)]
         evidence: EvidenceRecordArgs,
     },
@@ -854,6 +864,34 @@ async fn main() -> anyhow::Result<()> {
                 RepoEvidenceKind::RepoDiff,
                 &repo,
                 "Captured git diff preview.",
+                payload,
+            )?;
+            print_tool_output(serde_json::to_value(&output)?, evidence_ref)?;
+        }
+        Command::Tools {
+            command:
+                ToolsCommand::PatchPreview {
+                    repo,
+                    max_patch_bytes,
+                    patch_file,
+                    evidence,
+                },
+        } => {
+            let requested_patch_file = patch_file.display().to_string();
+            let output = preview_patch_file(&repo, patch_file, max_patch_bytes)?;
+            let output_json = serde_json::to_value(&output)?;
+            let payload = json!({
+                "evidence_kind": "repo_evidence",
+                "operation": "patch_preview",
+                "patch_file": requested_patch_file,
+                "max_patch_bytes": max_patch_bytes,
+                "preview": output_json,
+            });
+            let evidence_ref = write_optional_repo_evidence(
+                &evidence,
+                RepoEvidenceKind::RepoDiff,
+                &repo,
+                format!("Previewed patch touching {} file(s).", output.file_count),
                 payload,
             )?;
             print_tool_output(serde_json::to_value(&output)?, evidence_ref)?;

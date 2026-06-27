@@ -33,7 +33,7 @@ behavior is covered by a Rust equivalent and tests listed here.
 | OpenHands provider | `openhands_provider.py`, `openhands_tools` | `coder-openhands` | Implement external Agent Server health, send, stream, normalize | Real or simulated OpenHands events stored as Coder JSONL |
 | Internal fallback | `fallback_provider.py` | Mock/native Rust backend | Implement mock workflow runner and later native tools | Python fallback unused by default and tests pass on Rust mock/native |
 | ActionGateway/tool execution | `actions/*` | `coder-tools`, `coder-sandbox`, Rust tool gateway | Port action policy and side-effect eventing | Patch/command/plugin/MCP policy tests pass in Rust |
-| Patch pipeline | `coding/patch_*` | Rust patch tool with artifact refs | Start with preview/apply under sandbox policy | Rollback and scope safety tests pass |
+| Patch pipeline | `coding/patch_*` | Rust patch tool with artifact refs | Started with read-only patch preview; add apply later under sandbox policy | Rollback and scope safety tests pass |
 | Command checks | `coding/command_*` | Rust command runner | Add allow/ask/deny, timeout, stdout/stderr blobs | Command tests pass and approval events emitted |
 | Event model | `agent_graph/events.py`, run events stores | `coder-events` | Promote canonical JSONL event envelope with sequence IDs | Replay/listing tests cover current live/stored events |
 | Run storage | `server/storage.py`, `server/stores/*` | `coder-store` | Expand metadata/events/artifacts/blobs/repo-evidence/checkpoints | Stored run listing/detail, artifact, blob, and repo-evidence APIs read Rust-created records |

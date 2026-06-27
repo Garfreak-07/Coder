@@ -12,6 +12,7 @@ pub const DEFAULT_MAX_FILE_BYTES: u64 = 64 * 1024;
 pub const DEFAULT_MAX_FILE_RESULTS: usize = 200;
 pub const DEFAULT_MAX_SEARCH_MATCHES: usize = 50;
 pub const DEFAULT_MAX_GIT_OUTPUT_BYTES: usize = 64 * 1024;
+pub const DEFAULT_MAX_PATCH_BYTES: usize = 256 * 1024;
 
 const SKIPPED_DIRS: &[&str] = &[
     ".git",
@@ -102,6 +103,29 @@ pub struct GitDiffEvidence {
     pub preview: String,
     pub truncated: bool,
     pub evidence_kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatchPreviewEvidence {
+    pub repo_root: String,
+    pub files: Vec<PatchFilePreview>,
+    pub file_count: usize,
+    pub hunk_count: usize,
+    pub additions: usize,
+    pub deletions: usize,
+    pub truncated: bool,
+    pub evidence_kind: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatchFilePreview {
+    pub old_path: Option<String>,
+    pub new_path: Option<String>,
+    pub status: String,
+    pub hunks: usize,
+    pub additions: usize,
+    pub deletions: usize,
+    pub target_exists: bool,
 }
 
 pub fn read_file(
@@ -280,6 +304,101 @@ pub fn git_diff(
     })
 }
 
+pub fn preview_patch_file(
+    repo_root: impl AsRef<Path>,
+    patch_file: impl AsRef<Path>,
+    max_patch_bytes: usize,
+) -> Result<PatchPreviewEvidence, RepoToolError> {
+    let root = canonical_repo_root(repo_root)?;
+    let path = resolve_existing_repo_path(&root, patch_file)?;
+    let relative_patch = validate_readable_evidence_path(&root, &path)?;
+    let limit = max_patch_bytes.clamp(1, DEFAULT_MAX_PATCH_BYTES);
+    let mut file = fs::File::open(&path)?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take((limit + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    let truncated = bytes.len() > limit;
+    if truncated {
+        bytes.truncate(limit);
+    }
+    let patch_text = String::from_utf8_lossy(&bytes).into_owned();
+    let mut evidence = preview_patch_text(&root, &patch_text, truncated)?;
+    evidence.repo_root = root.display().to_string();
+    if evidence.files.is_empty() {
+        return Err(RepoToolError::PatchNoFiles(relative_patch));
+    }
+    Ok(evidence)
+}
+
+fn preview_patch_text(
+    root: &Path,
+    patch_text: &str,
+    truncated: bool,
+) -> Result<PatchPreviewEvidence, RepoToolError> {
+    let mut files = Vec::new();
+    let mut current: Option<PatchFilePreview> = None;
+    for line in patch_text.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            if let Some(file) = current.take() {
+                files.push(file);
+            }
+            let paths = rest.split_whitespace().collect::<Vec<_>>();
+            current = Some(PatchFilePreview::from_paths(
+                root,
+                paths.first().copied(),
+                paths.get(1).copied(),
+            )?);
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("--- ") {
+            let file = current.get_or_insert_with(PatchFilePreview::empty);
+            file.set_old_path(root, path)?;
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("+++ ") {
+            let file = current.get_or_insert_with(PatchFilePreview::empty);
+            file.set_new_path(root, path)?;
+            continue;
+        }
+        if line.starts_with("@@") {
+            let file = current.get_or_insert_with(PatchFilePreview::empty);
+            file.hunks += 1;
+            continue;
+        }
+        if line.starts_with('+') && !line.starts_with("+++") {
+            if let Some(file) = current.as_mut() {
+                file.additions += 1;
+            }
+            continue;
+        }
+        if line.starts_with('-') && !line.starts_with("---") {
+            if let Some(file) = current.as_mut() {
+                file.deletions += 1;
+            }
+        }
+    }
+    if let Some(file) = current.take() {
+        files.push(file);
+    }
+    for file in &mut files {
+        file.finish_status(root)?;
+    }
+    let hunk_count = files.iter().map(|file| file.hunks).sum();
+    let additions = files.iter().map(|file| file.additions).sum();
+    let deletions = files.iter().map(|file| file.deletions).sum();
+    Ok(PatchPreviewEvidence {
+        repo_root: root.display().to_string(),
+        file_count: files.len(),
+        files,
+        hunk_count,
+        additions,
+        deletions,
+        truncated,
+        evidence_kind: "repo_evidence".to_owned(),
+    })
+}
+
 fn find_files_in_dir(
     root: &Path,
     dir: &Path,
@@ -415,6 +534,58 @@ struct CommandPreview {
     truncated: bool,
 }
 
+impl PatchFilePreview {
+    fn empty() -> Self {
+        Self {
+            old_path: None,
+            new_path: None,
+            status: "modified".to_owned(),
+            hunks: 0,
+            additions: 0,
+            deletions: 0,
+            target_exists: false,
+        }
+    }
+
+    fn from_paths(
+        root: &Path,
+        old_path: Option<&str>,
+        new_path: Option<&str>,
+    ) -> Result<Self, RepoToolError> {
+        let mut file = Self::empty();
+        if let Some(old_path) = old_path {
+            file.set_old_path(root, old_path)?;
+        }
+        if let Some(new_path) = new_path {
+            file.set_new_path(root, new_path)?;
+        }
+        Ok(file)
+    }
+
+    fn set_old_path(&mut self, root: &Path, path: &str) -> Result<(), RepoToolError> {
+        self.old_path = normalize_patch_path(root, path)?;
+        Ok(())
+    }
+
+    fn set_new_path(&mut self, root: &Path, path: &str) -> Result<(), RepoToolError> {
+        self.new_path = normalize_patch_path(root, path)?;
+        Ok(())
+    }
+
+    fn finish_status(&mut self, root: &Path) -> Result<(), RepoToolError> {
+        self.status = match (&self.old_path, &self.new_path) {
+            (None, Some(_)) => "added",
+            (Some(_), None) => "deleted",
+            (Some(old_path), Some(new_path)) if old_path != new_path => "renamed",
+            _ => "modified",
+        }
+        .to_owned();
+        let target = self.new_path.as_ref().or(self.old_path.as_ref());
+        self.target_exists = target.map(|path| root.join(path).exists()).unwrap_or(false);
+        Ok(())
+    }
+}
+
 fn run_git(
     root: &Path,
     args: &[&str],
@@ -458,6 +629,45 @@ fn canonical_repo_root(repo_root: impl AsRef<Path>) -> Result<PathBuf, RepoToolE
         return Err(RepoToolError::InvalidRootKind(root.display().to_string()));
     }
     Ok(root)
+}
+
+fn normalize_patch_path(root: &Path, raw_path: &str) -> Result<Option<String>, RepoToolError> {
+    let trimmed = raw_path.trim().trim_matches('"');
+    if trimmed == "/dev/null" {
+        return Ok(None);
+    }
+    let without_prefix = trimmed
+        .strip_prefix("a/")
+        .or_else(|| trimmed.strip_prefix("b/"))
+        .unwrap_or(trimmed);
+    let path = Path::new(without_prefix);
+    if path.is_absolute() {
+        return Err(RepoToolError::PathOutsideRepo(without_prefix.to_owned()));
+    }
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                parts.push(part.to_string_lossy().to_string());
+            }
+            std::path::Component::CurDir => {}
+            _ => {
+                return Err(RepoToolError::PathOutsideRepo(without_prefix.to_owned()));
+            }
+        }
+    }
+    if parts.is_empty() {
+        return Err(RepoToolError::PathOutsideRepo(without_prefix.to_owned()));
+    }
+    let normalized = parts.join("/");
+    if sensitive_repo_path(&normalized) {
+        return Err(RepoToolError::SensitivePath(normalized));
+    }
+    let candidate = root.join(&normalized);
+    if !candidate.starts_with(root) {
+        return Err(RepoToolError::PathOutsideRepo(normalized));
+    }
+    Ok(Some(normalized))
 }
 
 fn resolve_existing_repo_path(
@@ -617,6 +827,8 @@ pub enum RepoToolError {
     GitIo(std::io::Error),
     #[error("git command failed with status {status:?}: {stderr}")]
     GitFailed { status: Option<i32>, stderr: String },
+    #[error("patch file has no unified diff file entries: {0}")]
+    PatchNoFiles(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -834,6 +1046,86 @@ mod tests {
         let truncated = git_diff(&root, 24).unwrap();
         assert!(truncated.truncated);
         assert_eq!(truncated.preview.len(), 24);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn patch_preview_summarizes_unified_diff() {
+        let root = temp_repo();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src").join("app.py"), "base\n").unwrap();
+        let patch = "\
+diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1 @@
+-base
++changed
+";
+
+        let evidence = preview_patch_text(&root, patch, false).unwrap();
+
+        assert_eq!(evidence.file_count, 1);
+        assert_eq!(evidence.hunk_count, 1);
+        assert_eq!(evidence.additions, 1);
+        assert_eq!(evidence.deletions, 1);
+        assert_eq!(evidence.files[0].new_path.as_deref(), Some("src/app.py"));
+        assert_eq!(evidence.files[0].status, "modified");
+        assert!(evidence.files[0].target_exists);
+        assert_eq!(evidence.evidence_kind, "repo_evidence");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn patch_preview_file_reads_repo_patch() {
+        let root = temp_repo();
+        fs::write(root.join("tracked.txt"), "base\n").unwrap();
+        fs::write(
+            root.join("change.patch"),
+            "\
+diff --git a/tracked.txt b/tracked.txt
+--- a/tracked.txt
++++ b/tracked.txt
+@@ -1 +1 @@
+-base
++changed
+",
+        )
+        .unwrap();
+
+        let evidence = preview_patch_file(&root, "change.patch", DEFAULT_MAX_PATCH_BYTES).unwrap();
+
+        assert_eq!(evidence.file_count, 1);
+        assert_eq!(evidence.files[0].new_path.as_deref(), Some("tracked.txt"));
+        assert!(!evidence.truncated);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn patch_preview_rejects_path_escape_and_sensitive_targets() {
+        let root = temp_repo();
+        let escaped = "\
+diff --git a/src/app.py b/../escape.py
+--- a/src/app.py
++++ b/../escape.py
+@@ -1 +1 @@
+-base
++changed
+";
+        let sensitive = "\
+diff --git a/.env b/.env
+--- a/.env
++++ b/.env
+@@ -1 +1 @@
+-safe
++unsafe
+";
+
+        let escaped_error = preview_patch_text(&root, escaped, false).unwrap_err();
+        let sensitive_error = preview_patch_text(&root, sensitive, false).unwrap_err();
+
+        assert!(matches!(escaped_error, RepoToolError::PathOutsideRepo(_)));
+        assert!(matches!(sensitive_error, RepoToolError::SensitivePath(_)));
         let _ = fs::remove_dir_all(root);
     }
 

@@ -56,17 +56,18 @@ memory records plus `memory.read` and `memory.write.proposed` event helpers,
 without vector retrieval.
 `coder-tools` starts the Rust-native repo evidence layer with path-safe
 file discovery, UTF-8 `read_file`, bounded line-range reads, bounded
-`search_text`, `git_status`, and bounded `git_diff` helpers. These tools skip
-runtime/vendor directories and sensitive paths, and they do not include write,
-patch, command, or network effects.
+`search_text`, `git_status`, bounded `git_diff`, and read-only `patch-preview`
+helpers. These tools skip runtime/vendor directories and sensitive paths, and
+they do not include write, patch-apply, command, or network effects.
 `coder-store` can persist sanitized repo evidence payloads under
 `runs/{run_id}/repo_evidence/`, append `index.jsonl`, and return refs such as
 `repo-read:*`, `repo-text-search:*`, and `repo-file-list:*` for later reports
 and context packets.
-The `find-files`, `read-file`, `read-file-range`, `search-text`, and `git-diff`
-CLI tools can record those refs with `--store <dir> --run-id <id>` while
-preserving the default side-effect-free JSON output when those flags are
-omitted. Full-file `read-file` stores safe file metadata as evidence; use
+The `find-files`, `read-file`, `read-file-range`, `search-text`, `git-diff`,
+and `patch-preview` CLI tools can record those refs with
+`--store <dir> --run-id <id>` while preserving the default side-effect-free
+JSON output when those flags are omitted. Full-file `read-file` stores safe
+file metadata as evidence; use
 `read-file-range` for bounded content evidence.
 
 Rust checks:
