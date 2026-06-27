@@ -230,6 +230,7 @@ dependencies = [
  "coder-store",
  "coder-workflow",
  "serde_json",
+ "serde_yaml",
  "tokio",
 ]
 

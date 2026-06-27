@@ -13,10 +13,16 @@ Current Rust commands:
 cargo run -p coder-cli --bin coder-rust -- doctor
 cargo run -p coder-cli --bin coder-rust -- config validate --path examples\coder.yaml
 cargo run -p coder-cli --bin coder-rust -- workflow run --mock planner-led "summarize this repo"
+cargo run -p coder-cli --bin coder-rust -- workflow run --conversation-id <id> planner-led "summarize this repo"
 cargo run -p coder-cli --bin coder-rust -- openhands doctor --server http://127.0.0.1:8000
 cargo run -p coder-cli --bin coder-rust -- openhands run --server http://127.0.0.1:8000 --conversation-id <id> "summarize this repo"
 cargo run -p coder-cli --bin coder-rust -- server --host 127.0.0.1 --port 8766
 ```
+
+Without `--mock`, `workflow run` selects the first OpenHands-backed node in the
+requested WorkflowSpec and uses that harness server config. The current spike
+requires `--conversation-id` or `--create-payload` so Rust talks to an external
+OpenHands Agent Server instead of embedding Python.
 
 `openhands run` writes a Rust run directory with `metadata.json`,
 `events.jsonl`, raw OpenHands event blob refs, and a `final-report.json`
