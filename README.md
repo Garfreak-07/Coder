@@ -36,6 +36,9 @@ confirmation gate for a requested Rust workflow run.
 `coder-memory` is the first lightweight Rust memory milestone: JSON project
 memory records plus `memory.read` and `memory.write.proposed` event helpers,
 without vector retrieval.
+`coder-tools` starts the Rust-native repo evidence layer with path-safe
+UTF-8 `read_file` and bounded `search_text` helpers; it does not include
+write, patch, command, or network effects.
 
 Rust checks:
 

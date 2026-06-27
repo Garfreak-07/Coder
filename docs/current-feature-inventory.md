@@ -115,4 +115,6 @@ Classification values:
   mock run, event listing.
 - `coder-memory`: project memory file loading, bounded memory write previews,
   and content-free memory read events.
+- `coder-tools`: path-safe read-only repo file reads and bounded text search
+  that skip runtime/vendor directories.
 - Frontend adapter: legacy canvas to `WorkflowSpec` and back.

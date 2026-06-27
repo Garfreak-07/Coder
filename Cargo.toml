@@ -10,6 +10,7 @@ members = [
   "crates/coder-openhands",
   "crates/coder-server",
   "crates/coder-store",
+  "crates/coder-tools",
   "crates/coder-workflow",
 ]
 
@@ -58,6 +59,9 @@ path = "crates/coder-server"
 
 [workspace.dependencies.coder-store]
 path = "crates/coder-store"
+
+[workspace.dependencies.coder-tools]
+path = "crates/coder-tools"
 
 [workspace.dependencies.coder-workflow]
 path = "crates/coder-workflow"

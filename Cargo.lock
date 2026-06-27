@@ -329,6 +329,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "coder-tools"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "coder-workflow"
 version = "0.1.0"
 dependencies = [
