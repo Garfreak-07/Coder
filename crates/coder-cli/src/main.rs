@@ -482,7 +482,8 @@ fn run_detail_json(store: &RunStore, run_id: &RunId) -> anyhow::Result<serde_jso
     let metadata = store.read_metadata(run_id)?;
     let events = store.read_events(run_id)?;
     let report = store.read_report(run_id)?;
-    if metadata.is_none() && events.is_empty() && report.is_none() {
+    let repo_evidence_count = store.repo_evidence_count(run_id)?;
+    if metadata.is_none() && events.is_empty() && report.is_none() && repo_evidence_count == 0 {
         anyhow::bail!("run '{}' was not found", run_id.as_str());
     }
     Ok(json!({
@@ -490,6 +491,7 @@ fn run_detail_json(store: &RunStore, run_id: &RunId) -> anyhow::Result<serde_jso
         "metadata": metadata,
         "events": events,
         "report": report,
+        "repo_evidence_count": repo_evidence_count,
     }))
 }
 
@@ -1000,6 +1002,31 @@ mod tests {
         assert_eq!(detail["run_id"], "run-1");
         assert_eq!(detail["events"][0]["kind"], "run.started");
         assert_eq!(detail["report"]["summary"], "done");
+        assert_eq!(detail["repo_evidence_count"], 0);
+        let _ = std::fs::remove_dir_all(store_root);
+    }
+
+    #[test]
+    fn run_detail_helper_returns_repo_evidence_only_run() {
+        let store_root = temp_root("coder-cli-store");
+        let store = RunStore::new(&store_root);
+        let run_id = RunId::from_string("run-1");
+        store
+            .write_repo_evidence(
+                &run_id,
+                RepoEvidenceKind::RepoRead,
+                "repo",
+                Vec::new(),
+                "read",
+                json!({"snippet": "safe"}),
+            )
+            .unwrap();
+
+        let detail = run_detail_json(&store, &run_id).unwrap();
+
+        assert_eq!(detail["run_id"], "run-1");
+        assert_eq!(detail["metadata"], serde_json::Value::Null);
+        assert_eq!(detail["repo_evidence_count"], 1);
         let _ = std::fs::remove_dir_all(store_root);
     }
 

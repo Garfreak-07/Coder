@@ -270,6 +270,7 @@ export interface RustRunDetail {
   metadata?: RustRunState | null;
   events: RustCoderEvent[];
   report?: RustFinalReport | null;
+  repo_evidence_count: number;
 }
 
 export interface RustRunEventsResponse {

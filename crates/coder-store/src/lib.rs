@@ -69,7 +69,7 @@ impl RunStore {
             let metadata = self.read_metadata(&run_id)?;
             let event_count = self.read_events(&run_id)?.len();
             let has_report = self.read_report(&run_id)?.is_some();
-            let repo_evidence_count = self.count_repo_evidence(&run_id)?;
+            let repo_evidence_count = self.repo_evidence_count(&run_id)?;
             summaries.push(StoredRunSummary {
                 run_id: run_name,
                 metadata,
@@ -282,7 +282,7 @@ impl RunStore {
         Ok(self.root.join("runs").join(safe_run_id))
     }
 
-    fn count_repo_evidence(&self, run_id: &RunId) -> Result<usize, StoreError> {
+    pub fn repo_evidence_count(&self, run_id: &RunId) -> Result<usize, StoreError> {
         let index_path = self
             .safe_run_dir(run_id)?
             .join("repo_evidence")

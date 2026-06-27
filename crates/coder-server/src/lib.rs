@@ -167,7 +167,8 @@ async fn get_run_detail(
     let metadata = state.store.read_metadata(&run_id)?;
     let events = state.store.read_events(&run_id)?;
     let report = state.store.read_report(&run_id)?;
-    if metadata.is_none() && events.is_empty() && report.is_none() {
+    let repo_evidence_count = state.store.repo_evidence_count(&run_id)?;
+    if metadata.is_none() && events.is_empty() && report.is_none() && repo_evidence_count == 0 {
         return Err(ApiError::not_found(format!(
             "run '{}' was not found",
             run_id.as_str()
@@ -178,6 +179,7 @@ async fn get_run_detail(
         metadata,
         events,
         report,
+        repo_evidence_count,
     }))
 }
 
@@ -271,6 +273,7 @@ pub struct RunDetailResponse {
     pub metadata: Option<RunState>,
     pub events: Vec<coder_events::CoderEvent>,
     pub report: Option<FinalReport>,
+    pub repo_evidence_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -603,6 +606,7 @@ mod tests {
         let app = router(ApiState::new(store));
 
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(format!("/api/v3/repo-evidence/{}", reference.ref_id))
@@ -617,6 +621,21 @@ mod tests {
         assert_eq!(body["ref_id"], reference.ref_id);
         assert_eq!(body["payload"]["operation"], "read_file_range");
         assert_eq!(body["payload"]["snippet"]["path"], "src/app.py");
+
+        let detail_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/runs/run-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail_response.status(), StatusCode::OK);
+        let detail_body = response_json(detail_response).await;
+        assert_eq!(detail_body["run_id"], "run-1");
+        assert_eq!(detail_body["repo_evidence_count"], 1);
+        assert_eq!(detail_body["metadata"], Value::Null);
         let _ = fs::remove_dir_all(root);
     }
 
