@@ -1564,13 +1564,9 @@ diff --git a/.env b/.env
     }
 
     fn temp_repo() -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "coder-tools-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("coder-tools-{}-{}", std::process::id(), id));
         fs::create_dir_all(&root).unwrap();
         root
     }

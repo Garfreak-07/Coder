@@ -366,13 +366,10 @@ mod tests {
     fn fixture() -> (ProjectConfig, PathBuf, RunStore) {
         let config: ProjectConfig =
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
-        let root = std::env::temp_dir().join(format!(
-            "coder-workflow-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("coder-workflow-{}-{}", std::process::id(), id));
         let store = RunStore::new(&root);
         (config, root, store)
     }

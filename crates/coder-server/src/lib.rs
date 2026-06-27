@@ -43,6 +43,11 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v3/runs/{run_id}", get(get_run_detail))
         .route("/api/v3/runs/{run_id}/events", get(list_run_events))
         .route(
+            "/api/v3/runs/{run_id}/report/preview",
+            get(preview_run_report),
+        )
+        .route("/api/v3/runs/{run_id}/report", post(write_run_report))
+        .route(
             "/api/v3/runs/{run_id}/repo-evidence",
             get(list_run_repo_evidence),
         )
@@ -205,6 +210,33 @@ async fn get_run_detail(
     }))
 }
 
+async fn preview_run_report(
+    State(state): State<ApiState>,
+    Path(run_id): Path<String>,
+) -> Result<Json<RunReportResponse>, ApiError> {
+    let run_id = RunId::from_string(run_id);
+    let report = state.store.build_evidence_report(&run_id)?;
+    Ok(Json(RunReportResponse {
+        run_id: run_id.to_string(),
+        report_ref: None,
+        report,
+    }))
+}
+
+async fn write_run_report(
+    State(state): State<ApiState>,
+    Path(run_id): Path<String>,
+) -> Result<Json<RunReportResponse>, ApiError> {
+    let run_id = RunId::from_string(run_id);
+    let report = state.store.build_evidence_report(&run_id)?;
+    let report_ref = state.store.write_report(&run_id, &report)?;
+    Ok(Json(RunReportResponse {
+        run_id: run_id.to_string(),
+        report_ref: Some(report_ref),
+        report,
+    }))
+}
+
 async fn get_repo_evidence(
     State(state): State<ApiState>,
     Path(ref_id): Path<String>,
@@ -320,6 +352,13 @@ pub struct RunDetailResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct RunReportResponse {
+    pub run_id: String,
+    pub report_ref: Option<String>,
+    pub report: FinalReport,
+}
+
+#[derive(Debug, Serialize)]
 pub struct RepoEvidenceResponse {
     pub ref_id: String,
     pub payload: serde_json::Value,
@@ -399,7 +438,8 @@ impl IntoResponse for ApiError {
 impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> Self {
         match error {
-            StoreError::RepoEvidenceNotFound(_)
+            StoreError::RunNotFound(_)
+            | StoreError::RepoEvidenceNotFound(_)
             | StoreError::ArtifactNotFound { .. }
             | StoreError::BlobNotFound(_) => Self::not_found(error.to_string()),
             StoreError::InvalidStoreSegment { .. }
@@ -616,6 +656,83 @@ mod tests {
         .await;
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn run_report_preview_and_write_are_evidence_backed() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run-1");
+        store
+            .append_event(
+                &run_id,
+                &coder_events::CoderEvent::new(
+                    run_id.clone(),
+                    1,
+                    "command.completed",
+                    json!({
+                        "command": "cargo test",
+                        "status": "completed",
+                        "passed": true,
+                        "returncode": 0
+                    }),
+                ),
+            )
+            .unwrap();
+        let app = router(ApiState::new(store));
+
+        let preview_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/runs/run-1/report/preview")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(preview_response.status(), StatusCode::OK);
+        let preview_body = response_json(preview_response).await;
+        assert_eq!(preview_body["report_ref"], Value::Null);
+        assert_eq!(preview_body["report"]["status"], "completed");
+        assert!(preview_body["report"]["checks"][0]
+            .as_str()
+            .unwrap()
+            .contains("cargo test"));
+
+        let write_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v3/runs/run-1/report")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(write_response.status(), StatusCode::OK);
+        let write_body = response_json(write_response).await;
+        assert!(write_body["report_ref"]
+            .as_str()
+            .unwrap()
+            .ends_with("/final-report.json"));
+
+        let detail_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/runs/run-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let detail_body = response_json(detail_response).await;
+        assert_eq!(
+            detail_body["report"]["checks"][0],
+            "cargo test: completed exit 0"
+        );
         let _ = fs::remove_dir_all(root);
     }
 
@@ -906,12 +1023,8 @@ mod tests {
     }
 
     fn temp_root() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "coder-server-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+        static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("coder-server-{}-{}", std::process::id(), id))
     }
 }

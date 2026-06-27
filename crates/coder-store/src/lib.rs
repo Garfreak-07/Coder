@@ -1,10 +1,11 @@
 use std::{
+    collections::BTreeSet,
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
 };
 
-use coder_core::{FinalReport, RunId, RunState};
+use coder_core::{FinalReport, ReportStatus, RunId, RunState};
 use coder_events::{CoderEvent, LargePayloadRef, DEFAULT_LARGE_PAYLOAD_PREVIEW_LIMIT};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -109,6 +110,101 @@ impl RunStore {
 
     pub fn write_report(&self, run_id: &RunId, report: &FinalReport) -> Result<String, StoreError> {
         self.write_artifact(run_id, "final-report.json", report)
+    }
+
+    pub fn build_evidence_report(&self, run_id: &RunId) -> Result<FinalReport, StoreError> {
+        let metadata = self.read_metadata(run_id)?;
+        let events = self.read_events(run_id)?;
+        let repo_evidence = self.list_repo_evidence(run_id)?;
+        if metadata.is_none() && events.is_empty() && repo_evidence.is_empty() {
+            return Err(StoreError::RunNotFound(run_id.as_str().to_owned()));
+        }
+
+        let mut checks = Vec::new();
+        let mut blockers = Vec::new();
+        let mut evidence_ref_seen = BTreeSet::new();
+        let mut evidence_refs = Vec::new();
+        if !events.is_empty() {
+            evidence_ref_seen.insert((
+                "event_log".to_owned(),
+                format!("eventlog://runs/{}", run_id.as_str()),
+            ));
+        }
+
+        for event in &events {
+            for reference in &event.refs {
+                let key = (reference.label.clone(), reference.uri.clone());
+                evidence_ref_seen.insert(key);
+            }
+
+            match event.kind.as_str() {
+                "approval.requested" => {
+                    let approval_type = payload_string(&event.payload, "approval_type")
+                        .unwrap_or_else(|| "approval".to_owned());
+                    if approval_type == "command" {
+                        let command = payload_string(&event.payload, "command")
+                            .unwrap_or_else(|| "command".to_owned());
+                        blockers.push(format!("Command requires approval: {command}"));
+                    }
+                }
+                "command.completed" | "command.failed" => {
+                    let command = payload_string(&event.payload, "command")
+                        .unwrap_or_else(|| "command".to_owned());
+                    let status = payload_string(&event.payload, "status")
+                        .unwrap_or_else(|| event.kind.trim_start_matches("command.").to_owned());
+                    let returncode = event
+                        .payload
+                        .get("returncode")
+                        .and_then(|value| value.as_i64())
+                        .map(|code| format!(" exit {code}"))
+                        .unwrap_or_default();
+                    checks.push(format!("{command}: {status}{returncode}"));
+                    let passed = event
+                        .payload
+                        .get("passed")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(event.kind == "command.completed");
+                    if !passed {
+                        if event
+                            .payload
+                            .get("timed_out")
+                            .and_then(|value| value.as_bool())
+                            .unwrap_or(false)
+                        {
+                            blockers.push(format!("Command timed out: {command}"));
+                        } else {
+                            blockers.push(format!("Command failed: {command}"));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for reference in repo_evidence {
+            evidence_ref_seen.insert(("repo_evidence".to_owned(), reference.ref_id));
+        }
+        for (kind, reference) in evidence_ref_seen {
+            evidence_refs.push(coder_core::EvidenceRef { kind, reference });
+        }
+
+        let status = if blockers
+            .iter()
+            .any(|blocker| blocker.starts_with("Command requires approval:"))
+        {
+            ReportStatus::Blocked
+        } else if !blockers.is_empty() {
+            ReportStatus::Failed
+        } else {
+            ReportStatus::Completed
+        };
+        let summary =
+            evidence_report_summary(status, events.len(), checks.len(), evidence_refs.len());
+        let mut report = FinalReport::with_status(status, summary);
+        report.checks = checks;
+        report.blockers = blockers;
+        report.evidence_refs = evidence_refs;
+        Ok(report)
     }
 
     pub fn write_repo_evidence(
@@ -360,6 +456,8 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("run not found: {0}")]
+    RunNotFound(String),
     #[error("invalid file name: {0}")]
     InvalidFileName(String),
     #[error("invalid store segment for {label}: {value}")]
@@ -385,6 +483,28 @@ fn write_json(path: impl AsRef<Path>, value: &impl Serialize) -> Result<(), Stor
     ensure_parent(path)?;
     fs::write(path, serde_json::to_string_pretty(value)?)?;
     Ok(())
+}
+
+fn payload_string(payload: &Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+}
+
+fn evidence_report_summary(
+    status: ReportStatus,
+    event_count: usize,
+    check_count: usize,
+    evidence_ref_count: usize,
+) -> String {
+    let prefix = match status {
+        ReportStatus::Completed => "Run completed from recorded evidence",
+        ReportStatus::Blocked => "Run is blocked by recorded evidence",
+        ReportStatus::Failed => "Run failed according to recorded evidence",
+        ReportStatus::Cancelled => "Run was cancelled according to recorded evidence",
+    };
+    format!("{prefix}: {event_count} event(s), {check_count} check(s), {evidence_ref_count} evidence ref(s).")
 }
 
 fn read_json_optional<T: DeserializeOwned>(
@@ -681,6 +801,97 @@ mod tests {
     }
 
     #[test]
+    fn evidence_report_blocks_on_command_approval_request() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run-1");
+        store
+            .append_event(
+                &run_id,
+                &CoderEvent::new(
+                    run_id.clone(),
+                    1,
+                    "approval.requested",
+                    json!({
+                        "approval_type": "command",
+                        "command": "cargo test",
+                        "approval_key": "cmd:abc"
+                    }),
+                ),
+            )
+            .unwrap();
+
+        let report = store.build_evidence_report(&run_id).unwrap();
+
+        assert_eq!(report.status, ReportStatus::Blocked);
+        assert!(report
+            .blockers
+            .iter()
+            .any(|item| item.contains("cargo test")));
+        assert!(report
+            .evidence_refs
+            .iter()
+            .any(|reference| reference.kind == "event_log"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn evidence_report_fails_on_failed_command_event() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run-1");
+        store
+            .append_event(
+                &run_id,
+                &CoderEvent::new(
+                    run_id.clone(),
+                    1,
+                    "command.failed",
+                    json!({
+                        "command": "cargo test",
+                        "status": "failed",
+                        "passed": false,
+                        "returncode": 101
+                    }),
+                ),
+            )
+            .unwrap();
+
+        let report = store.build_evidence_report(&run_id).unwrap();
+
+        assert_eq!(report.status, ReportStatus::Failed);
+        assert!(report.checks[0].contains("cargo test"));
+        assert!(report.blockers[0].contains("Command failed"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn evidence_report_includes_repo_evidence_only_runs() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run-1");
+        let reference = store
+            .write_repo_evidence(
+                &run_id,
+                RepoEvidenceKind::RepoRead,
+                "repo",
+                Vec::new(),
+                "read",
+                json!({"snippet": "safe"}),
+            )
+            .unwrap();
+
+        let report = store.build_evidence_report(&run_id).unwrap();
+
+        assert_eq!(report.status, ReportStatus::Completed);
+        assert!(report
+            .evidence_refs
+            .iter()
+            .any(|item| item.reference == reference.ref_id));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn list_run_summaries_reports_counts_and_skips_unsafe_dirs() {
         let root = temp_root();
         let store = RunStore::new(&root);
@@ -870,12 +1081,8 @@ mod tests {
     }
 
     fn temp_root() -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "coder-store-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+        static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("coder-store-{}-{}", std::process::id(), id))
     }
 }

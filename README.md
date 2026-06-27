@@ -46,6 +46,10 @@ directory.
 Run artifacts and content-addressed blobs are also readable through
 `GET /api/v3/runs/{run_id}/artifacts/{artifact_name}` and
 `GET /api/v3/blobs/sha256/{digest}`.
+Rust can preview and write an evidence-backed final report through
+`GET /api/v3/runs/{run_id}/report/preview` and
+`POST /api/v3/runs/{run_id}/report`; the report is assembled from recorded
+events and repo evidence refs rather than model claims.
 It can also read stored repo evidence payloads through
 `GET /api/v3/runs/{run_id}/repo-evidence` and
 `GET /api/v3/repo-evidence/{ref_id}`.

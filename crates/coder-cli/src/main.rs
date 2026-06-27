@@ -134,6 +134,13 @@ enum RunsCommand {
         store: PathBuf,
         run_id: String,
     },
+    Report {
+        #[arg(long, default_value = ".coder-rust")]
+        store: PathBuf,
+        #[arg(long, default_value_t = false)]
+        write: bool,
+        run_id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -537,6 +544,24 @@ fn run_repo_evidence_json(store: &RunStore, run_id: &RunId) -> anyhow::Result<se
     }))
 }
 
+fn run_report_json(
+    store: &RunStore,
+    run_id: &RunId,
+    write: bool,
+) -> anyhow::Result<serde_json::Value> {
+    let report = store.build_evidence_report(run_id)?;
+    let report_ref = if write {
+        Some(store.write_report(run_id, &report)?)
+    } else {
+        None
+    };
+    Ok(json!({
+        "run_id": run_id.as_str(),
+        "report_ref": report_ref,
+        "report": report,
+    }))
+}
+
 fn write_optional_repo_evidence(
     args: &EvidenceRecordArgs,
     kind: RepoEvidenceKind,
@@ -794,6 +819,18 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let output =
                 run_repo_evidence_json(&RunStore::new(store), &RunId::from_string(run_id))?;
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        Command::Runs {
+            command:
+                RunsCommand::Report {
+                    store,
+                    write,
+                    run_id,
+                },
+        } => {
+            let output =
+                run_report_json(&RunStore::new(store), &RunId::from_string(run_id), write)?;
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         Command::Tools {
@@ -1257,6 +1294,41 @@ mod tests {
     }
 
     #[test]
+    fn run_report_helper_previews_and_writes_evidence_report() {
+        let store_root = temp_root("coder-cli-store");
+        let store = RunStore::new(&store_root);
+        let run_id = RunId::from_string("run-1");
+        store
+            .append_event(
+                &run_id,
+                &CoderEvent::new(
+                    run_id.clone(),
+                    1,
+                    "command.completed",
+                    json!({
+                        "command": "cargo test",
+                        "status": "completed",
+                        "passed": true,
+                        "returncode": 0
+                    }),
+                ),
+            )
+            .unwrap();
+
+        let preview = run_report_json(&store, &run_id, false).unwrap();
+        let written = run_report_json(&store, &run_id, true).unwrap();
+
+        assert_eq!(preview["report_ref"], serde_json::Value::Null);
+        assert_eq!(preview["report"]["status"], "completed");
+        assert!(written["report_ref"]
+            .as_str()
+            .unwrap()
+            .ends_with("/final-report.json"));
+        assert_eq!(store.read_report(&run_id).unwrap().unwrap().checks.len(), 1);
+        let _ = std::fs::remove_dir_all(store_root);
+    }
+
+    #[test]
     fn run_detail_helper_reports_missing_run() {
         let store_root = temp_root("coder-cli-store");
         let store = RunStore::new(&store_root);
@@ -1268,13 +1340,8 @@ mod tests {
     }
 
     fn temp_root(prefix: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "{}-{}",
-            prefix,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+        static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), id))
     }
 }

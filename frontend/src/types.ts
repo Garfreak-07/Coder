@@ -273,6 +273,12 @@ export interface RustRunDetail {
   repo_evidence_count: number;
 }
 
+export interface RustRunReportResponse {
+  run_id: string;
+  report_ref?: string | null;
+  report: RustFinalReport;
+}
+
 export interface RustRepoEvidenceRef {
   ref_id: string;
   kind: string;
