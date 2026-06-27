@@ -138,6 +138,27 @@ pub struct PatchFilePreview {
 }
 
 #[derive(Debug, Clone)]
+pub struct PatchApplyRequest {
+    pub patch_file: PathBuf,
+    pub max_patch_bytes: usize,
+    pub source: String,
+    pub approved: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PatchApplyEvidence {
+    pub repo_root: String,
+    pub patch_file: String,
+    pub status: String,
+    pub applied: bool,
+    pub requires_approval: bool,
+    pub approval_key: String,
+    pub reason: String,
+    pub preview: PatchPreviewEvidence,
+    pub evidence_kind: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct CommandRunRequest {
     pub cwd: PathBuf,
     pub argv: Vec<String>,
@@ -404,6 +425,70 @@ pub fn preview_patch_file(
     Ok(evidence)
 }
 
+pub fn apply_patch_file(
+    repo_root: impl AsRef<Path>,
+    request: PatchApplyRequest,
+) -> Result<PatchApplyEvidence, RepoToolError> {
+    let root = canonical_repo_root(repo_root)?;
+    let patch_path = resolve_existing_repo_path(&root, &request.patch_file)?;
+    let relative_patch = validate_readable_evidence_path(&root, &patch_path)?;
+    let preview = preview_patch_file(&root, &request.patch_file, request.max_patch_bytes)?;
+    let patch_arg = PathBuf::from(&relative_patch);
+    let approval_key = patch_approval_key(&relative_patch, &preview);
+    if request.source == "model" && !request.approved {
+        return Ok(PatchApplyEvidence {
+            repo_root: root.display().to_string(),
+            patch_file: relative_patch,
+            status: "blocked".to_owned(),
+            applied: false,
+            requires_approval: true,
+            approval_key,
+            reason: "Model-generated patch apply requires approval.".to_owned(),
+            preview,
+            evidence_kind: "patch_apply".to_owned(),
+        });
+    }
+
+    if let Err(error) = run_git_apply(&root, &patch_arg, true) {
+        return Ok(PatchApplyEvidence {
+            repo_root: root.display().to_string(),
+            patch_file: relative_patch,
+            status: "failed".to_owned(),
+            applied: false,
+            requires_approval: false,
+            approval_key,
+            reason: error.to_string(),
+            preview,
+            evidence_kind: "patch_apply".to_owned(),
+        });
+    }
+    if let Err(error) = run_git_apply(&root, &patch_arg, false) {
+        return Ok(PatchApplyEvidence {
+            repo_root: root.display().to_string(),
+            patch_file: relative_patch,
+            status: "failed".to_owned(),
+            applied: false,
+            requires_approval: false,
+            approval_key,
+            reason: error.to_string(),
+            preview,
+            evidence_kind: "patch_apply".to_owned(),
+        });
+    }
+
+    Ok(PatchApplyEvidence {
+        repo_root: root.display().to_string(),
+        patch_file: relative_patch,
+        status: "applied".to_owned(),
+        applied: true,
+        requires_approval: false,
+        approval_key,
+        reason: String::new(),
+        preview,
+        evidence_kind: "patch_apply".to_owned(),
+    })
+}
+
 pub fn run_command(
     repo_root: impl AsRef<Path>,
     request: CommandRunRequest,
@@ -574,6 +659,28 @@ pub fn command_approval_key(command: &str, cwd: &str) -> String {
     hasher.update([0]);
     hasher.update(command.as_bytes());
     format!("cmd:{:x}", hasher.finalize())
+}
+
+pub fn patch_approval_key(patch_file: &str, preview: &PatchPreviewEvidence) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(patch_file.as_bytes());
+    hasher.update([0]);
+    for file in &preview.files {
+        if let Some(path) = &file.old_path {
+            hasher.update(path.as_bytes());
+        }
+        hasher.update([0]);
+        if let Some(path) = &file.new_path {
+            hasher.update(path.as_bytes());
+        }
+        hasher.update([0]);
+        hasher.update(file.status.as_bytes());
+        hasher.update([0]);
+    }
+    hasher.update(preview.additions.to_string().as_bytes());
+    hasher.update([0]);
+    hasher.update(preview.deletions.to_string().as_bytes());
+    format!("patch:{:x}", hasher.finalize())
 }
 
 fn preview_patch_text(
@@ -862,6 +969,30 @@ fn run_git(
         preview: String::from_utf8_lossy(preview_bytes).into_owned(),
         truncated,
     })
+}
+
+fn run_git_apply(root: &Path, patch_path: &Path, check: bool) -> Result<(), RepoToolError> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(root)
+        .arg("apply")
+        .arg("--whitespace=nowarn");
+    if check {
+        command.arg("--check");
+    }
+    let output = command
+        .arg("--")
+        .arg(patch_path)
+        .output()
+        .map_err(RepoToolError::GitIo)?;
+    if !output.status.success() {
+        return Err(RepoToolError::GitFailed {
+            status: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn contains_high_risk_command(lower: &str) -> bool {
@@ -1388,6 +1519,7 @@ diff --git a/src/app.py b/src/app.py
             root.join("change.patch"),
             "\
 diff --git a/tracked.txt b/tracked.txt
+index df967b9..5ea2ed4 100644
 --- a/tracked.txt
 +++ b/tracked.txt
 @@ -1 +1 @@
@@ -1402,6 +1534,87 @@ diff --git a/tracked.txt b/tracked.txt
         assert_eq!(evidence.file_count, 1);
         assert_eq!(evidence.files[0].new_path.as_deref(), Some("tracked.txt"));
         assert!(!evidence.truncated);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn patch_apply_blocks_model_patch_without_approval() {
+        let root = temp_repo();
+        fs::write(root.join("tracked.txt"), "base\n").unwrap();
+        fs::write(
+            root.join("change.patch"),
+            "\
+diff --git a/tracked.txt b/tracked.txt
+--- a/tracked.txt
++++ b/tracked.txt
+@@ -1 +1 @@
+-base
++changed
+",
+        )
+        .unwrap();
+
+        let evidence = apply_patch_file(
+            &root,
+            PatchApplyRequest {
+                patch_file: PathBuf::from("change.patch"),
+                max_patch_bytes: DEFAULT_MAX_PATCH_BYTES,
+                source: "model".to_owned(),
+                approved: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(evidence.status, "blocked");
+        assert!(!evidence.applied);
+        assert!(evidence.requires_approval);
+        assert!(evidence.approval_key.starts_with("patch:"));
+        assert_eq!(
+            fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "base\n"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn patch_apply_applies_approved_patch() {
+        let root = temp_repo();
+        init_git_repo(&root);
+        fs::write(root.join("tracked.txt"), "base\n").unwrap();
+        fs::write(
+            root.join("change.patch"),
+            "\
+diff --git a/tracked.txt b/tracked.txt
+index df967b9..5ea2ed4 100644
+--- a/tracked.txt
++++ b/tracked.txt
+@@ -1 +1 @@
+-base
++changed
+",
+        )
+        .unwrap();
+
+        let evidence = apply_patch_file(
+            &root,
+            PatchApplyRequest {
+                patch_file: PathBuf::from("change.patch"),
+                max_patch_bytes: DEFAULT_MAX_PATCH_BYTES,
+                source: "model".to_owned(),
+                approved: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(evidence.status, "applied");
+        assert!(evidence.applied);
+        assert!(!evidence.requires_approval);
+        assert_eq!(
+            fs::read_to_string(root.join("tracked.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "changed\n"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

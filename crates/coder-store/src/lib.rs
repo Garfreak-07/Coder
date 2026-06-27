@@ -147,6 +147,12 @@ impl RunStore {
                         let command = payload_string(&event.payload, "command")
                             .unwrap_or_else(|| "command".to_owned());
                         blockers.push(format!("Command requires approval: {command}"));
+                    } else if approval_type == "patch_apply" {
+                        let patch_file = payload_string(&event.payload, "patch_file")
+                            .unwrap_or_else(|| "patch".to_owned());
+                        blockers.push(format!("Patch apply requires approval: {patch_file}"));
+                        collect_patch_files(&event.payload, &mut changed_file_seen);
+                        collect_patch_ref(&event.payload, &mut patch_ref_seen);
                     }
                 }
                 "command.completed" | "command.failed" => {
@@ -179,15 +185,18 @@ impl RunStore {
                         }
                     }
                 }
-                "patch.previewed" => {
+                "patch.previewed" | "patch.applied" | "patch.failed" => {
                     collect_patch_files(&event.payload, &mut changed_file_seen);
-                    if let Some(reference) = payload_string(&event.payload, "evidence_ref") {
-                        patch_ref_seen.insert(repo_evidence_uri(&reference));
-                    }
+                    collect_patch_ref(&event.payload, &mut patch_ref_seen);
                     for reference in &event.refs {
                         if reference.label.contains("patch") {
                             patch_ref_seen.insert(reference.uri.clone());
                         }
+                    }
+                    if event.kind == "patch.failed" {
+                        let patch_file = payload_string(&event.payload, "patch_file")
+                            .unwrap_or_else(|| "patch".to_owned());
+                        blockers.push(format!("Patch failed: {patch_file}"));
                     }
                 }
                 _ => {}
@@ -199,9 +208,31 @@ impl RunStore {
             evidence_ref_seen.insert(("repo_evidence".to_owned(), ref_id.clone()));
             if reference.kind == RepoEvidenceKind::RepoDiff {
                 let payload = self.read_repo_evidence(&ref_id)?;
-                if payload_string(&payload, "operation").as_deref() == Some("patch_preview") {
-                    patch_ref_seen.insert(repo_evidence_uri(&ref_id));
-                    collect_patch_files(&payload, &mut changed_file_seen);
+                match payload_string(&payload, "operation").as_deref() {
+                    Some("patch_preview") => {
+                        patch_ref_seen.insert(repo_evidence_uri(&ref_id));
+                        collect_patch_files(&payload, &mut changed_file_seen);
+                    }
+                    Some("patch_apply") => {
+                        patch_ref_seen.insert(repo_evidence_uri(&ref_id));
+                        collect_patch_files(&payload, &mut changed_file_seen);
+                        if let Some(result) = payload.get("result") {
+                            let patch_file = payload_string(result, "patch_file")
+                                .unwrap_or_else(|| "patch".to_owned());
+                            let status = payload_string(result, "status").unwrap_or_default();
+                            let requires_approval = result
+                                .get("requires_approval")
+                                .and_then(|value| value.as_bool())
+                                .unwrap_or(false);
+                            if requires_approval {
+                                blockers
+                                    .push(format!("Patch apply requires approval: {patch_file}"));
+                            } else if status == "failed" {
+                                blockers.push(format!("Patch failed: {patch_file}"));
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -211,7 +242,7 @@ impl RunStore {
 
         let status = if blockers
             .iter()
-            .any(|blocker| blocker.starts_with("Command requires approval:"))
+            .any(|blocker| blocker.contains("requires approval:"))
         {
             ReportStatus::Blocked
         } else if !blockers.is_empty() {
@@ -519,6 +550,7 @@ fn collect_patch_files(payload: &Value, files: &mut BTreeSet<String>) {
     if let Some(items) = payload
         .get("files")
         .or_else(|| payload.pointer("/preview/files"))
+        .or_else(|| payload.pointer("/result/preview/files"))
         .and_then(|value| value.as_array())
     {
         for item in items {
@@ -529,6 +561,12 @@ fn collect_patch_files(payload: &Value, files: &mut BTreeSet<String>) {
                 files.insert(path);
             }
         }
+    }
+}
+
+fn collect_patch_ref(payload: &Value, refs: &mut BTreeSet<String>) {
+    if let Some(reference) = payload_string(payload, "evidence_ref") {
+        refs.insert(repo_evidence_uri(&reference));
     }
 }
 
@@ -970,6 +1008,109 @@ mod tests {
 
         assert_eq!(report.changed_files, vec!["src/app.py"]);
         assert_eq!(report.patch_refs, vec!["repo-evidence://repo-diff:abc"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn evidence_report_blocks_on_patch_apply_approval_request() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run-1");
+        store
+            .append_event(
+                &run_id,
+                &CoderEvent::new(
+                    run_id.clone(),
+                    1,
+                    "approval.requested",
+                    json!({
+                        "approval_type": "patch_apply",
+                        "patch_file": "change.patch",
+                        "evidence_ref": "repo-diff:abc",
+                        "files": [
+                            {
+                                "old_path": "src/app.py",
+                                "new_path": "src/app.py",
+                                "status": "modified"
+                            }
+                        ]
+                    }),
+                )
+                .with_ref("patch_evidence", "repo-evidence://repo-diff:abc"),
+            )
+            .unwrap();
+
+        let report = store.build_evidence_report(&run_id).unwrap();
+
+        assert_eq!(report.status, ReportStatus::Blocked);
+        assert_eq!(report.changed_files, vec!["src/app.py"]);
+        assert_eq!(report.patch_refs, vec!["repo-evidence://repo-diff:abc"]);
+        assert!(report.blockers[0].contains("change.patch"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn evidence_report_tracks_applied_and_failed_patch_events() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run-1");
+        store
+            .append_event(
+                &run_id,
+                &CoderEvent::new(
+                    run_id.clone(),
+                    1,
+                    "patch.applied",
+                    json!({
+                        "patch_file": "good.patch",
+                        "evidence_ref": "repo-diff:good",
+                        "files": [
+                            {
+                                "old_path": "src/app.py",
+                                "new_path": "src/app.py",
+                                "status": "modified"
+                            }
+                        ]
+                    }),
+                )
+                .with_ref("patch_evidence", "repo-evidence://repo-diff:good"),
+            )
+            .unwrap();
+        store
+            .append_event(
+                &run_id,
+                &CoderEvent::new(
+                    run_id.clone(),
+                    2,
+                    "patch.failed",
+                    json!({
+                        "patch_file": "bad.patch",
+                        "evidence_ref": "repo-diff:bad",
+                        "files": [
+                            {
+                                "old_path": "src/bad.py",
+                                "new_path": "src/bad.py",
+                                "status": "modified"
+                            }
+                        ]
+                    }),
+                )
+                .with_ref("patch_evidence", "repo-evidence://repo-diff:bad"),
+            )
+            .unwrap();
+
+        let report = store.build_evidence_report(&run_id).unwrap();
+
+        assert_eq!(report.status, ReportStatus::Failed);
+        assert_eq!(report.changed_files, vec!["src/app.py", "src/bad.py"]);
+        assert_eq!(
+            report.patch_refs,
+            vec![
+                "repo-evidence://repo-diff:bad",
+                "repo-evidence://repo-diff:good"
+            ]
+        );
+        assert!(report.blockers[0].contains("bad.patch"));
         let _ = fs::remove_dir_all(root);
     }
 

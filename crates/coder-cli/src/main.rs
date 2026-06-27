@@ -12,8 +12,9 @@ use coder_openhands::{
 use coder_server::{serve, ApiState};
 use coder_store::{RepoEvidenceKind, RepoEvidenceRef, RunStore};
 use coder_tools::{
-    find_files, git_diff, git_status, preview_patch_file, read_file, read_file_range, run_command,
-    search_text, CommandRunEvidence, CommandRunRequest, PatchPreviewEvidence, RepoToolConfig,
+    apply_patch_file, find_files, git_diff, git_status, preview_patch_file, read_file,
+    read_file_range, run_command, search_text, CommandRunEvidence, CommandRunRequest,
+    PatchApplyEvidence, PatchApplyRequest, PatchPreviewEvidence, RepoToolConfig,
 };
 use coder_workflow::MockWorkflowRunner;
 use serde_json::json;
@@ -207,6 +208,19 @@ enum ToolsCommand {
         repo: PathBuf,
         #[arg(long, default_value_t = coder_tools::DEFAULT_MAX_PATCH_BYTES)]
         max_patch_bytes: usize,
+        patch_file: PathBuf,
+        #[command(flatten)]
+        evidence: EvidenceRecordArgs,
+    },
+    PatchApply {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        #[arg(long, default_value_t = coder_tools::DEFAULT_MAX_PATCH_BYTES)]
+        max_patch_bytes: usize,
+        #[arg(long, default_value = "model")]
+        source: String,
+        #[arg(long, default_value_t = false)]
+        approved: bool,
         patch_file: PathBuf,
         #[command(flatten)]
         evidence: EvidenceRecordArgs,
@@ -711,6 +725,62 @@ fn record_patch_preview_event(
     Ok(())
 }
 
+fn record_patch_apply_event(
+    store: &RunStore,
+    run_id: &RunId,
+    output: &PatchApplyEvidence,
+    evidence_ref: &RepoEvidenceRef,
+) -> anyhow::Result<()> {
+    let sequence = store.read_events(run_id)?.len() as u64 + 1;
+    let evidence_uri = format!("repo-evidence://{}", evidence_ref.ref_id);
+    if output.requires_approval {
+        store.append_event(
+            run_id,
+            &CoderEvent::new(
+                run_id.clone(),
+                sequence,
+                "approval.requested",
+                json!({
+                    "approval_type": "patch_apply",
+                    "approval_key": &output.approval_key,
+                    "patch_file": &output.patch_file,
+                    "reason": &output.reason,
+                    "files": &output.preview.files,
+                    "evidence_ref": &evidence_ref.ref_id,
+                }),
+            )
+            .with_ref("patch_evidence", evidence_uri),
+        )?;
+        return Ok(());
+    }
+
+    let kind = if output.applied {
+        "patch.applied"
+    } else {
+        "patch.failed"
+    };
+    store.append_event(
+        run_id,
+        &CoderEvent::new(
+            run_id.clone(),
+            sequence,
+            kind,
+            json!({
+                "status": &output.status,
+                "patch_file": &output.patch_file,
+                "applied": output.applied,
+                "reason": &output.reason,
+                "approval_key": &output.approval_key,
+                "file_count": output.preview.file_count,
+                "files": &output.preview.files,
+                "evidence_ref": &evidence_ref.ref_id,
+            }),
+        )
+        .with_ref("patch_evidence", evidence_uri),
+    )?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -1072,6 +1142,53 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Tools {
             command:
+                ToolsCommand::PatchApply {
+                    repo,
+                    max_patch_bytes,
+                    source,
+                    approved,
+                    patch_file,
+                    evidence,
+                },
+        } => {
+            let output = apply_patch_file(
+                &repo,
+                PatchApplyRequest {
+                    patch_file,
+                    max_patch_bytes,
+                    source,
+                    approved,
+                },
+            )?;
+            let output_json = serde_json::to_value(&output)?;
+            let evidence_ref = write_optional_repo_evidence(
+                &evidence,
+                RepoEvidenceKind::RepoDiff,
+                &repo,
+                format!(
+                    "Patch apply {}: {} file(s).",
+                    output.status, output.preview.file_count
+                ),
+                json!({
+                    "evidence_kind": "patch_apply",
+                    "operation": "patch_apply",
+                    "result": output_json,
+                }),
+            )?;
+            if let (Some(store), Some(run_id), Some(reference)) =
+                (&evidence.store, &evidence.run_id, &evidence_ref)
+            {
+                record_patch_apply_event(
+                    &RunStore::new(store.clone()),
+                    &RunId::from_string(run_id.clone()),
+                    &output,
+                    reference,
+                )?;
+            }
+            print_tool_output(serde_json::to_value(&output)?, evidence_ref)?;
+        }
+        Command::Tools {
+            command:
                 ToolsCommand::RunCommand {
                     repo,
                     cwd,
@@ -1413,6 +1530,63 @@ diff --git a/tracked.txt b/tracked.txt
 
         let preview = run_report_json(&store, &run_id, false).unwrap();
 
+        assert_eq!(preview["report"]["changed_files"][0], "tracked.txt");
+        assert_eq!(
+            preview["report"]["patch_refs"][0],
+            format!("repo-evidence://{}", reference.ref_id)
+        );
+        let _ = std::fs::remove_dir_all(repo);
+        let _ = std::fs::remove_dir_all(store_root);
+    }
+
+    #[test]
+    fn run_report_helper_blocks_on_patch_apply_approval_event() {
+        let repo = temp_root("coder-cli-repo");
+        let store_root = temp_root("coder-cli-store");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        std::fs::write(
+            repo.join("change.patch"),
+            "\
+diff --git a/tracked.txt b/tracked.txt
+--- a/tracked.txt
++++ b/tracked.txt
+@@ -1 +1 @@
+-base
++changed
+",
+        )
+        .unwrap();
+        let store = RunStore::new(&store_root);
+        let run_id = RunId::from_string("run-1");
+        let output = apply_patch_file(
+            &repo,
+            PatchApplyRequest {
+                patch_file: PathBuf::from("change.patch"),
+                max_patch_bytes: coder_tools::DEFAULT_MAX_PATCH_BYTES,
+                source: "model".to_owned(),
+                approved: false,
+            },
+        )
+        .unwrap();
+        let reference = store
+            .write_repo_evidence(
+                &run_id,
+                RepoEvidenceKind::RepoDiff,
+                repo.display().to_string(),
+                Vec::new(),
+                "Patch apply blocked.",
+                json!({
+                    "operation": "patch_apply",
+                    "result": serde_json::to_value(&output).unwrap()
+                }),
+            )
+            .unwrap();
+        record_patch_apply_event(&store, &run_id, &output, &reference).unwrap();
+
+        let preview = run_report_json(&store, &run_id, false).unwrap();
+
+        assert_eq!(preview["report"]["status"], "blocked");
         assert_eq!(preview["report"]["changed_files"][0], "tracked.txt");
         assert_eq!(
             preview["report"]["patch_refs"][0],

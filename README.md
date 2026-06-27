@@ -49,8 +49,9 @@ Run artifacts and content-addressed blobs are also readable through
 Rust can preview and write an evidence-backed final report through
 `GET /api/v3/runs/{run_id}/report/preview` and
 `POST /api/v3/runs/{run_id}/report`; the report is assembled from recorded
-events and repo evidence refs rather than model claims. Patch preview evidence
-also contributes runtime-backed `changed_files` and `patch_refs`.
+events and repo evidence refs rather than model claims. Patch preview/apply
+evidence also contributes runtime-backed `changed_files`, `patch_refs`, and
+patch blockers.
 It can also read stored repo evidence payloads through
 `GET /api/v3/runs/{run_id}/repo-evidence` and
 `GET /api/v3/repo-evidence/{ref_id}`.
@@ -63,18 +64,20 @@ memory records plus `memory.read` and `memory.write.proposed` event helpers,
 without vector retrieval.
 `coder-tools` starts the Rust-native repo evidence layer with path-safe
 file discovery, UTF-8 `read_file`, bounded line-range reads, bounded
-`search_text`, `git_status`, bounded `git_diff`, read-only `patch-preview`,
-and policy-gated `run-command` helpers. The repo evidence tools skip
-runtime/vendor directories and sensitive paths, and they do not include write,
-patch-apply, or network effects. `run-command` is argv-only, rejects cwd escapes,
-blocks model/high-risk commands until approved, and records command events when
-used with `--store <dir> --run-id <id>`.
+`search_text`, `git_status`, bounded `git_diff`, `patch-preview`,
+approval-gated `patch-apply`, and policy-gated `run-command` helpers. The repo
+evidence tools skip runtime/vendor directories and sensitive paths. `patch-apply`
+blocks model-sourced patches until approved, checks the patch before applying,
+and records patch approval/applied/failed events when run with store metadata.
+`run-command` is argv-only, rejects cwd escapes, blocks model/high-risk commands
+until approved, and records command events when used with
+`--store <dir> --run-id <id>`.
 `coder-store` can persist sanitized repo evidence payloads under
 `runs/{run_id}/repo_evidence/`, append `index.jsonl`, and return refs such as
 `repo-read:*`, `repo-text-search:*`, and `repo-file-list:*` for later reports
 and context packets.
 The `find-files`, `read-file`, `read-file-range`, `search-text`, `git-diff`,
-`patch-preview`, and `run-command` CLI tools can record those refs with
+`patch-preview`, `patch-apply`, and `run-command` CLI tools can record those refs with
 `--store <dir> --run-id <id>`. Omitting those flags keeps read-only tools
 side-effect-free and makes `run-command` skip run-state/event recording while
 still executing only after its command policy allows it. Full-file `read-file`
