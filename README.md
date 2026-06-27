@@ -176,6 +176,39 @@ See [docs/codeworker_harness_tool_loop.md](docs/codeworker_harness_tool_loop.md)
 for CodeWorker tool-loop architecture, action policy, recovery, lifecycle, and
 test commands.
 
+## Agent-Scoped Memory Plane
+
+Coder now separates legacy workflow memory compatibility from the Batch D
+agent-scoped memory plane:
+
+- `MemoryService`, `WorkflowMemoryStore`, `MemoryDelta`, and staged memory
+  writes remain the legacy workflow-memory adapter.
+- `MemoryRecord`, `KnowledgeSource`, and `KnowledgeChunk` define the RAG-ready
+  memory taxonomy with ACL metadata, sensitivity, trust level, evidence refs,
+  source refs, tags, content hash, status, and token estimates.
+- `AgentScopedMemoryStore` and `KnowledgeStore` store append-only JSONL under
+  `.coder/memory/`; they do not write memory files into the Git repo by
+  default.
+- `MemoryRetriever` applies deterministic role policies before returning
+  compact `MemoryCard` objects. Planning Chat can read planner/user/project and
+  allowed knowledge memory; Workflow Supervisor can read project/run/knowledge
+  memory; Task Execution can read only scoped workflow/knowledge context for
+  `execution_prompt`.
+- `build_harness_context_packet(...)` keeps the existing `hot`/`warm`/
+  `cold_refs` shape. Compact memory cards and knowledge hits go into `warm`;
+  full memory and knowledge records stay behind cold refs.
+- Run-scoped checkpoints are persisted under
+  `.coder/runs/{run_id}/memory/` as `checkpoints.jsonl` and
+  `latest_snapshot.json`. Snapshots include planner task state, compact
+  execution and verification summaries, blockers, changed-file summaries, and
+  evidence refs, but not raw logs, prompts, diffs, model outputs, or secrets.
+- Long-term planner file memory uses `PlannerMemoryWriteProposal` and
+  `PlannerFileMemoryCommitter`. Only Planning Chat may propose updates, and
+  user/project planner files require confirmation by default.
+- Text/Markdown knowledge imports are available without embeddings or a vector
+  database. Imported chunks are ACL-ready and retrievable through the lexical
+  `MemoryRetriever` path.
+
 Most low-level runtime behavior is feature-flagged during rollout:
 
 ```powershell
@@ -228,7 +261,8 @@ src/coder_workbench/
   context/           Context packet and skill-context construction
   core/              AgentWorkflowSpec, artifacts, authority, role cards
   extensions/        Plugin and skill manifests, routing, runtime
-  memory/            MemoryService, staged deltas, workflow memory adapter
+  memory/            Legacy workflow memory plus agent-scoped memory stores,
+                     retrieval, run snapshots, planner file proposals, imports
   observability/     Tracing and evaluation support
   runtime_capabilities/
                      Harness capability resolver, tool/MCP/skill registries
@@ -310,6 +344,9 @@ Common development endpoints:
 - `POST /api/v2/planner-chat/sessions`
 - `POST /api/v2/planner-chat/sessions/{session_id}/turn`
 - `GET /api/v2/planner-chat/sessions/{session_id}`
+- `POST /api/v2/knowledge-sources/import-text`
+- `GET /api/v2/knowledge-sources`
+- `GET /api/v2/knowledge-sources/{source_id}/chunks`
 - `GET /api/v2/library`
 - `POST /api/v2/library/agent-workflows`
 - `GET /api/v2/library/agent-workflows/{workflow_id}`
@@ -370,8 +407,11 @@ npm.cmd run build
   `run_command_sandbox`, `read_tool_output`, and `return_execution_result`.
   Executors must not use `run_command`, publish externally, install plugins, or
   enable MCP servers from inside the harness.
-- Executors cannot write long-term memory directly. Durable memory writes must
-  go through `MemoryService` as evidence-backed, staged/gated deltas.
+- Executors cannot write long-term memory directly. Legacy workflow memory
+  writes must go through `MemoryService` as evidence-backed, staged/gated
+  deltas. Long-term planner file memory must go through
+  `PlannerMemoryWriteProposal` and `PlannerFileMemoryCommitter`; Workflow
+  Supervisor and Task Execution must not write those files.
 - New tools, MCP manifests, and skills should be represented in the runtime
   capability registries before they are exposed to a harness. MCP manifests are
   parsed and validated locally and are never enabled by default.

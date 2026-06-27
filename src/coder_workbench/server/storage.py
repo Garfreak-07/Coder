@@ -132,6 +132,13 @@ class RunStore:
             events = self._externalize_tool_results(stored.id, events)
             events = self._compact_event_payloads(events)
             self._write_events(stored.id, events)
+            self._write_run_memory_snapshot(
+                stored.id,
+                workflow_id,
+                result.status,
+                result_payload.get("data", {}),
+                result.artifacts,
+            )
         return stored
 
     def get(self, run_id: str, *, include_events: bool = True) -> StoredRun:
@@ -654,6 +661,27 @@ class RunStore:
 
     def _write_events(self, run_id: str, events: list[RunEvent]) -> None:
         self.partitions.events.write(run_id, events)
+
+    def _write_run_memory_snapshot(
+        self,
+        run_id: str,
+        workflow_id: str,
+        status: str,
+        data: Any,
+        artifacts: dict[str, Any],
+    ) -> None:
+        if not isinstance(data, dict):
+            data = {}
+        from coder_workbench.memory.run_memory import RunMemoryStore, build_run_memory_snapshot
+
+        snapshot = build_run_memory_snapshot(
+            run_id=run_id,
+            workflow_id=workflow_id,
+            status=status,
+            data=data,
+            artifacts=artifacts,
+        )
+        RunMemoryStore(self.root).write_result_checkpoints(snapshot)
 
     def _externalize_context_packets(self, run_id: str, events: list[RunEvent]) -> list[RunEvent]:
         compact_events: list[RunEvent] = []

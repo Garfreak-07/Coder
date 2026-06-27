@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from coder_workbench.actions import ActionGateway
@@ -489,6 +490,12 @@ class AgentRun:
     ) -> HarnessRuntimeContext:
         shared_state = self.initial_data.get("shared_run_state")
         user_goal = request_text or str(self.initial_data.get("request") or "")
+        memory_context = self._memory_context_for_harness(
+            mode=mode,
+            user_goal=user_goal,
+            work_item=work_item,
+            task_envelope=task_envelope,
+        )
         context_packet = build_harness_context_packet(
             mode=mode,
             user_goal=user_goal,
@@ -509,6 +516,7 @@ class AgentRun:
             native_event_refs=native_event_refs,
             diff_refs=diff_refs,
             log_refs=log_refs,
+            **memory_context,
         )
         return HarnessRuntimeContext(
             run_id=self.run_id or str(self.initial_data.get("run_id") or self.agent_workflow.id),
@@ -526,6 +534,76 @@ class AgentRun:
             round_working_set=state_view,
             initial_data=self.initial_data,
         )
+
+    def _memory_context_for_harness(
+        self,
+        *,
+        mode: str,
+        user_goal: str,
+        work_item: WorkItem | None,
+        task_envelope: AgentTaskEnvelope | None,
+    ) -> dict[str, Any]:
+        request_context = {
+            "planning_chat": ("planning_chat", "assistant_message"),
+            "workflow_supervisor": ("workflow_supervisor", "workflow_supervision"),
+            "task_execution": ("task_execution", "execution_prompt"),
+        }.get(mode)
+        if request_context is None:
+            return {}
+        root = self._memory_store_root()
+        memory_root = root if root.name == "memory" else root / "memory"
+        if not memory_root.exists():
+            return {}
+        role, requested_context = request_context
+        query_parts = [user_goal]
+        if work_item is not None:
+            query_parts.append(work_item.task_summary)
+        if task_envelope is not None:
+            query_parts.append(task_envelope.task_summary)
+        try:
+            from coder_workbench.memory import (
+                AgentScopedMemoryStore,
+                KnowledgeStore,
+                MemoryRetrievalRequest,
+                MemoryRetriever,
+                policy_for_role,
+            )
+
+            request = MemoryRetrievalRequest(
+                role=role,
+                requested_context=requested_context,
+                query=" ".join(part for part in query_parts if part),
+                project_id=_optional_string(self.initial_data.get("project_id") or self.initial_data.get("repo_root")),
+                session_id=_optional_string(self.initial_data.get("planner_chat_session_id")),
+                run_id=_optional_string(self.run_id or self.initial_data.get("run_id")),
+                scope_paths=_scopes_from_data(self.initial_data),
+            )
+            cards = MemoryRetriever(
+                memory_store=AgentScopedMemoryStore(root),
+                knowledge_store=KnowledgeStore(root),
+            ).retrieve(request)
+            memory_cards = [card for card in cards if card.card_type == "memory_record"]
+            knowledge_hits = [card for card in cards if card.card_type == "knowledge_chunk"]
+            policy = policy_for_role(role)
+            used = sum(card.token_estimate for card in cards)
+            return {
+                "memory_cards": memory_cards,
+                "knowledge_hits": knowledge_hits,
+                "memory_token_budget": {
+                    "limit": min(policy.max_tokens, request.token_budget or policy.max_tokens),
+                    "used": used,
+                },
+            }
+        except Exception:
+            return {}
+
+    def _memory_store_root(self) -> Path:
+        for key in ("memory_store_root", "coder_store_root", "skill_store_root"):
+            value = self.initial_data.get(key)
+            if isinstance(value, str) and value.strip():
+                return Path(value)
+        repo_root = str(self.initial_data.get("repo_root") or ".")
+        return Path(repo_root) / ".coder"
 
     def _record_capability_set(
         self,

@@ -50,7 +50,6 @@ from coder_workbench.coding import (
     build_repo_intelligence,
     build_run_coding_eval,
 )
-from coder_workbench.memory import MemoryService
 from coder_workbench.observability import TraceContext, TraceSpan
 from coder_workbench.runtime.state import RunEvent, RunResult, summarize_value
 from coder_workbench.runtime_kernel import RunCancelled, RunControl, RunController, RunGuard
@@ -1048,6 +1047,8 @@ class AgentGraphRunner:
             next_action=data["planner_decision"]["next_action"],
         )
         try:
+            from coder_workbench.memory import MemoryService
+
             memory = MemoryService(repo_root).record_planner_round(
                 workflow_id=self.agent_workflow.id,
                 bundle=planner_input_bundle,

@@ -25,6 +25,7 @@ class PlannerLedArtifactTests(unittest.TestCase):
                 "workflow_activity_update",
                 "round_summary",
                 "final_report",
+                "planner_memory_write_proposal",
             },
         )
 

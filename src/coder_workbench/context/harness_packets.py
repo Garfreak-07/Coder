@@ -52,6 +52,10 @@ def build_harness_context_packet(
     knowledge_refs: list[str] | None = None,
     memory_refs: list[str] | None = None,
     repo_intelligence_refs: list[str] | None = None,
+    memory_cards: list[Any] | None = None,
+    knowledge_hits: list[Any] | None = None,
+    run_memory_snapshot: dict[str, Any] | None = None,
+    memory_token_budget: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     workflow_summary = workflow_summary or {"workflow_id": workflow_id}
     packet = {
@@ -139,6 +143,13 @@ def build_harness_context_packet(
         _append_refs(packet, "evidence", evidence_refs or [])
     else:
         packet["warm"]["state_summary"] = _state_summary(state_view or {})
+    _append_memory_context(
+        packet,
+        memory_cards=memory_cards,
+        knowledge_hits=knowledge_hits,
+        run_memory_snapshot=run_memory_snapshot,
+        token_budget=memory_token_budget,
+    )
     return {key: value for key, value in packet.items() if value not in (None, {}, [])}
 
 
@@ -258,6 +269,58 @@ def _append_refs(packet: dict[str, Any], ref_type: str, refs: list[str]) -> None
     clean_refs = [ref for ref in refs if ref]
     if clean_refs:
         packet.setdefault("cold_refs", []).append({"ref_type": ref_type, "refs": clean_refs})
+
+
+def _append_memory_context(
+    packet: dict[str, Any],
+    *,
+    memory_cards: list[Any] | None,
+    knowledge_hits: list[Any] | None,
+    run_memory_snapshot: dict[str, Any] | None,
+    token_budget: dict[str, Any] | None,
+) -> None:
+    cards = [_card_dict(card) for card in memory_cards or []]
+    hits = [_card_dict(card) for card in knowledge_hits or []]
+    if not hits:
+        hits = [card for card in cards if card.get("card_type") == "knowledge_chunk"]
+    memory_only = [card for card in cards if card.get("card_type") != "knowledge_chunk"]
+    if memory_only:
+        packet["warm"]["memory_cards"] = _compact_value(memory_only)
+        _append_refs(packet, "memory", [card["id"] for card in memory_only if card.get("id")])
+    if hits:
+        packet["warm"]["knowledge_hits"] = _compact_value(hits)
+        _append_refs(packet, "knowledge", [card["id"] for card in hits if card.get("id")])
+    if run_memory_snapshot:
+        packet["warm"]["run_memory_snapshot"] = _compact_value(run_memory_snapshot)
+    if token_budget:
+        packet["warm"]["memory_token_budget"] = _compact_value(token_budget)
+
+
+def _card_dict(card: Any) -> dict[str, Any]:
+    if isinstance(card, dict):
+        value = dict(card)
+    else:
+        model_dump = getattr(card, "model_dump", None)
+        value = model_dump(mode="json") if callable(model_dump) else {"id": str(card), "summary": str(card)}
+    return {
+        key: item
+        for key, item in value.items()
+        if key
+        in {
+            "id",
+            "title",
+            "summary",
+            "scope",
+            "purpose",
+            "source_refs",
+            "evidence_refs",
+            "tags",
+            "token_estimate",
+            "score",
+            "card_type",
+        }
+        and item not in (None, "", [])
+    }
 
 
 __all__ = ["build_harness_context_packet"]

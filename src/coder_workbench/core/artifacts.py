@@ -14,6 +14,7 @@ from coder_workbench.core.planner_artifacts import (
     PlannerArtifactType,
     planner_artifact_summary,
 )
+from coder_workbench.memory.planner_file_memory import PlannerMemoryWriteProposal
 
 
 ArtifactType = Literal[
@@ -27,11 +28,13 @@ ArtifactType = Literal[
     "workflow_activity_update",
     "round_summary",
     "final_report",
+    "planner_memory_write_proposal",
 ]
 
 ARTIFACT_MODELS: dict[str, type[BaseModel]] = {
     **PLANNER_ARTIFACT_MODELS,
     **PLANNER_CHAT_ARTIFACT_MODELS,
+    "planner_memory_write_proposal": PlannerMemoryWriteProposal,
 }
 
 

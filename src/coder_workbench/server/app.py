@@ -33,6 +33,7 @@ from coder_workbench.harness_runtime import (
     OpenHandsRuntimeProvider,
 )
 from coder_workbench.harness_runtime.fallback_provider import InternalFallbackProvider
+from coder_workbench.memory import KnowledgeStore, KnowledgeTextImportRequest, import_text_knowledge_source
 from coder_workbench.server.agent_manager import AgentGraphRunManager
 from coder_workbench.server.library import LibraryStore
 from coder_workbench.server.planner_chat_sessions import (
@@ -413,6 +414,32 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
             "agent_workflows": library.list_agent_workflows(),
         }
 
+    @app.post("/api/v2/knowledge-sources/import-text")
+    def import_text_knowledge_source_endpoint(body: KnowledgeTextImportRequest) -> dict[str, Any]:
+        try:
+            result = import_text_knowledge_source(KnowledgeStore(store_root), body)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return result.model_dump(mode="json")
+
+    @app.get("/api/v2/knowledge-sources")
+    def list_knowledge_sources() -> dict[str, Any]:
+        return {
+            "sources": [
+                source.model_dump(mode="json")
+                for source in KnowledgeStore(store_root).list_sources()
+            ]
+        }
+
+    @app.get("/api/v2/knowledge-sources/{source_id}/chunks")
+    def list_knowledge_source_chunks(source_id: str) -> dict[str, Any]:
+        return {
+            "chunks": [
+                chunk.model_dump(mode="json")
+                for chunk in KnowledgeStore(store_root).list_chunks(source_id=source_id)
+            ]
+        }
+
     @app.post("/api/v2/library/agents")
     def save_agent(agent: dict[str, Any]) -> dict[str, Any]:
         return {"agent": library.save_agent(agent)}
@@ -500,6 +527,11 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
             skill_pack_ids=body.skill_pack_ids,
             memory_pack_ids=body.memory_pack_ids,
         )
+        memory_context = _planner_chat_memory_context(
+            store_root=store_root,
+            query=body.request.strip(),
+            repo=body.repo,
+        )
         context_packet = build_harness_context_packet(
             mode="planning_chat",
             user_goal=body.request.strip(),
@@ -519,6 +551,7 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
             selected_knowledge_pack_ids=body.knowledge_pack_ids,
             selected_skill_pack_ids=body.skill_pack_ids,
             selected_memory_pack_ids=body.memory_pack_ids,
+            **memory_context,
         )
         runtime_context = HarnessRuntimeContext(
             run_id=f"planner-chat-draft-{draft_id}",
@@ -678,6 +711,12 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
         if planner is None or planner.role != "planner":
             raise HTTPException(status_code=400, detail="planner_agent_id must point to a Planner agent")
 
+        memory_context = _planner_chat_memory_context(
+            store_root=store_root,
+            query=message,
+            repo=session.repo,
+            session_id=session.session_id,
+        )
         context_packet = build_harness_context_packet(
             mode="planning_chat",
             user_goal=message,
@@ -694,6 +733,7 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
             selected_knowledge_pack_ids=session.knowledge_pack_ids,
             selected_skill_pack_ids=session.skill_pack_ids,
             selected_memory_pack_ids=session.memory_pack_ids,
+            **memory_context,
         )
         context_packet.setdefault("hot", {})["planner_interaction_mode"] = interaction_mode
         runtime_context = HarnessRuntimeContext(
@@ -1008,6 +1048,52 @@ def _planning_chat_fallback_runner(
     if turn_payload is not None:
         return dict(turn_payload)
     return dict(draft_payload or {})
+
+
+def _planner_chat_memory_context(
+    *,
+    store_root: str | Path,
+    query: str,
+    repo: str | None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    root = Path(store_root)
+    memory_root = root if root.name == "memory" else root / "memory"
+    if not memory_root.exists():
+        return {}
+    try:
+        from coder_workbench.memory import (
+            AgentScopedMemoryStore,
+            KnowledgeStore,
+            MemoryRetrievalRequest,
+            MemoryRetriever,
+            policy_for_role,
+        )
+
+        request = MemoryRetrievalRequest(
+            role="planning_chat",
+            requested_context="assistant_message",
+            query=query,
+            project_id=str(repo) if repo else None,
+            session_id=session_id,
+        )
+        cards = MemoryRetriever(
+            memory_store=AgentScopedMemoryStore(root),
+            knowledge_store=KnowledgeStore(root),
+        ).retrieve(request)
+        memory_cards = [card for card in cards if card.card_type == "memory_record"]
+        knowledge_hits = [card for card in cards if card.card_type == "knowledge_chunk"]
+        policy = policy_for_role("planning_chat")
+        return {
+            "memory_cards": memory_cards,
+            "knowledge_hits": knowledge_hits,
+            "memory_token_budget": {
+                "limit": policy.max_tokens,
+                "used": sum(card.token_estimate for card in cards),
+            },
+        }
+    except Exception:
+        return {}
 
 
 def _planner_chat_draft_payloads(
