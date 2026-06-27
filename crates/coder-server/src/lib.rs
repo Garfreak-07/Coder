@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{collections::BTreeSet, net::SocketAddr};
 
 use axum::{
     extract::{Path, State},
@@ -7,7 +7,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use coder_config::{validate_project_config, ProjectConfig, ValidationReport};
+use coder_config::{
+    validate_project_config, ProjectConfig, ValidationIssue, ValidationLevel, ValidationReport,
+};
 use coder_core::{FinalReport, RunId, RunState};
 use coder_store::{RunStore, StoreError};
 use coder_workflow::{MockWorkflowRunner, WorkflowError};
@@ -30,6 +32,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v3/health", get(health))
         .route("/api/v3/config/validate", post(validate_config))
         .route("/api/v3/workflows/validate", post(validate_workflow))
+        .route("/api/v3/runs/preview", post(preview_run))
         .route("/api/v3/runs/mock", post(run_mock_workflow))
         .route("/api/v3/runs/{run_id}", get(get_run_detail))
         .route("/api/v3/runs/{run_id}/events", get(list_run_events))
@@ -78,6 +81,57 @@ async fn run_mock_workflow(
         report: output.report,
         events_url: format!("/api/v3/runs/{}/events", output.run_id.as_str()),
     }))
+}
+
+async fn preview_run(Json(request): Json<RunPreviewRequest>) -> Json<RunPreviewResponse> {
+    let mut issues = validate_project_config(&request.config).issues;
+    let workflow = request.config.workflows.get(&request.workflow_id);
+    if workflow.is_none() {
+        issues.push(validation_issue(
+            ValidationLevel::Error,
+            "workflow_not_found",
+            format!("workflow '{}' was not found", request.workflow_id),
+            "workflow_id",
+        ));
+    }
+    if request.task.trim().is_empty() {
+        issues.push(validation_issue(
+            ValidationLevel::Error,
+            "task_empty",
+            "task must not be empty",
+            "task",
+        ));
+    }
+
+    let status = if issues
+        .iter()
+        .any(|issue| issue.level == ValidationLevel::Error)
+    {
+        "blocked"
+    } else {
+        "ready"
+    };
+    let backends = workflow
+        .map(|workflow| {
+            workflow
+                .nodes
+                .iter()
+                .filter_map(|node| request.config.harnesses.get(&node.harness))
+                .map(|harness| harness.backend.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Json(RunPreviewResponse {
+        status,
+        requires_confirmation: status == "ready",
+        workflow_id: request.workflow_id,
+        task: request.task,
+        backends,
+        issues,
+    })
 }
 
 async fn list_run_events(
@@ -139,6 +193,13 @@ pub struct MockRunRequest {
     pub task: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RunPreviewRequest {
+    pub config: ProjectConfig,
+    pub workflow_id: String,
+    pub task: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct MockRunResponse {
     pub run_id: String,
@@ -159,6 +220,30 @@ pub struct RunDetailResponse {
     pub metadata: Option<RunState>,
     pub events: Vec<coder_events::CoderEvent>,
     pub report: Option<FinalReport>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunPreviewResponse {
+    pub status: &'static str,
+    pub requires_confirmation: bool,
+    pub workflow_id: String,
+    pub task: String,
+    pub backends: Vec<String>,
+    pub issues: Vec<ValidationIssue>,
+}
+
+fn validation_issue(
+    level: ValidationLevel,
+    code: impl Into<String>,
+    message: impl Into<String>,
+    target: impl Into<String>,
+) -> ValidationIssue {
+    ValidationIssue {
+        level,
+        code: code.into(),
+        message: message.into(),
+        target: target.into(),
+    }
 }
 
 #[derive(Debug)]
@@ -258,6 +343,63 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["status"], "pass");
+    }
+
+    #[tokio::test]
+    async fn run_preview_is_side_effect_free_and_reports_ready() {
+        let root = temp_root();
+        let app = router(ApiState::new(RunStore::new(&root)));
+        let response = post_json(
+            app,
+            "/api/v3/runs/preview",
+            json!({
+                "config": example_config(),
+                "workflow_id": "planner-led",
+                "task": "summarize the repo"
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["status"], "ready");
+        assert_eq!(body["requires_confirmation"], true);
+        assert_eq!(body["issues"].as_array().unwrap().len(), 0);
+        assert!(body["backends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|backend| backend.as_str() == Some("openhands")));
+        assert!(!root.join("runs").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn run_preview_blocks_missing_workflow_and_empty_task() {
+        let app = test_router();
+        let response = post_json(
+            app,
+            "/api/v3/runs/preview",
+            json!({
+                "config": example_config(),
+                "workflow_id": "missing",
+                "task": "  "
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["status"], "blocked");
+        assert_eq!(body["requires_confirmation"], false);
+        let codes = body["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|issue| issue["code"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(codes.contains(&"workflow_not_found"));
+        assert!(codes.contains(&"task_empty"));
     }
 
     #[tokio::test]

@@ -31,6 +31,8 @@ workflow path.
 The Rust API v3 server can read these runs through
 `GET /api/v3/runs/{run_id}` and `GET /api/v3/runs/{run_id}/events` when it is
 started with the same `--store` directory.
+`POST /api/v3/runs/preview` provides a side-effect-free readiness and
+confirmation gate for a requested Rust workflow run.
 
 Rust checks:
 
