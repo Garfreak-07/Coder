@@ -124,6 +124,43 @@ class HarnessContextPacketTests(unittest.TestCase):
             ],
         )
 
+    def test_packet_separates_repo_evidence_from_knowledge_hints(self) -> None:
+        packet = build_harness_context_packet(
+            mode="task_execution",
+            user_goal="Use repo context.",
+            workflow_id="workflow",
+            agent_id="executor",
+            task_envelope={"round": 1, "work_item_id": "work", "task_summary": "Use repo context.", "planner_order_ref": "order"},
+            repo_evidence=[
+                {
+                    "ref_id": "repo-read:1",
+                    "kind": "repo_read",
+                    "evidence_kind": "repo_evidence",
+                    "path": "src/app.py",
+                    "start_line": 1,
+                    "end_line": 2,
+                    "text": "x" * 5000,
+                }
+            ],
+            knowledge_hints=[
+                {
+                    "id": "hint-1",
+                    "source": "hybrid_rag",
+                    "evidence_kind": "knowledge_hint",
+                    "summary": "Old design note.",
+                    "source_refs": ["knowledge-source-1"],
+                    "requires_repo_verification": True,
+                }
+            ],
+            repo_evidence_refs=["repo-read:1"],
+        )
+
+        self.assertEqual(packet["warm"]["repo_evidence"][0]["evidence_kind"], "repo_evidence")
+        self.assertEqual(packet["warm"]["knowledge_hints"][0]["evidence_kind"], "knowledge_hint")
+        self.assertNotIn("x" * 5000, str(packet))
+        self.assertIn({"ref_type": "repo_evidence", "refs": ["repo-read:1"]}, packet["cold_refs"])
+        self.assertIn({"ref_type": "knowledge", "refs": ["knowledge-source-1", "hint-1"]}, packet["cold_refs"])
+
     def test_agent_run_harness_context_carries_task_execution_packet(self) -> None:
         workflow = default_planner_led_agent_workflow()
         item = WorkItem(

@@ -181,6 +181,34 @@ class MemoryContextIntegrationTests(unittest.TestCase):
         self.assertNotIn("knowledge_hits", packet["warm"])
         self.assertNotIn("memory_token_budget", packet["warm"])
 
+    def test_knowledge_hints_do_not_merge_into_repo_evidence(self) -> None:
+        packet = build_harness_context_packet(
+            mode="planning_chat",
+            user_goal="Plan with hints.",
+            workflow_id="workflow",
+            agent_id="planner",
+            knowledge_hints=[
+                {
+                    "id": "hint-1",
+                    "source": "hybrid_rag",
+                    "summary": "Historical note.",
+                    "evidence_kind": "knowledge_hint",
+                    "requires_repo_verification": True,
+                }
+            ],
+            repo_evidence=[
+                {
+                    "ref_id": "repo-text-search:1",
+                    "kind": "repo_text_search",
+                    "summary": "Current repo search hit.",
+                    "evidence_kind": "repo_evidence",
+                }
+            ],
+        )
+
+        self.assertEqual(packet["warm"]["knowledge_hints"][0]["id"], "hint-1")
+        self.assertEqual(packet["warm"]["repo_evidence"][0]["kind"], "repo_text_search")
+
     def test_agent_run_task_execution_context_loads_scoped_knowledge(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / ".coder"

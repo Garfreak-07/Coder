@@ -54,6 +54,9 @@ def build_harness_context_packet(
     repo_intelligence_refs: list[str] | None = None,
     memory_cards: list[Any] | None = None,
     knowledge_hits: list[Any] | None = None,
+    repo_evidence: list[Any] | None = None,
+    knowledge_hints: list[Any] | None = None,
+    repo_evidence_refs: list[str] | None = None,
     run_memory_snapshot: dict[str, Any] | None = None,
     memory_token_budget: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -143,6 +146,12 @@ def build_harness_context_packet(
         _append_refs(packet, "evidence", evidence_refs or [])
     else:
         packet["warm"]["state_summary"] = _state_summary(state_view or {})
+    _append_repo_context(
+        packet,
+        repo_evidence=repo_evidence,
+        knowledge_hints=knowledge_hints,
+        repo_evidence_refs=repo_evidence_refs,
+    )
     _append_memory_context(
         packet,
         memory_cards=memory_cards,
@@ -296,6 +305,31 @@ def _append_memory_context(
         packet["warm"]["memory_token_budget"] = _compact_value(token_budget)
 
 
+def _append_repo_context(
+    packet: dict[str, Any],
+    *,
+    repo_evidence: list[Any] | None,
+    knowledge_hints: list[Any] | None,
+    repo_evidence_refs: list[str] | None,
+) -> None:
+    evidence_items = [_evidence_dict(item) for item in repo_evidence or []]
+    hint_items = [_evidence_dict(item) for item in knowledge_hints or []]
+    if evidence_items:
+        packet["warm"]["repo_evidence"] = _compact_value(evidence_items)
+    if hint_items:
+        packet["warm"]["knowledge_hints"] = _compact_value(hint_items)
+    refs = list(repo_evidence_refs or [])
+    refs.extend(str(item.get("ref_id")) for item in evidence_items if item.get("ref_id"))
+    refs.extend(str(item.get("evidence_ref")) for item in evidence_items if item.get("evidence_ref"))
+    _append_refs(packet, "repo_evidence", _unique_strings(refs))
+    knowledge_refs: list[str] = []
+    for hint in hint_items:
+        knowledge_refs.extend(str(ref) for ref in hint.get("source_refs") or [] if str(ref))
+        if hint.get("id"):
+            knowledge_refs.append(str(hint["id"]))
+    _append_refs(packet, "knowledge", _unique_strings(knowledge_refs))
+
+
 def _card_dict(card: Any) -> dict[str, Any]:
     if isinstance(card, dict):
         value = dict(card)
@@ -318,9 +352,56 @@ def _card_dict(card: Any) -> dict[str, Any]:
             "token_estimate",
             "score",
             "card_type",
+            "evidence_kind",
+            "requires_repo_verification",
         }
         and item not in (None, "", [])
     }
+
+
+def _evidence_dict(item: Any) -> dict[str, Any]:
+    if isinstance(item, dict):
+        value = dict(item)
+    else:
+        model_dump = getattr(item, "model_dump", None)
+        value = model_dump(mode="json", exclude_none=True) if callable(model_dump) else {"summary": str(item)}
+    return {
+        key: entry
+        for key, entry in value.items()
+        if key
+        in {
+            "id",
+            "ref_id",
+            "evidence_ref",
+            "kind",
+            "evidence_kind",
+            "source",
+            "title",
+            "summary",
+            "path",
+            "line",
+            "start_line",
+            "end_line",
+            "text",
+            "truncated",
+            "source_refs",
+            "confidence",
+            "requires_repo_verification",
+        }
+        and entry not in (None, "", [])
+    }
+
+
+def _unique_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        output.append(text)
+    return output
 
 
 __all__ = ["build_harness_context_packet"]
