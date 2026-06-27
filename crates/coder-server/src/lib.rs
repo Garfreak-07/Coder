@@ -8,7 +8,7 @@ use axum::{
     Json, Router,
 };
 use coder_config::{validate_project_config, ProjectConfig, ValidationReport};
-use coder_core::RunId;
+use coder_core::{FinalReport, RunId, RunState};
 use coder_store::{RunStore, StoreError};
 use coder_workflow::{MockWorkflowRunner, WorkflowError};
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v3/config/validate", post(validate_config))
         .route("/api/v3/workflows/validate", post(validate_workflow))
         .route("/api/v3/runs/mock", post(run_mock_workflow))
+        .route("/api/v3/runs/{run_id}", get(get_run_detail))
         .route("/api/v3/runs/{run_id}/events", get(list_run_events))
         .with_state(state)
 }
@@ -91,6 +92,28 @@ async fn list_run_events(
     }))
 }
 
+async fn get_run_detail(
+    State(state): State<ApiState>,
+    Path(run_id): Path<String>,
+) -> Result<Json<RunDetailResponse>, ApiError> {
+    let run_id = RunId::from_string(run_id);
+    let metadata = state.store.read_metadata(&run_id)?;
+    let events = state.store.read_events(&run_id)?;
+    let report = state.store.read_report(&run_id)?;
+    if metadata.is_none() && events.is_empty() && report.is_none() {
+        return Err(ApiError::not_found(format!(
+            "run '{}' was not found",
+            run_id.as_str()
+        )));
+    }
+    Ok(Json(RunDetailResponse {
+        run_id: run_id.to_string(),
+        metadata,
+        events,
+        report,
+    }))
+}
+
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     status: &'static str,
@@ -128,6 +151,14 @@ pub struct MockRunResponse {
 pub struct RunEventsResponse {
     pub run_id: String,
     pub events: Vec<coder_events::CoderEvent>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunDetailResponse {
+    pub run_id: String,
+    pub metadata: Option<RunState>,
+    pub events: Vec<coder_events::CoderEvent>,
+    pub report: Option<FinalReport>,
 }
 
 #[derive(Debug)]
@@ -247,8 +278,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         let events_url = body["events_url"].as_str().unwrap();
+        let run_id = body["run_id"].as_str().unwrap();
 
         let events_response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri(events_url)
@@ -260,6 +293,24 @@ mod tests {
         assert_eq!(events_response.status(), StatusCode::OK);
         let events_body = response_json(events_response).await;
         assert_eq!(events_body["events"][0]["kind"], "run.started");
+
+        let detail_response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v3/runs/{run_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(detail_response.status(), StatusCode::OK);
+        let detail_body = response_json(detail_response).await;
+        assert_eq!(detail_body["metadata"]["status"], "completed");
+        assert_eq!(detail_body["report"]["status"], "completed");
+        assert_eq!(
+            detail_body["report"]["evidence_refs"][0]["kind"],
+            "event_log"
+        );
         let _ = fs::remove_dir_all(root);
     }
 

@@ -22,6 +22,9 @@ cargo run -p coder-cli --bin coder-rust -- server --host 127.0.0.1 --port 8766
 `events.jsonl`, raw OpenHands event blob refs, and a `final-report.json`
 artifact so the spike follows the same evidence-first run shape as the mock
 workflow path.
+The Rust API v3 server can read these runs through
+`GET /api/v3/runs/{run_id}` and `GET /api/v3/runs/{run_id}/events` when it is
+started with the same `--store` directory.
 
 Rust checks:
 

@@ -6,7 +6,7 @@ use std::{
 
 use coder_core::{FinalReport, RunId, RunState};
 use coder_events::{CoderEvent, LargePayloadRef, DEFAULT_LARGE_PAYLOAD_PREVIEW_LIMIT};
-use serde::Serialize;
+use serde::{de::DeserializeOwned, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -22,6 +22,10 @@ impl RunStore {
 
     pub fn write_metadata(&self, state: &RunState) -> Result<(), StoreError> {
         write_json(self.run_dir(&state.run_id).join("metadata.json"), state)
+    }
+
+    pub fn read_metadata(&self, run_id: &RunId) -> Result<Option<RunState>, StoreError> {
+        read_json_optional(self.run_dir(run_id).join("metadata.json"))
     }
 
     pub fn append_event(&self, run_id: &RunId, event: &CoderEvent) -> Result<(), StoreError> {
@@ -51,6 +55,14 @@ impl RunStore {
 
     pub fn write_report(&self, run_id: &RunId, report: &FinalReport) -> Result<String, StoreError> {
         self.write_artifact(run_id, "final-report.json", report)
+    }
+
+    pub fn read_report(&self, run_id: &RunId) -> Result<Option<FinalReport>, StoreError> {
+        read_json_optional(
+            self.run_dir(run_id)
+                .join("artifacts")
+                .join("final-report.json"),
+        )
     }
 
     pub fn write_artifact<T: Serialize>(
@@ -112,6 +124,17 @@ fn write_json(path: impl AsRef<Path>, value: &impl Serialize) -> Result<(), Stor
     ensure_parent(path)?;
     fs::write(path, serde_json::to_string_pretty(value)?)?;
     Ok(())
+}
+
+fn read_json_optional<T: DeserializeOwned>(
+    path: impl AsRef<Path>,
+) -> Result<Option<T>, StoreError> {
+    let path = path.as_ref();
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = fs::read_to_string(path)?;
+    Ok(Some(serde_json::from_str(&text)?))
 }
 
 fn ensure_parent(path: &Path) -> Result<(), StoreError> {
@@ -199,6 +222,26 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(error, StoreError::InvalidFileName(_)));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn metadata_and_report_roundtrip() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run_test");
+        let mut state = RunState::new(run_id.clone(), coder_core::WorkflowId::new("workflow"));
+        state.status = coder_core::RunStatus::Completed;
+        let report = FinalReport::completed("done").with_evidence("event_log", "eventlog://run");
+
+        store.write_metadata(&state).unwrap();
+        store.write_report(&run_id, &report).unwrap();
+
+        let loaded_state = store.read_metadata(&run_id).unwrap().unwrap();
+        let loaded_report = store.read_report(&run_id).unwrap().unwrap();
+        assert_eq!(loaded_state.status, coder_core::RunStatus::Completed);
+        assert_eq!(loaded_report.summary, "done");
+        assert_eq!(loaded_report.evidence_refs[0].kind, "event_log");
         let _ = fs::remove_dir_all(root);
     }
 
