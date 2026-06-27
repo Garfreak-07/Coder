@@ -23,6 +23,8 @@ import type {
   RunEvent,
   RunEventsPage,
   RunSummaryItem,
+  RustProjectConfig,
+  RustValidationReport,
   SkillUpdateInfo,
   StoredRunDetail,
   ToolResultDetail
@@ -237,6 +239,14 @@ export function validateAgentWorkflow(agentWorkflow: AgentWorkflowSpec): Promise
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify(agentWorkflow)
+  });
+}
+
+export function validateRustWorkflowSpec(config: RustProjectConfig, workflowId: string): Promise<RustValidationReport> {
+  return requestJson<RustValidationReport>("/api/v3/workflows/validate", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({ config, workflow_id: workflowId })
   });
 }
 

@@ -51,6 +51,15 @@ import {
   toAgentFlowEdges,
   toAgentFlowNodes
 } from "./workflowGraph";
+import {
+  isRustProjectConfig,
+  isRustWorkflowExport,
+  legacyCanvasToWorkflowExport,
+  legacyCanvasToWorkflowSpec,
+  parseWorkflowImport,
+  validateRustCanvasConfig,
+  workflowExportToProjectConfig
+} from "./workflowSpecAdapter";
 import type {
   AgentModelTier,
   AgentWorkflowAgent,
@@ -324,8 +333,15 @@ export function App() {
 
   function exportWorkflow() {
     const workflow = normalizeAgentWorkflow(agentWorkflow);
-    downloadJson(`${workflow.id || "agent-workflow"}.json`, workflow);
-    setStatus(`Exported Agent workflow ${workflow.id || "agent-workflow"}`);
+    const exported = legacyCanvasToWorkflowExport(workflow);
+    const validation = validateRustCanvasConfig(exported, exported.workflow_id);
+    setAgentWorkflowValidation(validation);
+    downloadJson(`${workflow.id || "agent-workflow"}.coder-workflow.json`, exported);
+    setStatus(
+      validation.status === "error"
+        ? `Exported Agent workflow ${workflow.id || "agent-workflow"} with validation errors`
+        : `Exported Agent workflow ${workflow.id || "agent-workflow"}`
+    );
   }
 
   function importWorkflow(file: File | null) {
@@ -333,14 +349,31 @@ export function App() {
     file
       .text()
       .then(async (text) => {
-        const raw = JSON.parse(text) as AgentWorkflowSpec;
-        const rawId = String(raw.id ?? "imported-workflow");
+        const raw = JSON.parse(text) as unknown;
+        const imported = parseWorkflowImport(raw);
+        const rustConfig =
+          isRustWorkflowExport(raw) || isRustProjectConfig(raw)
+            ? workflowExportToProjectConfig(raw)
+            : legacyCanvasToWorkflowSpec(imported);
+        const rustWorkflowId =
+          isRustWorkflowExport(raw)
+            ? raw.workflow_id
+            : isRustProjectConfig(raw)
+              ? Object.keys(raw.workflows)[0] ?? imported.id
+              : imported.id;
+        const rustValidation = validateRustCanvasConfig(rustConfig, rustWorkflowId);
+        const rawId = String(imported.id ?? "imported-workflow");
         const idExists = library.agent_workflows.some((workflow) => workflow.id === rawId);
         const parsed = normalizeAgentWorkflow({
-          ...raw,
+          ...imported,
           id: idExists ? `${rawId}-${Date.now()}` : rawId
         });
         setCurrentAgentWorkflow(parsed);
+        if (rustValidation.status === "error") {
+          setAgentWorkflowValidation(rustValidation);
+          setStatus(`Imported Agent workflow ${parsed.id} with validation errors`);
+          return;
+        }
         const validation = await validateAgentWorkflow(parsed);
         setAgentWorkflowValidation(validation);
         if (validation.status !== "error") {

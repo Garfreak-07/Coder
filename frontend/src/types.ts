@@ -94,6 +94,123 @@ export interface AgentWorkflowSpec {
   };
 }
 
+export type RustMemoryScope =
+  | "user"
+  | "project"
+  | "agent"
+  | "workflow"
+  | "run"
+  | "repo_facts"
+  | "knowledge_hints"
+  | "external_docs";
+
+export type RustPermissionDecision = "allow" | "ask" | "deny";
+
+export interface RustModelSpec {
+  provider: string;
+  model: string;
+  base_url_env?: string | null;
+  api_key_env?: string | null;
+}
+
+export interface RustMemoryAccess {
+  read: RustMemoryScope[];
+  write: RustMemoryScope[];
+}
+
+export interface RustAgentSpec {
+  role: string;
+  model: string;
+  system: string;
+  memory: RustMemoryAccess;
+  output_contract: string;
+}
+
+export interface RustPermissionPolicy {
+  read_files: RustPermissionDecision;
+  write_files: RustPermissionDecision;
+  run_commands: RustPermissionDecision;
+  network: RustPermissionDecision;
+  secrets: RustPermissionDecision;
+  publish_external: RustPermissionDecision;
+  git_commit: RustPermissionDecision;
+  git_push: RustPermissionDecision;
+  deploy: RustPermissionDecision;
+}
+
+export interface RustOpenHandsHarnessConfig {
+  server_url: string;
+  session_api_key_env?: string | null;
+  workspace_mode?: string | null;
+}
+
+export interface RustVerificationPolicy {
+  require_evidence: boolean;
+  allowed_checks: string[];
+}
+
+export interface RustHarnessSpec {
+  backend: string;
+  openhands?: RustOpenHandsHarnessConfig | null;
+  tools: string[];
+  permissions: RustPermissionPolicy;
+  memory: RustMemoryAccess;
+  verification: RustVerificationPolicy;
+}
+
+export interface RustWorkflowNodeSpec {
+  id: string;
+  agent: string;
+  harness: string;
+}
+
+export interface RustWorkflowEdgeSpec {
+  from: string;
+  to: string;
+  on: string;
+}
+
+export interface RustStopPolicy {
+  on_status: string[];
+  final_report_agent?: string | null;
+}
+
+export interface RustWorkflowSpec {
+  name: string;
+  max_rounds: number;
+  nodes: RustWorkflowNodeSpec[];
+  edges: RustWorkflowEdgeSpec[];
+  stop: RustStopPolicy;
+}
+
+export interface RustProjectConfig {
+  version: 1;
+  models: Record<string, RustModelSpec>;
+  agents: Record<string, RustAgentSpec>;
+  harnesses: Record<string, RustHarnessSpec>;
+  workflows: Record<string, RustWorkflowSpec>;
+}
+
+export interface RustWorkflowExport extends RustProjectConfig {
+  kind: "coder.workflow";
+  workflow_id: string;
+  workflow: RustWorkflowSpec;
+  ui?: AgentWorkflowSpec["ui"];
+  legacy_agent_workflow?: AgentWorkflowSpec;
+}
+
+export interface RustValidationIssue {
+  level: "Error" | "Warning" | string;
+  code: string;
+  message: string;
+  target: string;
+}
+
+export interface RustValidationReport {
+  status: "pass" | "warning" | "error" | string;
+  issues: RustValidationIssue[];
+}
+
 export interface PreflightIssue {
   level: "error" | "warning" | string;
   code: string;
