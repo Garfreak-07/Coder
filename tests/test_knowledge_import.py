@@ -87,12 +87,42 @@ class KnowledgeImportTests(unittest.TestCase):
             )
 
             self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()["index_dirty"])
             source_id = response.json()["source"]["source_id"]
             sources = client.get("/api/v2/knowledge-sources").json()["sources"]
             chunks = client.get(f"/api/v2/knowledge-sources/{source_id}/chunks").json()["chunks"]
 
             self.assertEqual(sources[0]["source_id"], source_id)
             self.assertEqual(len(chunks), 2)
+
+    def test_api_reindex_and_status_endpoints(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            client = TestClient(create_app(store_root=tmp, frontend_dist=tmp))
+            client.post(
+                "/api/v2/knowledge-sources/import-text",
+                json=_request(text="# Runtime\n\nFunction PlannerTaskState controls readiness.").model_dump(mode="json"),
+            )
+
+            reindex = client.post("/api/v2/rag/reindex")
+            status = client.get("/api/v2/rag/status")
+
+            self.assertEqual(reindex.status_code, 200)
+            self.assertEqual(reindex.json()["status"], "completed")
+            self.assertGreaterEqual(reindex.json()["bm25_indexed"], 1)
+            self.assertEqual(status.status_code, 200)
+            self.assertGreaterEqual(status.json()["bm25_indexed"], 1)
+
+    def test_chroma_unavailable_does_not_break_import(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            client = TestClient(create_app(store_root=tmp, frontend_dist=tmp))
+
+            response = client.post(
+                "/api/v2/knowledge-sources/import-text",
+                json=_request().model_dump(mode="json"),
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertTrue(response.json()["index_dirty"])
 
     def test_import_rejects_empty_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

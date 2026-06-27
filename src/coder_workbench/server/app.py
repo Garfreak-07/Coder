@@ -34,6 +34,7 @@ from coder_workbench.harness_runtime import (
 )
 from coder_workbench.harness_runtime.fallback_provider import InternalFallbackProvider
 from coder_workbench.memory import KnowledgeStore, KnowledgeTextImportRequest, import_text_knowledge_source
+from coder_workbench.memory.hybrid_index import HybridIndexManager
 from coder_workbench.server.agent_manager import AgentGraphRunManager
 from coder_workbench.server.library import LibraryStore
 from coder_workbench.server.planner_chat_sessions import (
@@ -420,7 +421,9 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
             result = import_text_knowledge_source(KnowledgeStore(store_root), body)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return result.model_dump(mode="json")
+        payload = result.model_dump(mode="json")
+        payload["index_dirty"] = True
+        return payload
 
     @app.get("/api/v2/knowledge-sources")
     def list_knowledge_sources() -> dict[str, Any]:
@@ -439,6 +442,15 @@ def create_app(store_root: str | Path = ".coder", frontend_dist: str | Path | No
                 for chunk in KnowledgeStore(store_root).list_chunks(source_id=source_id)
             ]
         }
+
+    @app.post("/api/v2/rag/reindex")
+    def rebuild_rag_index() -> dict[str, Any]:
+        status = HybridIndexManager(store_root).rebuild()
+        return {"status": "completed", **status.model_dump(mode="json")}
+
+    @app.get("/api/v2/rag/status")
+    def rag_index_status() -> dict[str, Any]:
+        return HybridIndexManager(store_root).status().model_dump(mode="json")
 
     @app.post("/api/v2/library/agents")
     def save_agent(agent: dict[str, Any]) -> dict[str, Any]:
