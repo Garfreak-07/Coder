@@ -13,6 +13,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 coder-config.workspace = true
+coder-core.workspace = true
 coder-openhands.workspace = true
 coder-store.workspace = true
 coder-workflow.workspace = true

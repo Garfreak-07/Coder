@@ -171,6 +171,7 @@ dependencies = [
  "anyhow",
  "clap",
  "coder-config",
+ "coder-core",
  "coder-openhands",
  "coder-store",
  "coder-workflow",
@@ -223,9 +224,13 @@ dependencies = [
 name = "coder-openhands"
 version = "0.1.0"
 dependencies = [
+ "coder-core",
+ "coder-events",
  "reqwest",
  "serde",
+ "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

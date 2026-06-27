@@ -1,8 +1,9 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use clap::{Parser, Subcommand};
 use coder_config::{load_project_config, validate_project_config};
-use coder_openhands::{OpenHandsClient, OpenHandsServerConfig};
+use coder_core::RunId;
+use coder_openhands::{normalize_openhands_event, OpenHandsClient, OpenHandsServerConfig};
 use coder_store::RunStore;
 use coder_workflow::MockWorkflowRunner;
 
@@ -64,6 +65,19 @@ enum OpenHandsCommand {
         server: String,
         #[arg(long)]
         session_api_key_env: Option<String>,
+    },
+    Run {
+        #[arg(long)]
+        server: String,
+        #[arg(long)]
+        session_api_key_env: Option<String>,
+        #[arg(long)]
+        conversation_id: Option<String>,
+        #[arg(long)]
+        create_payload: Option<PathBuf>,
+        #[arg(long, default_value = ".coder-rust-openhands")]
+        store: PathBuf,
+        task: String,
     },
 }
 
@@ -131,6 +145,69 @@ async fn main() -> anyhow::Result<()> {
             if !health.available {
                 std::process::exit(1);
             }
+        }
+        Command::Openhands {
+            command:
+                OpenHandsCommand::Run {
+                    server,
+                    session_api_key_env,
+                    conversation_id,
+                    create_payload,
+                    store,
+                    task,
+                },
+        } => {
+            let client = OpenHandsClient::new(OpenHandsServerConfig {
+                server_url: server,
+                session_api_key_env,
+            });
+            let conversation = match (conversation_id, create_payload) {
+                (Some(conversation_id), None) => {
+                    client.attach_conversation(&conversation_id).await?
+                }
+                (None, Some(create_payload)) => {
+                    let text = fs::read_to_string(&create_payload)?;
+                    let payload = serde_json::from_str(&text)?;
+                    client.create_conversation(payload).await?
+                }
+                (Some(_), Some(_)) => {
+                    anyhow::bail!("use either --conversation-id or --create-payload, not both");
+                }
+                (None, None) => {
+                    anyhow::bail!("openhands run requires --conversation-id or --create-payload");
+                }
+            };
+
+            client
+                .send_user_message(&conversation.id, &task, Some("coder-rust"))
+                .await?;
+            let trigger = client.trigger_run(&conversation.id).await?;
+            let raw_events = client.fetch_events(&conversation.id, 100).await?;
+            let event_count = raw_events.len();
+
+            let run_id = RunId::new();
+            let store = RunStore::new(store);
+            for (index, raw_event) in raw_events.into_iter().enumerate() {
+                let raw_text = serde_json::to_string(&raw_event)?;
+                let raw_ref = store.write_large_text_ref(&raw_text)?.blob_ref;
+                let event = normalize_openhands_event(
+                    run_id.clone(),
+                    (index + 1) as u64,
+                    raw_event,
+                    Some(raw_ref),
+                );
+                store.append_event(&run_id, &event)?;
+            }
+
+            println!("run_id={run_id}");
+            println!("conversation_id={}", conversation.id);
+            println!("openhands_run_status={}", trigger.status);
+            println!("already_running={}", trigger.already_running);
+            println!("events_written={event_count}");
+            println!(
+                "events_websocket_url={}",
+                client.events_websocket_url(&conversation.id)?
+            );
         }
     }
     Ok(())
