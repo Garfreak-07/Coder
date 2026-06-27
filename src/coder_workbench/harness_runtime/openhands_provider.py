@@ -809,6 +809,8 @@ class OpenHandsRuntimeProvider:
                 return self._sdk_loader()
             except Exception:
                 return None
+        os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
+        os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
         for module_name in self.runtime_module_names:
             try:
                 if importlib.util.find_spec(module_name) is None:

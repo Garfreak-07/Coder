@@ -208,6 +208,18 @@ agent-scoped memory plane:
 - Text/Markdown knowledge imports are available without embeddings or a vector
   database. Imported chunks are ACL-ready and retrievable through the lexical
   `MemoryRetriever` path.
+- Hybrid RAG retrieval can be enabled with optional `rag` dependencies. It
+  builds `.coder/indexes/bm25/` and, when Chroma is installed,
+  `.coder/indexes/chroma/`, then fuses dense and lexical candidates with
+  weighted RRF while keeping Batch D ACLs authoritative.
+- OpenHands receives `coder_hybrid_rag_search` as a read-only custom tool in
+  Planning Chat, Workflow Supervisor, and Task Execution modes. Coder binds the
+  role, requested context, store root, run identity, scope, and token budget;
+  model tool arguments can only provide `query`, `top_k`, `tags`, and
+  `include_content`.
+
+See [docs/hybrid_rag_tool.md](docs/hybrid_rag_tool.md) for reindexing,
+optional dependency, retrieval, ACL, and OpenHands custom tool details.
 
 Most low-level runtime behavior is feature-flagged during rollout:
 
@@ -262,7 +274,8 @@ src/coder_workbench/
   core/              AgentWorkflowSpec, artifacts, authority, role cards
   extensions/        Plugin and skill manifests, routing, runtime
   memory/            Legacy workflow memory plus agent-scoped memory stores,
-                     retrieval, run snapshots, planner file proposals, imports
+                     retrieval, hybrid RAG indexes, run snapshots, imports
+  openhands_tools/   Coder custom tools registered into OpenHands SDK
   observability/     Tracing and evaluation support
   runtime_capabilities/
                      Harness capability resolver, tool/MCP/skill registries
@@ -288,6 +301,13 @@ python -m venv .venv
 pip install -e .
 cd frontend
 npm install
+```
+
+Install optional local RAG dependencies when you want Chroma dense retrieval and
+the external BM25 implementation:
+
+```powershell
+pip install -e .[rag]
 ```
 
 ## Run Locally
@@ -347,6 +367,8 @@ Common development endpoints:
 - `POST /api/v2/knowledge-sources/import-text`
 - `GET /api/v2/knowledge-sources`
 - `GET /api/v2/knowledge-sources/{source_id}/chunks`
+- `POST /api/v2/rag/reindex`
+- `GET /api/v2/rag/status`
 - `GET /api/v2/library`
 - `POST /api/v2/library/agent-workflows`
 - `GET /api/v2/library/agent-workflows/{workflow_id}`

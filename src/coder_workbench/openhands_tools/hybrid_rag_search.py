@@ -16,6 +16,7 @@ from coder_workbench.memory.rag_models import HybridRagRequest
 from coder_workbench.memory.store import AgentScopedMemoryStore, KnowledgeStore
 
 os.environ.setdefault("OPENHANDS_SUPPRESS_BANNER", "1")
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 from openhands.sdk.llm import TextContent
 from openhands.sdk.tool import (
