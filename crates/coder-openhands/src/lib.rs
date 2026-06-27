@@ -368,10 +368,27 @@ async fn checked_response(
     let status = response.status();
     let text = response.text().await?;
     if !acceptable.contains(&status) {
+        let status = status.as_u16();
+        if status == StatusCode::UNAUTHORIZED.as_u16() || status == StatusCode::FORBIDDEN.as_u16() {
+            return Err(OpenHandsError::AuthFailure {
+                method,
+                path: path.to_owned(),
+                status,
+                body: text,
+            });
+        }
+        if text.to_ascii_lowercase().contains("workspace") {
+            return Err(OpenHandsError::WorkspaceError {
+                method,
+                path: path.to_owned(),
+                status,
+                body: text,
+            });
+        }
         return Err(OpenHandsError::HttpStatus {
             method,
             path: path.to_owned(),
-            status: status.as_u16(),
+            status,
             body: text,
         });
     }
@@ -442,6 +459,20 @@ pub enum OpenHandsError {
     InvalidMethod(String),
     #[error("OpenHands server request failed: {0}")]
     Request(#[from] reqwest::Error),
+    #[error("OpenHands authentication failed with HTTP {status} for {method} {path}: {body}")]
+    AuthFailure {
+        method: &'static str,
+        path: String,
+        status: u16,
+        body: String,
+    },
+    #[error("OpenHands workspace error with HTTP {status} for {method} {path}: {body}")]
+    WorkspaceError {
+        method: &'static str,
+        path: String,
+        status: u16,
+        body: String,
+    },
     #[error("OpenHands server returned HTTP {status} for {method} {path}: {body}")]
     HttpStatus {
         method: &'static str,
@@ -518,6 +549,52 @@ mod tests {
         assert!(request_log.contains("POST /api/conversations/conv-1/events "));
         assert!(request_log.contains("POST /api/conversations/conv-1/run "));
         assert!(request_log.contains("GET /api/conversations/conv-1/events/search?limit=100 "));
+    }
+
+    #[tokio::test]
+    async fn auth_failures_are_classified_and_send_session_header() {
+        let env_name = format!("CODER_TEST_SESSION_KEY_{}", unique_suffix());
+        std::env::set_var(&env_name, "session-key");
+        let (server_url, requests) = spawn_server(vec![response(
+            401,
+            "Unauthorized",
+            r#"{"detail":"invalid session"}"#,
+        )]);
+        let client = OpenHandsClient::new(OpenHandsServerConfig {
+            server_url,
+            session_api_key_env: Some(env_name.clone()),
+        });
+
+        let error = client.create_conversation(json!({})).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            OpenHandsError::AuthFailure { status: 401, .. }
+        ));
+        assert!(requests.lock().unwrap()[0]
+            .to_ascii_lowercase()
+            .contains("x-session-api-key: session-key"));
+        std::env::remove_var(env_name);
+    }
+
+    #[tokio::test]
+    async fn workspace_failures_are_classified() {
+        let (server_url, _) = spawn_server(vec![response(
+            500,
+            "Internal Server Error",
+            r#"{"detail":"workspace is unavailable"}"#,
+        )]);
+        let client = OpenHandsClient::new(OpenHandsServerConfig {
+            server_url,
+            session_api_key_env: None,
+        });
+
+        let error = client.attach_conversation("conv-1").await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            OpenHandsError::WorkspaceError { status: 500, .. }
+        ));
     }
 
     #[test]
@@ -648,5 +725,12 @@ mod tests {
             "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
+    }
+
+    fn unique_suffix() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     }
 }
