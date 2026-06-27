@@ -224,6 +224,7 @@ dependencies = [
  "clap",
  "coder-config",
  "coder-core",
+ "coder-events",
  "coder-openhands",
  "coder-server",
  "coder-store",

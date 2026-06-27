@@ -18,6 +18,11 @@ cargo run -p coder-cli --bin coder-rust -- openhands run --server http://127.0.0
 cargo run -p coder-cli --bin coder-rust -- server --host 127.0.0.1 --port 8766
 ```
 
+`openhands run` writes a Rust run directory with `metadata.json`,
+`events.jsonl`, raw OpenHands event blob refs, and a `final-report.json`
+artifact so the spike follows the same evidence-first run shape as the mock
+workflow path.
+
 Rust checks:
 
 ```powershell

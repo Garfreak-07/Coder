@@ -2,11 +2,15 @@ use std::{fs, net::SocketAddr, path::PathBuf};
 
 use clap::{Parser, Subcommand};
 use coder_config::{load_project_config, validate_project_config};
-use coder_core::RunId;
-use coder_openhands::{normalize_openhands_event, OpenHandsClient, OpenHandsServerConfig};
+use coder_core::{RunId, RunState, RunStatus, WorkflowId};
+use coder_events::CoderEvent;
+use coder_openhands::{
+    normalize_openhands_event, openhands_final_report, OpenHandsClient, OpenHandsServerConfig,
+};
 use coder_server::{serve, ApiState};
 use coder_store::RunStore;
 use coder_workflow::MockWorkflowRunner;
+use serde_json::json;
 
 #[derive(Debug, Parser)]
 #[command(name = "coder-rust")]
@@ -196,27 +200,88 @@ async fn main() -> anyhow::Result<()> {
 
             let run_id = RunId::new();
             let store = RunStore::new(store);
+            let mut state = RunState::new(run_id.clone(), WorkflowId::new("openhands-cli"));
+            state.status = RunStatus::Running;
+            store.write_metadata(&state)?;
+
+            let mut sequence = 1;
+            store.append_event(
+                &run_id,
+                &CoderEvent::new(
+                    run_id.clone(),
+                    sequence,
+                    "run.started",
+                    json!({
+                        "workflow_id": "openhands-cli",
+                        "backend": "openhands",
+                        "conversation_id": conversation.id.clone(),
+                        "task": task.clone(),
+                        "trigger_status": trigger.status,
+                        "already_running": trigger.already_running
+                    }),
+                ),
+            )?;
+            sequence += 1;
+
+            let mut raw_refs = Vec::new();
             for (index, raw_event) in raw_events.into_iter().enumerate() {
                 let raw_text = serde_json::to_string(&raw_event)?;
                 let raw_ref = store.write_large_text_ref(&raw_text)?.blob_ref;
+                raw_refs.push(raw_ref.clone());
                 let event = normalize_openhands_event(
                     run_id.clone(),
-                    (index + 1) as u64,
+                    sequence + index as u64,
                     raw_event,
                     Some(raw_ref),
                 );
                 store.append_event(&run_id, &event)?;
             }
+            sequence += event_count as u64;
+
+            let websocket_url = client.events_websocket_url(&conversation.id)?;
+            let report = openhands_final_report(
+                &run_id,
+                &conversation.id,
+                &trigger,
+                event_count,
+                &websocket_url,
+                &raw_refs,
+            );
+            let report_ref = store.write_report(&run_id, &report)?;
+            store.append_event(
+                &run_id,
+                &CoderEvent::new(
+                    run_id.clone(),
+                    sequence,
+                    "report.created",
+                    json!({"report_ref": report_ref}),
+                ),
+            )?;
+            sequence += 1;
+            store.append_event(
+                &run_id,
+                &CoderEvent::new(
+                    run_id.clone(),
+                    sequence,
+                    "run.completed",
+                    json!({
+                        "status": "completed",
+                        "report_ref": report_ref,
+                        "openhands_events_captured": event_count
+                    }),
+                ),
+            )?;
+            state.status = RunStatus::Completed;
+            store.write_metadata(&state)?;
 
             println!("run_id={run_id}");
             println!("conversation_id={}", conversation.id);
             println!("openhands_run_status={}", trigger.status);
             println!("already_running={}", trigger.already_running);
-            println!("events_written={event_count}");
-            println!(
-                "events_websocket_url={}",
-                client.events_websocket_url(&conversation.id)?
-            );
+            println!("openhands_events_captured={event_count}");
+            println!("events_written={}", event_count + 3);
+            println!("report_ref={report_ref}");
+            println!("events_websocket_url={websocket_url}");
         }
         Command::Server { host, port, store } => {
             let addr: SocketAddr = format!("{host}:{port}").parse()?;

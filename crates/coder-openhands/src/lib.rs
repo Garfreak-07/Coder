@@ -1,6 +1,6 @@
 use std::{env, time::Duration};
 
-use coder_core::RunId;
+use coder_core::{FinalReport, RunId};
 use coder_events::CoderEvent;
 use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -309,6 +309,50 @@ pub fn normalize_openhands_event(
     }
 }
 
+pub fn openhands_final_report(
+    run_id: &RunId,
+    conversation_id: &str,
+    trigger: &OpenHandsRunTrigger,
+    captured_events: usize,
+    websocket_url: &str,
+    raw_event_refs: &[String],
+) -> FinalReport {
+    let mut report = FinalReport::completed(format!(
+        "OpenHands conversation '{conversation_id}' was triggered by the Rust adapter and {captured_events} event(s) were captured."
+    ))
+    .with_check(format!("openhands trigger HTTP {}", trigger.status))
+    .with_evidence(
+        "event_log",
+        format!("eventlog://runs/{}/events.jsonl", run_id.as_str()),
+    )
+    .with_evidence("openhands_conversation", conversation_id.to_owned())
+    .with_evidence("openhands_events_websocket", websocket_url.to_owned());
+
+    if trigger.already_running {
+        report
+            .checks
+            .push("OpenHands reported an existing run was already active".to_owned());
+    }
+    for raw_ref in raw_event_refs.iter().take(10) {
+        report.evidence_refs.push(coder_core::EvidenceRef {
+            kind: "openhands_raw_event".to_owned(),
+            reference: raw_ref.clone(),
+        });
+    }
+    if raw_event_refs.len() > 10 {
+        report.next_steps.push(format!(
+            "{} additional raw OpenHands event ref(s) are available in the event log",
+            raw_event_refs.len() - 10
+        ));
+    }
+    if captured_events == 0 {
+        report
+            .next_steps
+            .push("No OpenHands events were returned yet; fetch the conversation events again for more evidence.".to_owned());
+    }
+    report
+}
+
 #[derive(Debug)]
 struct OpenHandsHttpResponse {
     status: u16,
@@ -500,6 +544,42 @@ mod tests {
         assert_eq!(event.kind, "backend.openhands.MessageEvent");
         assert_eq!(event.refs[0].uri, "blob://sha256/raw");
         assert_eq!(event.payload["raw"]["api_key"], "[REDACTED]");
+    }
+
+    #[test]
+    fn openhands_report_includes_event_log_and_raw_event_evidence() {
+        let run_id = RunId::from_string("run_1");
+        let trigger = OpenHandsRunTrigger {
+            already_running: true,
+            status: 409,
+        };
+
+        let report = openhands_final_report(
+            &run_id,
+            "conv-1",
+            &trigger,
+            2,
+            "ws://127.0.0.1:8000/sockets/events/conv-1",
+            &[
+                "blob://sha256/raw1".to_owned(),
+                "blob://sha256/raw2".to_owned(),
+            ],
+        );
+
+        assert!(report.summary.contains("conv-1"));
+        assert!(report.checks.iter().any(|check| check.contains("HTTP 409")));
+        assert!(report
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.kind == "event_log"));
+        assert!(report
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.kind == "openhands_raw_event"));
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.contains("already active")));
     }
 
     fn spawn_server(responses: Vec<String>) -> (String, Arc<Mutex<Vec<String>>>) {
