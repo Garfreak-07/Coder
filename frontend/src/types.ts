@@ -211,6 +211,83 @@ export interface RustValidationReport {
   issues: RustValidationIssue[];
 }
 
+export type RustRunStatus = "queued" | "running" | "completed" | "blocked" | "failed" | "cancelled" | string;
+
+export interface RustRunState {
+  run_id: string;
+  workflow_id: string;
+  status: RustRunStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RustEventRef {
+  label: string;
+  uri: string;
+}
+
+export interface RustCoderEvent {
+  event_id: string;
+  run_id: string;
+  sequence: number;
+  timestamp: string;
+  kind: string;
+  payload?: unknown;
+  refs: RustEventRef[];
+}
+
+export interface RustEvidenceRef {
+  kind: string;
+  reference: string;
+}
+
+export interface RustFinalReport {
+  status: "completed" | "blocked" | "failed" | "cancelled" | string;
+  summary: string;
+  changed_files: string[];
+  checks: string[];
+  patch_refs: string[];
+  artifact_refs: string[];
+  evidence_refs: RustEvidenceRef[];
+  blockers: string[];
+  next_steps: string[];
+}
+
+export interface RustRunSummary {
+  run_id: string;
+  metadata?: RustRunState | null;
+  event_count: number;
+  has_report: boolean;
+  repo_evidence_count: number;
+}
+
+export interface RustRunListResponse {
+  runs: RustRunSummary[];
+}
+
+export interface RustRunDetail {
+  run_id: string;
+  metadata?: RustRunState | null;
+  events: RustCoderEvent[];
+  report?: RustFinalReport | null;
+}
+
+export interface RustRunEventsResponse {
+  run_id: string;
+  events: RustCoderEvent[];
+}
+
+export interface RustRunArtifactResponse {
+  run_id: string;
+  artifact_name: string;
+  payload: unknown;
+}
+
+export interface RustRepoEvidenceResponse {
+  ref_id: string;
+  payload: unknown;
+}
+
 export interface PreflightIssue {
   level: "error" | "warning" | string;
   code: string;

@@ -23,6 +23,12 @@ import type {
   RunEvent,
   RunEventsPage,
   RunSummaryItem,
+  RustRepoEvidenceResponse,
+  RustRunArtifactResponse,
+  RustRunDetail,
+  RustRunEventsResponse,
+  RustRunListResponse,
+  RustRunSummary,
   RustProjectConfig,
   RustValidationReport,
   SkillUpdateInfo,
@@ -41,6 +47,15 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
     throw new Error(`${response.status} ${response.statusText}: ${detail}`);
   }
   return (await response.json()) as T;
+}
+
+async function requestBlob(url: string, init?: RequestInit): Promise<Blob> {
+  const response = await fetch(url, init);
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`${response.status} ${response.statusText}: ${detail}`);
+  }
+  return response.blob();
 }
 
 export function getLibrary(): Promise<LibraryIndex> {
@@ -248,6 +263,33 @@ export function validateRustWorkflowSpec(config: RustProjectConfig, workflowId: 
     headers: jsonHeaders,
     body: JSON.stringify({ config, workflow_id: workflowId })
   });
+}
+
+export async function getRustRuns(): Promise<RustRunSummary[]> {
+  const payload = await requestJson<RustRunListResponse>("/api/v3/runs");
+  return payload.runs;
+}
+
+export function getRustRun(runId: string): Promise<RustRunDetail> {
+  return requestJson<RustRunDetail>(`/api/v3/runs/${encodeURIComponent(runId)}`);
+}
+
+export function getRustRunEvents(runId: string): Promise<RustRunEventsResponse> {
+  return requestJson<RustRunEventsResponse>(`/api/v3/runs/${encodeURIComponent(runId)}/events`);
+}
+
+export function getRustRunArtifact(runId: string, artifactName: string): Promise<RustRunArtifactResponse> {
+  return requestJson<RustRunArtifactResponse>(
+    `/api/v3/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactName)}`
+  );
+}
+
+export function getRustRepoEvidence(refId: string): Promise<RustRepoEvidenceResponse> {
+  return requestJson<RustRepoEvidenceResponse>(`/api/v3/repo-evidence/${encodeURIComponent(refId)}`);
+}
+
+export function getRustBlobSha256(digest: string): Promise<Blob> {
+  return requestBlob(`/api/v3/blobs/sha256/${encodeURIComponent(digest)}`);
 }
 
 export async function getAgentRuntimeProfiles(agentWorkflow: AgentWorkflowSpec): Promise<Record<string, unknown>[]> {
