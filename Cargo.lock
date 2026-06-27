@@ -308,6 +308,7 @@ dependencies = [
  "coder-config",
  "coder-core",
  "coder-events",
+ "coder-memory",
  "coder-store",
  "coder-tools",
  "coder-workflow",

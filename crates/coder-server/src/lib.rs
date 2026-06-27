@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, net::SocketAddr, path::PathBuf};
+use std::{collections::BTreeSet, fs, net::SocketAddr, path::PathBuf};
 
 use axum::{
     extract::{Path, State},
@@ -11,6 +11,7 @@ use coder_config::{
     validate_project_config, ProjectConfig, ValidationIssue, ValidationLevel, ValidationReport,
 };
 use coder_core::{FinalReport, RunId, RunState, RunStatus};
+use coder_memory::{load_project_memory_file, memory_read_event, MemoryError, ProjectMemoryFile};
 use coder_store::{
     RepoEvidenceKind, RepoEvidenceRef, RunCheckpointRef, RunStore, StoreError, StoredRunSummary,
 };
@@ -36,6 +37,7 @@ impl ApiState {
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/api/v3/health", get(health))
+        .route("/api/v3/memory/project/load", post(load_project_memory))
         .route("/api/v3/config/validate", post(validate_config))
         .route("/api/v3/workflows/validate", post(validate_workflow))
         .route("/api/v3/runs", get(list_runs))
@@ -90,6 +92,35 @@ async fn health() -> Json<HealthResponse> {
         service: "coder-server",
         api_version: "v3",
     })
+}
+
+async fn load_project_memory(
+    State(state): State<ApiState>,
+    Json(request): Json<ProjectMemoryLoadRequest>,
+) -> Result<Json<ProjectMemoryLoadResponse>, ApiError> {
+    let memory_path = resolve_repo_relative_path(&request.repo_root, &request.memory_path)?;
+    let memory = load_project_memory_file(&memory_path)?;
+    let mut event_recorded = false;
+    if let Some(run_id) = request.run_id {
+        let run_id = RunId::from_string(run_id);
+        if !stored_run_exists(&state.store, &run_id)? {
+            return Err(ApiError::not_found(format!(
+                "run '{}' was not found",
+                run_id.as_str()
+            )));
+        }
+        let sequence = state.store.read_events(&run_id)?.len() as u64 + 1;
+        state.store.append_event(
+            &run_id,
+            &memory_read_event(run_id.clone(), sequence, &memory.records),
+        )?;
+        event_recorded = true;
+    }
+    Ok(Json(ProjectMemoryLoadResponse {
+        record_count: memory.records.len(),
+        event_recorded,
+        memory,
+    }))
 }
 
 async fn validate_config(Json(request): Json<ConfigValidationRequest>) -> Json<ValidationReport> {
@@ -467,6 +498,20 @@ struct HealthResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ProjectMemoryLoadRequest {
+    pub repo_root: String,
+    pub memory_path: String,
+    pub run_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectMemoryLoadResponse {
+    pub record_count: usize,
+    pub event_recorded: bool,
+    pub memory: ProjectMemoryFile,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ConfigValidationRequest {
     pub config: ProjectConfig,
 }
@@ -653,6 +698,21 @@ fn stored_run_exists(store: &RunStore, run_id: &RunId) -> Result<bool, StoreErro
         || store.read_report(run_id)?.is_some()
         || store.repo_evidence_count(run_id)? > 0
         || !store.list_checkpoints(run_id)?.is_empty())
+}
+
+fn resolve_repo_relative_path(repo_root: &str, relative_path: &str) -> Result<PathBuf, ApiError> {
+    let root = fs::canonicalize(repo_root)
+        .map_err(|error| ApiError::bad_request(format!("invalid repo_root: {error}")))?;
+    let requested = PathBuf::from(relative_path);
+    if requested.is_absolute() {
+        return Err(ApiError::bad_request("memory_path must be relative"));
+    }
+    let resolved = fs::canonicalize(root.join(&requested))
+        .map_err(|error| ApiError::bad_request(format!("invalid memory_path: {error}")))?;
+    if !resolved.starts_with(&root) {
+        return Err(ApiError::bad_request("memory_path escapes repo_root"));
+    }
+    Ok(resolved)
 }
 
 fn control_run(
@@ -855,6 +915,12 @@ impl From<RepoToolError> for ApiError {
     }
 }
 
+impl From<MemoryError> for ApiError {
+    fn from(error: MemoryError) -> Self {
+        Self::bad_request(error.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::PathBuf};
@@ -885,6 +951,58 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["status"], "ok");
         assert_eq!(body["api_version"], "v3");
+    }
+
+    #[tokio::test]
+    async fn project_memory_load_records_summary_event_without_full_content() {
+        let repo = temp_root();
+        let store_root = temp_root();
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(
+            repo.join("memory.json"),
+            r#"{
+              "version": 1,
+              "records": [
+                {
+                  "id": "mem_1",
+                  "scope": "project",
+                  "key": "architecture",
+                  "content": "Rust owns the control plane.",
+                  "tags": ["rust"],
+                  "source_ref": "memory://project/architecture"
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+        let store = RunStore::new(&store_root);
+        let run_id = RunId::from_string("run-1");
+        let state = RunState::new(run_id.clone(), coder_core::WorkflowId::new("workflow"));
+        store.write_metadata(&state).unwrap();
+        let app = router(ApiState::new(store.clone()));
+
+        let response = post_json(
+            app,
+            "/api/v3/memory/project/load",
+            json!({
+                "repo_root": repo.display().to_string(),
+                "memory_path": "memory.json",
+                "run_id": "run-1"
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["record_count"], 1);
+        assert_eq!(body["event_recorded"], true);
+        assert_eq!(body["memory"]["records"][0]["key"], "architecture");
+        let events = store.read_events(&run_id).unwrap();
+        assert_eq!(events[0].kind, "memory.read");
+        assert_eq!(events[0].payload["records"][0]["key"], "architecture");
+        assert!(!events[0].payload.to_string().contains("control plane"));
+        let _ = fs::remove_dir_all(repo);
+        let _ = fs::remove_dir_all(store_root);
     }
 
     #[tokio::test]

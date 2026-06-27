@@ -118,6 +118,34 @@ export interface RustMemoryAccess {
   write: RustMemoryScope[];
 }
 
+export interface RustMemoryRecord {
+  id: string;
+  scope: RustMemoryScope | string;
+  key: string;
+  content: string;
+  tags: string[];
+  evidence_refs: RustEvidenceRef[];
+  source_ref?: string | null;
+  trust_level: string;
+}
+
+export interface RustProjectMemoryFile {
+  version: number;
+  records: RustMemoryRecord[];
+}
+
+export interface RustProjectMemoryLoadRequest {
+  repo_root: string;
+  memory_path: string;
+  run_id?: string | null;
+}
+
+export interface RustProjectMemoryLoadResponse {
+  record_count: number;
+  event_recorded: boolean;
+  memory: RustProjectMemoryFile;
+}
+
 export interface RustAgentSpec {
   role: string;
   model: string;

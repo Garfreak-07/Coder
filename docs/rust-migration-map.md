@@ -44,7 +44,7 @@ behavior is covered by a Rust equivalent and tests listed here.
 | Context packets | `context/*`, context stores | Rust context assembler | Preserve hot/warm/cold behavior behind public refs | Token/large-payload tests pass |
 | Repo evidence tools | `context/repo_*`, Git inspection helpers | `coder-tools` repo search/read/status/diff/find plus `coder-store` repo evidence refs | Port path safety, sensitive-path filtering, bounded line-range reads, bounded previews, and evidence write behavior; wire CLI tools to optional repo evidence recording | Existing repo_search/read/discovery/status/diff and evidence-store tests have Rust equivalents |
 | Agentic router | `context/agentic_router.py` | Later Rust context router | Defer until repo tools and memory are stable | Router policy tests pass in Rust |
-| Memory service | `memory/service.py`, `run_memory.py` | `coder-memory` | Model scopes, records, cards, proposals, events | Long-term writes are confirmed and executor cannot write directly |
+| Memory service | `memory/service.py`, `run_memory.py` | `coder-memory` | Project memory JSON loading and bounded `memory.read` event recording are exposed through v3; proposals remain event-only | Long-term writes are confirmed and executor cannot write directly |
 | Knowledge import/RAG | `memory/knowledge_import.py`, `hybrid_*` | `coder-memory`, `coder-rag` | Port lexical retrieval first, dense optional later | ACL and hint-only behavior covered |
 | Extensions/plugins | `extensions/*` | Rust plugin registry | Preserve API shape, port manifest validation | External-effect approval and manifest tests pass |
 | Skills | `skills/*` | Rust skill store/router | Preserve discover/install/update/pin/rollback | Skill lifecycle tests pass |

@@ -10,6 +10,7 @@ axum.workspace = true
 coder-config.workspace = true
 coder-core.workspace = true
 coder-events.workspace = true
+coder-memory.workspace = true
 coder-store.workspace = true
 coder-tools.workspace = true
 coder-workflow.workspace = true

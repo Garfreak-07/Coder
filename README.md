@@ -74,7 +74,10 @@ Rust run checkpoints are stored as bounded JSON payloads through
 `POST /api/v3/runs/{run_id}/checkpoints/{checkpoint_name}`.
 `coder-memory` is the first lightweight Rust memory milestone: JSON project
 memory records plus `memory.read` and `memory.write.proposed` event helpers,
-without vector retrieval.
+without vector retrieval. Rust API callers can load repo-local project memory
+through `POST /api/v3/memory/project/load`; when a run id is supplied the server
+records a bounded `memory.read` event without embedding full memory content in
+the event log.
 `coder-tools` starts the Rust-native repo evidence layer with path-safe
 file discovery, UTF-8 `read_file`, bounded line-range reads, bounded
 `search_text`, `git_status`, bounded `git_diff`, `patch-preview`,

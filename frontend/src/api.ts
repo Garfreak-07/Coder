@@ -30,6 +30,8 @@ import type {
   RustPatchApplyResponse,
   RustPatchPreview,
   RustPatchPreviewRequest,
+  RustProjectMemoryLoadRequest,
+  RustProjectMemoryLoadResponse,
   RustRunArtifactResponse,
   RustRunCheckpointListResponse,
   RustRunCheckpointResponse,
@@ -296,6 +298,16 @@ export function previewRustPatch(request: RustPatchPreviewRequest): Promise<Rust
 
 export function applyRustPatch(request: RustPatchApplyRequest): Promise<RustPatchApplyResponse> {
   return requestJson<RustPatchApplyResponse>("/api/v3/tools/patch/apply", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify(request)
+  });
+}
+
+export function loadRustProjectMemory(
+  request: RustProjectMemoryLoadRequest
+): Promise<RustProjectMemoryLoadResponse> {
+  return requestJson<RustProjectMemoryLoadResponse>("/api/v3/memory/project/load", {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify(request)
