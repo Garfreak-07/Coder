@@ -47,6 +47,7 @@ Run artifacts and content-addressed blobs are also readable through
 `GET /api/v3/runs/{run_id}/artifacts/{artifact_name}` and
 `GET /api/v3/blobs/sha256/{digest}`.
 It can also read stored repo evidence payloads through
+`GET /api/v3/runs/{run_id}/repo-evidence` and
 `GET /api/v3/repo-evidence/{ref_id}`.
 `POST /api/v3/runs/preview` provides a side-effect-free readiness and
 confirmation gate for a requested Rust workflow run.

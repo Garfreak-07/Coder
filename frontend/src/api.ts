@@ -28,6 +28,7 @@ import type {
   RustRunDetail,
   RustRunEventsResponse,
   RustRunListResponse,
+  RustRunRepoEvidenceResponse,
   RustRunSummary,
   RustProjectConfig,
   RustValidationReport,
@@ -276,6 +277,12 @@ export function getRustRun(runId: string): Promise<RustRunDetail> {
 
 export function getRustRunEvents(runId: string): Promise<RustRunEventsResponse> {
   return requestJson<RustRunEventsResponse>(`/api/v3/runs/${encodeURIComponent(runId)}/events`);
+}
+
+export function getRustRunRepoEvidence(runId: string): Promise<RustRunRepoEvidenceResponse> {
+  return requestJson<RustRunRepoEvidenceResponse>(
+    `/api/v3/runs/${encodeURIComponent(runId)}/repo-evidence`
+  );
 }
 
 export function getRustRunArtifact(runId: string, artifactName: string): Promise<RustRunArtifactResponse> {

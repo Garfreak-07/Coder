@@ -128,6 +128,11 @@ enum RunsCommand {
         store: PathBuf,
         run_id: String,
     },
+    Evidence {
+        #[arg(long, default_value = ".coder-rust")]
+        store: PathBuf,
+        run_id: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -495,6 +500,13 @@ fn run_detail_json(store: &RunStore, run_id: &RunId) -> anyhow::Result<serde_jso
     }))
 }
 
+fn run_repo_evidence_json(store: &RunStore, run_id: &RunId) -> anyhow::Result<serde_json::Value> {
+    Ok(json!({
+        "run_id": run_id.as_str(),
+        "evidence": store.list_repo_evidence(run_id)?,
+    }))
+}
+
 fn write_optional_repo_evidence(
     args: &EvidenceRecordArgs,
     kind: RepoEvidenceKind,
@@ -670,6 +682,13 @@ async fn main() -> anyhow::Result<()> {
             command: RunsCommand::Show { store, run_id },
         } => {
             let output = run_detail_json(&RunStore::new(store), &RunId::from_string(run_id))?;
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        }
+        Command::Runs {
+            command: RunsCommand::Evidence { store, run_id },
+        } => {
+            let output =
+                run_repo_evidence_json(&RunStore::new(store), &RunId::from_string(run_id))?;
             println!("{}", serde_json::to_string_pretty(&output)?);
         }
         Command::Tools {
@@ -1027,6 +1046,30 @@ mod tests {
         assert_eq!(detail["run_id"], "run-1");
         assert_eq!(detail["metadata"], serde_json::Value::Null);
         assert_eq!(detail["repo_evidence_count"], 1);
+        let _ = std::fs::remove_dir_all(store_root);
+    }
+
+    #[test]
+    fn run_repo_evidence_helper_lists_index_records() {
+        let store_root = temp_root("coder-cli-store");
+        let store = RunStore::new(&store_root);
+        let run_id = RunId::from_string("run-1");
+        let reference = store
+            .write_repo_evidence(
+                &run_id,
+                RepoEvidenceKind::RepoTextSearch,
+                "repo",
+                vec!["src".to_owned()],
+                "Found one hit.",
+                json!({"hits": [{"path": "src/app.py", "line": 1}]}),
+            )
+            .unwrap();
+
+        let output = run_repo_evidence_json(&store, &run_id).unwrap();
+
+        assert_eq!(output["run_id"], "run-1");
+        assert_eq!(output["evidence"][0]["ref_id"], reference.ref_id);
+        assert_eq!(output["evidence"][0]["summary"], "Found one hit.");
         let _ = std::fs::remove_dir_all(store_root);
     }
 

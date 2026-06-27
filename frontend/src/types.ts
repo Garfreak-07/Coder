@@ -273,6 +273,22 @@ export interface RustRunDetail {
   repo_evidence_count: number;
 }
 
+export interface RustRepoEvidenceRef {
+  ref_id: string;
+  kind: string;
+  repo_root: string;
+  scope_paths: string[];
+  summary: string;
+  payload_path: string;
+  created_at: string;
+  token_estimate: number;
+}
+
+export interface RustRunRepoEvidenceResponse {
+  run_id: string;
+  evidence: RustRepoEvidenceRef[];
+}
+
 export interface RustRunEventsResponse {
   run_id: string;
   events: RustCoderEvent[];

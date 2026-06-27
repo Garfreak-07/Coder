@@ -194,6 +194,28 @@ impl RunStore {
         Err(StoreError::RepoEvidenceNotFound(safe_ref_id))
     }
 
+    pub fn list_repo_evidence(&self, run_id: &RunId) -> Result<Vec<RepoEvidenceRef>, StoreError> {
+        let evidence_dir = self.safe_run_dir(run_id)?.join("repo_evidence");
+        let index_path = evidence_dir.join("index.jsonl");
+        if !index_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let file = fs::File::open(index_path)?;
+        let reader = BufReader::new(file);
+        let mut records = Vec::new();
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let record: RepoEvidenceRef = serde_json::from_str(&line)?;
+            ensure_path_under(&PathBuf::from(&record.payload_path), &evidence_dir)?;
+            records.push(record);
+        }
+        Ok(records)
+    }
+
     pub fn read_report(&self, run_id: &RunId) -> Result<Option<FinalReport>, StoreError> {
         read_json_optional(
             self.safe_run_dir(run_id)?
@@ -283,22 +305,7 @@ impl RunStore {
     }
 
     pub fn repo_evidence_count(&self, run_id: &RunId) -> Result<usize, StoreError> {
-        let index_path = self
-            .safe_run_dir(run_id)?
-            .join("repo_evidence")
-            .join("index.jsonl");
-        if !index_path.exists() {
-            return Ok(0);
-        }
-        let file = fs::File::open(index_path)?;
-        let reader = BufReader::new(file);
-        let mut count = 0;
-        for line in reader.lines() {
-            if !line?.trim().is_empty() {
-                count += 1;
-            }
-        }
-        Ok(count)
+        Ok(self.list_repo_evidence(run_id)?.len())
     }
 }
 
@@ -747,6 +754,10 @@ mod tests {
         assert!(PathBuf::from(&reference.payload_path)
             .starts_with(root.join("runs").join("run-1").join("repo_evidence")));
         assert_eq!(payload["hits"][0]["path"], "src/app.py");
+        let records = store.list_repo_evidence(&run_id).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].ref_id, reference.ref_id);
+        assert_eq!(records[0].summary, "Found one hit.");
         let _ = fs::remove_dir_all(root);
     }
 

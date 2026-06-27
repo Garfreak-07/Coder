@@ -11,7 +11,7 @@ use coder_config::{
     validate_project_config, ProjectConfig, ValidationIssue, ValidationLevel, ValidationReport,
 };
 use coder_core::{FinalReport, RunId, RunState};
-use coder_store::{RunStore, StoreError, StoredRunSummary};
+use coder_store::{RepoEvidenceRef, RunStore, StoreError, StoredRunSummary};
 use coder_workflow::{MockWorkflowRunner, WorkflowError};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -37,6 +37,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v3/runs/mock", post(run_mock_workflow))
         .route("/api/v3/runs/{run_id}", get(get_run_detail))
         .route("/api/v3/runs/{run_id}/events", get(list_run_events))
+        .route(
+            "/api/v3/runs/{run_id}/repo-evidence",
+            get(list_run_repo_evidence),
+        )
         .route(
             "/api/v3/runs/{run_id}/artifacts/{artifact_name}",
             get(get_run_artifact),
@@ -191,6 +195,18 @@ async fn get_repo_evidence(
     Ok(Json(RepoEvidenceResponse { ref_id, payload }))
 }
 
+async fn list_run_repo_evidence(
+    State(state): State<ApiState>,
+    Path(run_id): Path<String>,
+) -> Result<Json<RunRepoEvidenceResponse>, ApiError> {
+    let run_id = RunId::from_string(run_id);
+    let evidence = state.store.list_repo_evidence(&run_id)?;
+    Ok(Json(RunRepoEvidenceResponse {
+        run_id: run_id.to_string(),
+        evidence,
+    }))
+}
+
 async fn get_run_artifact(
     State(state): State<ApiState>,
     Path((run_id, artifact_name)): Path<(String, String)>,
@@ -280,6 +296,12 @@ pub struct RunDetailResponse {
 pub struct RepoEvidenceResponse {
     pub ref_id: String,
     pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RunRepoEvidenceResponse {
+    pub run_id: String,
+    pub evidence: Vec<RepoEvidenceRef>,
 }
 
 #[derive(Debug, Serialize)]
@@ -623,6 +645,7 @@ mod tests {
         assert_eq!(body["payload"]["snippet"]["path"], "src/app.py");
 
         let detail_response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v3/runs/run-1")
@@ -636,6 +659,21 @@ mod tests {
         assert_eq!(detail_body["run_id"], "run-1");
         assert_eq!(detail_body["repo_evidence_count"], 1);
         assert_eq!(detail_body["metadata"], Value::Null);
+
+        let list_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/runs/run-1/repo-evidence")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body = response_json(list_response).await;
+        assert_eq!(list_body["run_id"], "run-1");
+        assert_eq!(list_body["evidence"][0]["ref_id"], reference.ref_id);
+        assert_eq!(list_body["evidence"][0]["summary"], "Read src/app.py.");
         let _ = fs::remove_dir_all(root);
     }
 
