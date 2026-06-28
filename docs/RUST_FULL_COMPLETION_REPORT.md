@@ -4,9 +4,10 @@
 
 - Latest Rust-default completion work starts after `5b586b36`.
 - Rust-default switch commit: `e1958377`.
-- Current completed range: `5b586b36..e1958377`.
-- GitHub CI evidence: `CI` run
-  `28328414843` completed successfully for `e195837735da3779a65dc1c7257b9851e91a6b7a`.
+- Legacy CI contract commit: `8d77bde7`.
+- Runtime/default-path completed range: `5b586b36..e1958377`.
+- Latest GitHub CI evidence: `CI` run `28328526497` completed successfully
+  for `8d77bde7130ee02c459472d6a2d7049d8529cf88`.
 
 ## Rust Default
 
