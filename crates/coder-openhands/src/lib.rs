@@ -496,7 +496,7 @@ pub fn normalize_openhands_event(
     raw: Value,
     raw_ref: Option<String>,
 ) -> CoderEvent {
-    let raw_kind = raw_event_kind(&raw);
+    let raw_kind = openhands_raw_event_kind(&raw);
     let raw_event_id = raw
         .get("id")
         .or_else(|| raw.get("event_id"))
@@ -507,21 +507,31 @@ pub fn normalize_openhands_event(
     } else {
         format!("backend.openhands.{}", sanitize_event_kind(&raw_kind))
     };
-    let event = CoderEvent::new(
-        run_id,
-        sequence,
-        event_kind,
-        json!({
-            "backend": "openhands",
-            "raw_event_id": raw_event_id,
-            "raw_kind": raw_kind,
-            "raw": raw
-        }),
-    );
     if let Some(raw_ref) = raw_ref {
-        event.with_ref("openhands.raw_event", raw_ref)
+        CoderEvent::new(
+            run_id,
+            sequence,
+            event_kind,
+            json!({
+                "backend": "openhands",
+                "raw_event_id": raw_event_id,
+                "raw_kind": raw_kind,
+                "raw_ref": raw_ref
+            }),
+        )
+        .with_ref("openhands.raw_event", raw_ref)
     } else {
-        event
+        CoderEvent::new(
+            run_id,
+            sequence,
+            event_kind,
+            json!({
+                "backend": "openhands",
+                "raw_event_id": raw_event_id,
+                "raw_kind": raw_kind,
+                "raw": raw
+            }),
+        )
     }
 }
 
@@ -643,7 +653,7 @@ fn next_page_id(value: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn raw_event_kind(raw: &Value) -> String {
+pub fn openhands_raw_event_kind(raw: &Value) -> String {
     for key in ["kind", "type", "event_type", "action", "observation"] {
         if let Some(value) = raw.get(key).and_then(Value::as_str) {
             if !value.trim().is_empty() {
@@ -987,7 +997,8 @@ mod tests {
 
         assert_eq!(event.kind, "backend.openhands.MessageEvent");
         assert_eq!(event.refs[0].uri, "blob://sha256/raw");
-        assert_eq!(event.payload["raw"]["api_key"], "[REDACTED]");
+        assert_eq!(event.payload["raw_ref"], "blob://sha256/raw");
+        assert!(event.payload.get("raw").is_none());
     }
 
     #[test]

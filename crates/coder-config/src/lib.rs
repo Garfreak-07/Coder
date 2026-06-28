@@ -74,10 +74,54 @@ pub struct OpenHandsHarnessConfig {
     pub server_url: String,
     pub session_api_key_env: Option<String>,
     pub workspace_mode: Option<String>,
+    #[serde(default = "default_prefer_websocket")]
+    pub prefer_websocket: bool,
+    #[serde(default = "default_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+    #[serde(default = "default_max_event_poll_seconds")]
+    pub max_event_poll_seconds: u64,
+    #[serde(default = "default_max_events")]
+    pub max_events: usize,
+    #[serde(default = "default_terminal_event_kinds")]
+    pub terminal_event_kinds: Vec<String>,
     #[serde(default)]
     pub api_paths: OpenHandsApiPaths,
     #[serde(default)]
     pub run_start_strategy: OpenHandsRunStartStrategy,
+}
+
+fn default_prefer_websocket() -> bool {
+    true
+}
+
+fn default_poll_interval_ms() -> u64 {
+    1000
+}
+
+fn default_max_event_poll_seconds() -> u64 {
+    300
+}
+
+fn default_max_events() -> usize {
+    1000
+}
+
+fn default_terminal_event_kinds() -> Vec<String> {
+    [
+        "completed",
+        "done",
+        "finished",
+        "failed",
+        "error",
+        "cancelled",
+        "canceled",
+        "run.completed",
+        "run.failed",
+        "run.cancelled",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

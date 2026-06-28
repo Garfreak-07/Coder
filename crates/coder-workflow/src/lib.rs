@@ -2,6 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::Arc,
+    time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
@@ -18,8 +19,8 @@ use coder_harness::{
     HarnessBackend, HarnessError, HarnessRunEvent, HarnessRunRequest, HarnessRunResult,
 };
 use coder_openhands::{
-    normalize_openhands_event, openhands_final_report, OpenHandsApiPaths, OpenHandsAuthHeaderMode,
-    OpenHandsClient, OpenHandsRunStartStrategy, OpenHandsServerConfig,
+    normalize_openhands_event, openhands_final_report, openhands_raw_event_kind, OpenHandsApiPaths,
+    OpenHandsAuthHeaderMode, OpenHandsClient, OpenHandsRunStartStrategy, OpenHandsServerConfig,
 };
 use coder_store::{RunStore, StoreError};
 use serde_json::{json, Value};
@@ -1145,51 +1146,224 @@ impl HarnessBackend for OpenHandsHarnessBackend {
             .trigger_run(&conversation.id)
             .await
             .map_err(|error| HarnessError::Failed(error.to_string()))?;
-        let raw_events = client
-            .fetch_events(&conversation.id, 100)
-            .await
-            .map_err(|error| HarnessError::Failed(error.to_string()))?;
-
-        let mut events = Vec::new();
-        for raw in raw_events.iter().cloned() {
-            let raw_text = serde_json::to_string(&raw)
-                .map_err(|error| HarnessError::Failed(error.to_string()))?;
-            let raw_ref = self
-                .store
-                .write_large_text_ref(&raw_text)
-                .map_err(|error| HarnessError::Failed(error.to_string()))?
-                .blob_ref;
-            let normalized =
-                normalize_openhands_event(request.run_id.clone(), 0, raw, Some(raw_ref));
-            let mut event = HarnessRunEvent::new(normalized.kind, normalized.payload);
-            for reference in normalized.refs {
-                event = event.with_ref(reference.label, reference.uri);
-            }
-            events.push(event);
-        }
+        let lifecycle = poll_openhands_events(
+            &client,
+            &conversation.id,
+            &request.run_id,
+            &self.store,
+            &self.config,
+        )
+        .await?;
         let websocket_url = client
             .events_websocket_url(&conversation.id)
             .map_err(|error| HarnessError::Failed(error.to_string()))?;
-        let raw_refs = events
+        let raw_refs = lifecycle
+            .events
             .iter()
             .flat_map(|event| event.refs.iter())
             .filter(|reference| reference.label == "openhands.raw_event")
             .map(|reference| reference.uri.clone())
             .collect::<Vec<_>>();
-        let report = openhands_final_report(
+        let mut report = openhands_final_report(
             &request.run_id,
             &conversation.id,
             &trigger,
-            raw_events.len(),
+            lifecycle.captured_events,
             &websocket_url,
             &raw_refs,
         );
+        if lifecycle.status != "completed" {
+            report.status = match lifecycle.status.as_str() {
+                "blocked" => ReportStatus::Blocked,
+                "failed" => ReportStatus::Failed,
+                "cancelled" => ReportStatus::Cancelled,
+                _ => report.status,
+            };
+            report.blockers.push(lifecycle.reason);
+        }
 
         Ok(HarnessRunResult {
-            status: "completed".to_owned(),
+            status: lifecycle.status,
             report: Some(report),
-            events,
+            events: lifecycle.events,
         })
+    }
+}
+
+struct OpenHandsLifecycleResult {
+    status: String,
+    reason: String,
+    captured_events: usize,
+    events: Vec<HarnessRunEvent>,
+}
+
+async fn poll_openhands_events(
+    client: &OpenHandsClient,
+    conversation_id: &str,
+    run_id: &RunId,
+    store: &RunStore,
+    config: &OpenHandsHarnessConfig,
+) -> Result<OpenHandsLifecycleResult, HarnessError> {
+    let mut events = Vec::new();
+    if config.prefer_websocket {
+        if let Ok(websocket_url) = client.events_websocket_url(conversation_id) {
+            events.push(HarnessRunEvent::new(
+                "backend.openhands.websocket.preferred",
+                json!({
+                    "websocket_url": websocket_url,
+                    "fallback": "polling"
+                }),
+            ));
+        }
+    }
+
+    let started = Instant::now();
+    let timeout = Duration::from_secs(config.max_event_poll_seconds);
+    let poll_interval = Duration::from_millis(config.poll_interval_ms);
+    let max_events = config.max_events.max(1);
+    let fetch_limit = max_events.min(u16::MAX as usize) as u16;
+    let mut seen = BTreeSet::new();
+    let mut captured_events = 0;
+
+    loop {
+        let raw_events = client
+            .fetch_events(conversation_id, fetch_limit)
+            .await
+            .map_err(|error| HarnessError::Failed(error.to_string()))?;
+        for raw in raw_events {
+            let key = openhands_event_key(&raw);
+            if !seen.insert(key) {
+                continue;
+            }
+            captured_events += 1;
+            let terminal = openhands_terminal_status(&raw, &config.terminal_event_kinds);
+            events.push(openhands_raw_harness_event(run_id, store, raw)?);
+            if let Some((status, reason)) = terminal {
+                return Ok(OpenHandsLifecycleResult {
+                    status: status.to_owned(),
+                    reason,
+                    captured_events,
+                    events,
+                });
+            }
+            if captured_events >= max_events {
+                let reason =
+                    format!("OpenHands event limit {max_events} reached before terminal status");
+                events.push(HarnessRunEvent::new(
+                    "backend.openhands.max_events_reached",
+                    json!({
+                        "max_events": max_events,
+                        "reason": reason
+                    }),
+                ));
+                return Ok(OpenHandsLifecycleResult {
+                    status: "blocked".to_owned(),
+                    reason,
+                    captured_events,
+                    events,
+                });
+            }
+        }
+
+        if started.elapsed() >= timeout {
+            let reason = format!(
+                "OpenHands did not reach a terminal status within {} second(s)",
+                config.max_event_poll_seconds
+            );
+            events.push(HarnessRunEvent::new(
+                "backend.openhands.timeout",
+                json!({
+                    "timeout_seconds": config.max_event_poll_seconds,
+                    "captured_events": captured_events,
+                    "reason": reason
+                }),
+            ));
+            return Ok(OpenHandsLifecycleResult {
+                status: "blocked".to_owned(),
+                reason,
+                captured_events,
+                events,
+            });
+        }
+
+        if !poll_interval.is_zero() {
+            std::thread::sleep(poll_interval);
+        }
+    }
+}
+
+fn openhands_raw_harness_event(
+    run_id: &RunId,
+    store: &RunStore,
+    raw: Value,
+) -> Result<HarnessRunEvent, HarnessError> {
+    let raw_text =
+        serde_json::to_string(&raw).map_err(|error| HarnessError::Failed(error.to_string()))?;
+    let raw_ref = store
+        .write_large_text_ref(&raw_text)
+        .map_err(|error| HarnessError::Failed(error.to_string()))?
+        .blob_ref;
+    let normalized = normalize_openhands_event(run_id.clone(), 0, raw, Some(raw_ref));
+    let mut event = HarnessRunEvent::new(normalized.kind, normalized.payload);
+    for reference in normalized.refs {
+        event = event.with_ref(reference.label, reference.uri);
+    }
+    Ok(event)
+}
+
+fn openhands_event_key(raw: &Value) -> String {
+    raw.get("id")
+        .or_else(|| raw.get("event_id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| serde_json::to_string(raw).unwrap_or_else(|_| "unknown".to_owned()))
+}
+
+fn openhands_terminal_status(
+    raw: &Value,
+    terminal_event_kinds: &[String],
+) -> Option<(&'static str, String)> {
+    let raw_kind = openhands_raw_event_kind(raw);
+    let normalized_kind = raw_kind.to_ascii_lowercase();
+    let configured_terminal = terminal_event_kinds
+        .iter()
+        .any(|kind| kind.eq_ignore_ascii_case(&raw_kind));
+    let status = raw
+        .get("status")
+        .or_else(|| raw.get("state"))
+        .or_else(|| raw.get("result"))
+        .and_then(Value::as_str)
+        .map(|value| value.to_ascii_lowercase());
+
+    if let Some(status) = status.as_deref().and_then(terminal_status_from_text) {
+        return Some((
+            status,
+            format!("OpenHands reported terminal status '{}'", status),
+        ));
+    }
+    if !configured_terminal {
+        return None;
+    }
+    if let Some(status) = terminal_status_from_text(&normalized_kind) {
+        return Some((
+            status,
+            format!("OpenHands emitted terminal event kind '{raw_kind}'"),
+        ));
+    }
+    Some((
+        "completed",
+        format!("OpenHands emitted configured terminal event kind '{raw_kind}'"),
+    ))
+}
+
+fn terminal_status_from_text(value: &str) -> Option<&'static str> {
+    match value {
+        "completed" | "complete" | "success" | "succeeded" | "done" | "finished"
+        | "run.completed" => Some("completed"),
+        "blocked" | "run.blocked" => Some("blocked"),
+        "failed" | "failure" | "error" | "errored" | "run.failed" => Some("failed"),
+        "cancelled" | "canceled" | "run.cancelled" | "run.canceled" => Some("cancelled"),
+        _ => None,
     }
 }
 
@@ -1323,8 +1497,12 @@ mod tests {
     use std::{
         collections::VecDeque,
         fs,
+        io::{Read, Write},
+        net::TcpListener,
         path::PathBuf,
         sync::{Arc, Mutex},
+        thread,
+        time::Duration,
     };
 
     use coder_config::{ProjectConfig, WorkflowNodeSpec};
@@ -1911,6 +2089,83 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn openhands_backend_polls_until_terminal_and_stores_raw_refs() {
+        let (server_url, requests) = spawn_openhands_server(vec![
+            json_response(r#"{"status":"ok"}"#),
+            json_response(r#"{"id":"conv-1"}"#),
+            json_response(r#"{"accepted":true}"#),
+            json_response(r#"[{"id":"raw-1","type":"message","content":"working"}]"#),
+            json_response(
+                r#"[{"id":"raw-1","type":"message","content":"working"},{"id":"raw-2","type":"done","status":"completed","api_key":"secret"}]"#,
+            ),
+        ]);
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let backend =
+            OpenHandsHarnessBackend::new(openhands_test_config(server_url, 10, 0), store.clone());
+        let request = openhands_test_request("poll terminal");
+
+        let result = backend.run(request).await.unwrap();
+
+        assert_eq!(result.status, "completed");
+        assert!(result
+            .events
+            .iter()
+            .any(|event| event.kind == "backend.openhands.done"));
+        let raw_refs = result
+            .events
+            .iter()
+            .flat_map(|event| event.refs.iter())
+            .filter(|reference| reference.label == "openhands.raw_event")
+            .collect::<Vec<_>>();
+        assert_eq!(raw_refs.len(), 2);
+        assert!(
+            result
+                .events
+                .iter()
+                .filter(|event| event.payload.get("raw").is_some())
+                .count()
+                == 0
+        );
+        assert!(result
+            .report
+            .unwrap()
+            .evidence_refs
+            .iter()
+            .any(|reference| reference.kind == "openhands_raw_event"));
+        let request_log = requests.lock().unwrap().join("\n");
+        assert!(request_log.contains("GET /health "));
+        assert!(request_log.contains("POST /conversations "));
+        assert!(request_log.contains("POST /conversations/conv-1/events "));
+        assert!(request_log.contains("GET /conversations/conv-1/events "));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn openhands_backend_blocks_on_poll_timeout() {
+        let (server_url, _) = spawn_openhands_server(vec![
+            json_response(r#"{"status":"ok"}"#),
+            json_response(r#"{"id":"conv-1"}"#),
+            json_response(r#"{"accepted":true}"#),
+            json_response(r#"[]"#),
+        ]);
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let backend = OpenHandsHarnessBackend::new(openhands_test_config(server_url, 0, 0), store);
+        let request = openhands_test_request("timeout");
+
+        let result = backend.run(request).await.unwrap();
+
+        assert_eq!(result.status, "blocked");
+        assert!(result
+            .events
+            .iter()
+            .any(|event| event.kind == "backend.openhands.timeout"));
+        assert_eq!(result.report.unwrap().status, ReportStatus::Blocked);
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn workflow_runner_with_script<I, S>(
         mut config: ProjectConfig,
         store: RunStore,
@@ -1974,15 +2229,109 @@ mod tests {
         }
     }
 
+    fn openhands_test_config(
+        server_url: String,
+        max_event_poll_seconds: u64,
+        poll_interval_ms: u64,
+    ) -> OpenHandsHarnessConfig {
+        OpenHandsHarnessConfig {
+            server_url,
+            session_api_key_env: None,
+            workspace_mode: Some("local".to_owned()),
+            prefer_websocket: false,
+            poll_interval_ms,
+            max_event_poll_seconds,
+            max_events: 10,
+            terminal_event_kinds: vec!["done".to_owned()],
+            api_paths: ConfigOpenHandsApiPaths::default(),
+            run_start_strategy: ConfigOpenHandsRunStartStrategy::PostUserEventWithRunTrue,
+        }
+    }
+
+    fn openhands_test_request(task: &str) -> HarnessRunRequest {
+        HarnessRunRequest {
+            run_id: RunId::from_string("run-openhands-test"),
+            workflow_id: "workflow".to_owned(),
+            node_id: "executor".to_owned(),
+            agent_id: "executor".to_owned(),
+            harness_id: "openhands-code-edit".to_owned(),
+            task: task.to_owned(),
+            backend_context: Value::Null,
+        }
+    }
+
+    fn spawn_openhands_server(responses: Vec<String>) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let requests_for_thread = Arc::clone(&requests);
+        let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
+        thread::spawn(move || {
+            while !responses.lock().unwrap().is_empty() {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let request = read_request(&mut stream);
+                requests_for_thread.lock().unwrap().push(request);
+                let response = responses.lock().unwrap().pop_front().unwrap();
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        (format!("http://{address}"), requests)
+    }
+
+    fn read_request(stream: &mut std::net::TcpStream) -> String {
+        let mut buffer = Vec::new();
+        let mut chunk = [0; 1024];
+        loop {
+            let read = stream.read(&mut chunk).unwrap_or(0);
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            if request_is_complete(&buffer) {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&buffer).into_owned()
+    }
+
+    fn request_is_complete(buffer: &[u8]) -> bool {
+        let Some(header_end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&buffer[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length: ")
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        buffer.len() >= header_end + 4 + content_length
+    }
+
+    fn json_response(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
     fn fixture() -> (ProjectConfig, PathBuf, RunStore) {
         let config: ProjectConfig =
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
-        static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root =
-            std::env::temp_dir().join(format!("coder-workflow-{}-{}", std::process::id(), id));
+        let root = temp_root();
         let store = RunStore::new(&root);
         (config, root, store)
+    }
+
+    fn temp_root() -> PathBuf {
+        static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("coder-workflow-{}-{}", std::process::id(), id))
     }
 
     fn make_workflow_native_only(config: &mut ProjectConfig) {
