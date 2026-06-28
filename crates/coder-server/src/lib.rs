@@ -1,4 +1,10 @@
-use std::{collections::BTreeSet, fs, net::SocketAddr, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use axum::{
     extract::{Path, Query, State},
@@ -25,34 +31,66 @@ use coder_store::{
     RepoEvidenceKind, RepoEvidenceRef, RunCheckpointRef, RunStore, StoreError, StoredRunSummary,
 };
 use coder_tools::{
-    apply_patch_file, preview_command, preview_patch_file, CommandPreview, PatchApplyEvidence,
-    PatchApplyRequest as ToolPatchApplyRequest, PatchPreviewEvidence, RepoToolError,
+    apply_patch_file, find_files, git_diff, git_status, preview_command, preview_patch_file,
+    read_file, read_file_range, run_command, search_text, CommandPreview, CommandRunEvidence,
+    CommandRunRequest, GitDiffEvidence, GitStatusEvidence, PatchApplyEvidence,
+    PatchApplyRequest as ToolPatchApplyRequest, PatchPreviewEvidence, RepoFileEvidence,
+    RepoFileRef, RepoReadSnippet, RepoSearchMatch, RepoToolConfig, RepoToolError,
 };
 use coder_workflow::{MockWorkflowRunner, WorkflowError};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
 
 #[derive(Debug, Clone)]
 pub struct ApiState {
     pub store: RunStore,
+    library_workflows: Arc<Mutex<BTreeMap<String, Value>>>,
+    planner_sessions: Arc<Mutex<BTreeMap<String, PlannerChatSession>>>,
 }
 
 impl ApiState {
     pub fn new(store: RunStore) -> Self {
-        Self { store }
+        Self {
+            store,
+            library_workflows: Arc::new(Mutex::new(BTreeMap::new())),
+            planner_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+        }
     }
 }
 
 pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/api/v3/health", get(health))
+        .route("/api/v3/capabilities", get(capabilities))
+        .route("/api/v3/agent-role-cards", get(agent_role_cards))
         .route("/api/v3/memory/project/load", post(load_project_memory))
         .route(
             "/api/v3/memory/project/propose-write",
             post(propose_project_memory_write),
         )
         .route("/api/v3/config/validate", post(validate_config))
+        .route("/api/v3/workflows/default", get(default_workflow))
         .route("/api/v3/workflows/validate", post(validate_workflow))
+        .route("/api/v3/workflows/preview", post(preview_run))
+        .route("/api/v3/workflows/run", post(run_workflow))
+        .route("/api/v3/library", get(get_library))
+        .route("/api/v3/library/workflows", post(save_library_workflow))
+        .route(
+            "/api/v3/library/workflows/{workflow_id}",
+            get(get_library_workflow),
+        )
+        .route(
+            "/api/v3/planner-chat/sessions",
+            post(create_planner_chat_session),
+        )
+        .route(
+            "/api/v3/planner-chat/sessions/{session_id}",
+            get(get_planner_chat_session),
+        )
+        .route(
+            "/api/v3/planner-chat/sessions/{session_id}/turn",
+            post(planner_chat_turn),
+        )
         .route("/api/v3/mcp/manifests/validate", post(validate_mcp))
         .route("/api/v3/extensions/plugins", get(list_extension_plugins))
         .route(
@@ -60,12 +98,31 @@ pub fn router(state: ApiState) -> Router {
             post(validate_extension_plugin),
         )
         .route("/api/v3/harness/tools", get(list_harness_tools))
-        .route("/api/v3/runs", get(list_runs))
+        .route("/api/v3/runs", get(list_runs).post(run_workflow))
         .route("/api/v3/runs/preview", post(preview_run))
         .route(
             "/api/v3/tools/command/preview",
             post(preview_command_endpoint),
         )
+        .route("/api/v3/tools/command/run", post(run_command_endpoint))
+        .route(
+            "/api/v3/tools/repo/find-files",
+            post(repo_find_files_endpoint),
+        )
+        .route(
+            "/api/v3/tools/repo/search-text",
+            post(repo_search_text_endpoint),
+        )
+        .route(
+            "/api/v3/tools/repo/read-file",
+            post(repo_read_file_endpoint),
+        )
+        .route(
+            "/api/v3/tools/repo/read-file-range",
+            post(repo_read_file_range_endpoint),
+        )
+        .route("/api/v3/tools/git/status", post(git_status_endpoint))
+        .route("/api/v3/tools/git/diff", post(git_diff_endpoint))
         .route("/api/v3/tools/patch/preview", post(preview_patch_endpoint))
         .route("/api/v3/tools/patch/apply", post(apply_patch_endpoint))
         .route("/api/v3/runs/mock", post(run_mock_workflow))
@@ -112,6 +169,237 @@ async fn health() -> Json<HealthResponse> {
         service: "coder-server",
         api_version: "v3",
     })
+}
+
+async fn capabilities() -> Json<CapabilitiesResponse> {
+    Json(CapabilitiesResponse {
+        api_version: "v3",
+        workflow: vec![
+            "validate",
+            "preview",
+            "run_mock",
+            "library_in_memory",
+            "graph_semantics",
+        ],
+        runs: vec![
+            "list",
+            "detail",
+            "events",
+            "pause",
+            "resume",
+            "cancel",
+            "heartbeat",
+            "report_preview",
+            "report_write",
+            "artifacts",
+            "blobs",
+            "repo_evidence",
+        ],
+        tools: vec![
+            "repo_find_files",
+            "repo_search_text",
+            "repo_read_file",
+            "repo_read_file_range",
+            "git_status",
+            "git_diff",
+            "command_preview",
+            "command_run",
+            "patch_preview",
+            "patch_apply",
+        ],
+        planner_chat: vec!["sessions", "turns", "discuss_no_execute", "work_preview"],
+        settings: vec!["provider_profiles_deferred"],
+        extensions: vec![
+            "plugins_list",
+            "plugin_validate",
+            "mcp_validate",
+            "harness_tools",
+        ],
+        memory: vec!["project_load", "project_write_proposal"],
+    })
+}
+
+async fn agent_role_cards() -> Json<AgentRoleCardsResponse> {
+    Json(AgentRoleCardsResponse {
+        role_cards: vec![
+            AgentRoleCard {
+                id: "planner",
+                label: "Planner",
+                archetype: "planner",
+                role: "planner",
+                engine_id: "planner-engine",
+                default_capabilities: vec![
+                    "negotiate_contract",
+                    "make_plan",
+                    "judge_completion",
+                    "judge_risk",
+                    "make_next_decision",
+                    "round_summarize",
+                ],
+                description: "Plans work, decides readiness, and owns final reports.",
+                default_output_contract: "planner_order",
+            },
+            AgentRoleCard {
+                id: "executor",
+                label: "Executor",
+                archetype: "executor",
+                role: "executor",
+                engine_id: "code-worker-engine",
+                default_capabilities: vec![
+                    "follow_planner_order",
+                    "modify_files",
+                    "optional_check_command",
+                    "return_execution_result",
+                ],
+                description: "Executes planner-approved work and returns evidence.",
+                default_output_contract: "execution_result",
+            },
+        ],
+    })
+}
+
+async fn default_workflow() -> Json<DefaultWorkflowResponse> {
+    let config: ProjectConfig =
+        serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+    let workflow_id = "planner-led".to_owned();
+    let workflow = config.workflows.get(&workflow_id).cloned();
+    Json(DefaultWorkflowResponse {
+        workflow_id,
+        config,
+        workflow,
+    })
+}
+
+async fn get_library(State(state): State<ApiState>) -> Json<LibraryResponse> {
+    let workflows = state
+        .library_workflows
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(id, workflow)| LibraryWorkflowSummary {
+            id: id.clone(),
+            workflow: workflow.clone(),
+        })
+        .collect();
+    Json(LibraryResponse { workflows })
+}
+
+async fn save_library_workflow(
+    State(state): State<ApiState>,
+    Json(request): Json<LibraryWorkflowSaveRequest>,
+) -> Result<Json<LibraryWorkflowSaveResponse>, ApiError> {
+    if request.workflow_id.trim().is_empty() {
+        return Err(ApiError::bad_request("workflow_id must not be empty"));
+    }
+    state
+        .library_workflows
+        .lock()
+        .unwrap()
+        .insert(request.workflow_id.clone(), request.workflow.clone());
+    Ok(Json(LibraryWorkflowSaveResponse {
+        workflow_id: request.workflow_id,
+        workflow: request.workflow,
+        saved: true,
+    }))
+}
+
+async fn get_library_workflow(
+    State(state): State<ApiState>,
+    Path(workflow_id): Path<String>,
+) -> Result<Json<LibraryWorkflowGetResponse>, ApiError> {
+    let workflow = state
+        .library_workflows
+        .lock()
+        .unwrap()
+        .get(&workflow_id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found(format!("workflow '{workflow_id}' was not found")))?;
+    Ok(Json(LibraryWorkflowGetResponse {
+        workflow_id,
+        workflow,
+    }))
+}
+
+async fn create_planner_chat_session(
+    State(state): State<ApiState>,
+    Json(request): Json<PlannerChatSessionCreateRequest>,
+) -> Json<PlannerChatSessionResponse> {
+    let session_id = format!("pcs_{}", RunId::new());
+    let session = PlannerChatSession {
+        session_id: session_id.clone(),
+        workflow_id: request
+            .workflow_id
+            .unwrap_or_else(|| "planner-led".to_owned()),
+        mode: request.mode.unwrap_or_else(|| "discuss".to_owned()),
+        ready: false,
+        turns: Vec::new(),
+    };
+    state
+        .planner_sessions
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), session.clone());
+    Json(PlannerChatSessionResponse { session })
+}
+
+async fn get_planner_chat_session(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<PlannerChatSessionResponse>, ApiError> {
+    let session = state
+        .planner_sessions
+        .lock()
+        .unwrap()
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found(format!("session '{session_id}' was not found")))?;
+    Ok(Json(PlannerChatSessionResponse { session }))
+}
+
+async fn planner_chat_turn(
+    State(state): State<ApiState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<PlannerChatTurnRequest>,
+) -> Result<Json<PlannerChatTurnResponse>, ApiError> {
+    let mut sessions = state.planner_sessions.lock().unwrap();
+    let session = sessions
+        .get_mut(&session_id)
+        .ok_or_else(|| ApiError::not_found(format!("session '{session_id}' was not found")))?;
+    let user_turn = PlannerChatTurn {
+        role: "user".to_owned(),
+        content: request.message.clone(),
+    };
+    session.turns.push(user_turn);
+    let ready = request.message.to_ascii_lowercase().contains("ready");
+    session.ready = session.ready || ready;
+    let execution_allowed =
+        session.mode == "work" && session.ready && request.confirmed == Some(true);
+    let assistant = if session.mode == "discuss" {
+        "Discuss mode recorded the turn without starting execution.".to_owned()
+    } else if execution_allowed {
+        "Work mode is confirmed and ready for run creation.".to_owned()
+    } else {
+        "Work mode needs a ready task state and explicit confirmation before execution.".to_owned()
+    };
+    session.turns.push(PlannerChatTurn {
+        role: "assistant".to_owned(),
+        content: assistant.clone(),
+    });
+    Ok(Json(PlannerChatTurnResponse {
+        session: session.clone(),
+        assistant_message: assistant,
+        ready: session.ready,
+        execution_allowed,
+        run_preview: if session.mode == "work" {
+            Some(json!({
+                "status": if session.ready { "ready" } else { "blocked" },
+                "requires_confirmation": session.ready,
+                "workflow_id": session.workflow_id
+            }))
+        } else {
+            None
+        },
+    }))
 }
 
 async fn load_project_memory(
@@ -226,6 +514,13 @@ async fn run_mock_workflow(
     }))
 }
 
+async fn run_workflow(
+    State(state): State<ApiState>,
+    Json(request): Json<MockRunRequest>,
+) -> Result<Json<MockRunResponse>, ApiError> {
+    run_mock_workflow(State(state), Json(request)).await
+}
+
 async fn preview_run(Json(request): Json<RunPreviewRequest>) -> Json<RunPreviewResponse> {
     let mut issues = validate_project_config(&request.config).issues;
     let workflow = request.config.workflows.get(&request.workflow_id);
@@ -288,6 +583,232 @@ async fn preview_command_endpoint(
         request.sandbox.unwrap_or(false),
     )?;
     Ok(Json(preview))
+}
+
+async fn run_command_endpoint(
+    State(state): State<ApiState>,
+    Json(request): Json<CommandRunToolRequest>,
+) -> Result<Json<CommandRunResponse>, ApiError> {
+    let CommandRunToolRequest {
+        repo_root,
+        cwd,
+        argv,
+        timeout_seconds,
+        max_output_bytes,
+        source,
+        sandbox,
+        approved,
+        run_id,
+    } = request;
+    let output = run_command(
+        &repo_root,
+        CommandRunRequest {
+            cwd: cwd.unwrap_or_else(|| ".".into()).into(),
+            argv,
+            timeout_seconds: timeout_seconds
+                .unwrap_or(coder_tools::DEFAULT_COMMAND_TIMEOUT_SECONDS),
+            max_output_bytes: max_output_bytes
+                .unwrap_or(coder_tools::DEFAULT_MAX_COMMAND_OUTPUT_BYTES),
+            source: source.unwrap_or_else(|| "model".to_owned()),
+            sandbox: sandbox.unwrap_or(false),
+            approved: approved.unwrap_or(false),
+        },
+    )?;
+    let evidence_ref = write_tool_evidence(
+        &state.store,
+        run_id.as_deref(),
+        RepoEvidenceKind::RepoTest,
+        &repo_root,
+        "Ran command through Rust tool endpoint.",
+        json!({
+            "evidence_kind": "command_evidence",
+            "operation": "command_run",
+            "result": serde_json::to_value(&output).map_err(|error| ApiError::internal(error.to_string()))?
+        }),
+    )?;
+    if let (Some(run_id), Some(reference)) = (&run_id, &evidence_ref) {
+        record_command_events(
+            &state.store,
+            &RunId::from_string(run_id.clone()),
+            &output,
+            reference,
+        )?;
+    }
+    Ok(Json(CommandRunResponse {
+        evidence_ref,
+        result: output,
+    }))
+}
+
+async fn repo_find_files_endpoint(
+    State(state): State<ApiState>,
+    Json(request): Json<RepoFindFilesRequest>,
+) -> Result<Json<RepoFindFilesResponse>, ApiError> {
+    let files = find_files(
+        &request.repo_root,
+        request.query.as_deref(),
+        &request.extensions.unwrap_or_default(),
+        request
+            .max_results
+            .unwrap_or(coder_tools::DEFAULT_MAX_FILE_RESULTS),
+    )?;
+    let evidence_ref = write_tool_evidence(
+        &state.store,
+        request.run_id.as_deref(),
+        RepoEvidenceKind::RepoFileList,
+        &request.repo_root,
+        format!("Found {} file(s).", files.len()),
+        json!({
+            "evidence_kind": "repo_evidence",
+            "operation": "find_files",
+            "files": serde_json::to_value(&files).map_err(|error| ApiError::internal(error.to_string()))?
+        }),
+    )?;
+    Ok(Json(RepoFindFilesResponse {
+        evidence_ref,
+        files,
+    }))
+}
+
+async fn repo_search_text_endpoint(
+    State(state): State<ApiState>,
+    Json(request): Json<RepoSearchTextRequest>,
+) -> Result<Json<RepoSearchTextResponse>, ApiError> {
+    let matches = search_text(
+        &request.repo_root,
+        &request.query,
+        &RepoToolConfig {
+            max_file_bytes: request
+                .max_file_bytes
+                .unwrap_or(coder_tools::DEFAULT_MAX_FILE_BYTES),
+            max_search_matches: request
+                .max_matches
+                .unwrap_or(coder_tools::DEFAULT_MAX_SEARCH_MATCHES),
+        },
+    )?;
+    let evidence_ref = write_tool_evidence(
+        &state.store,
+        request.run_id.as_deref(),
+        RepoEvidenceKind::RepoTextSearch,
+        &request.repo_root,
+        format!("Found {} text match(es).", matches.len()),
+        json!({
+            "evidence_kind": "repo_evidence",
+            "operation": "search_text",
+            "query": request.query,
+            "matches": serde_json::to_value(&matches).map_err(|error| ApiError::internal(error.to_string()))?
+        }),
+    )?;
+    Ok(Json(RepoSearchTextResponse {
+        evidence_ref,
+        matches,
+    }))
+}
+
+async fn repo_read_file_endpoint(
+    State(state): State<ApiState>,
+    Json(request): Json<RepoReadFileRequest>,
+) -> Result<Json<RepoReadFileResponse>, ApiError> {
+    let file = read_file(
+        &request.repo_root,
+        PathBuf::from(&request.path),
+        &RepoToolConfig {
+            max_file_bytes: request
+                .max_file_bytes
+                .unwrap_or(coder_tools::DEFAULT_MAX_FILE_BYTES),
+            max_search_matches: coder_tools::DEFAULT_MAX_SEARCH_MATCHES,
+        },
+    )?;
+    let evidence_ref = write_tool_evidence(
+        &state.store,
+        request.run_id.as_deref(),
+        RepoEvidenceKind::RepoRead,
+        &request.repo_root,
+        format!("Read file '{}'.", file.path),
+        json!({
+            "evidence_kind": "repo_evidence",
+            "operation": "read_file",
+            "file": serde_json::to_value(&file).map_err(|error| ApiError::internal(error.to_string()))?
+        }),
+    )?;
+    Ok(Json(RepoReadFileResponse { evidence_ref, file }))
+}
+
+async fn repo_read_file_range_endpoint(
+    State(state): State<ApiState>,
+    Json(request): Json<RepoReadFileRangeRequest>,
+) -> Result<Json<RepoReadFileRangeResponse>, ApiError> {
+    let snippet = read_file_range(
+        &request.repo_root,
+        PathBuf::from(&request.path),
+        request.start_line.unwrap_or(1),
+        request.max_lines.unwrap_or(120),
+        request.max_chars.unwrap_or(16_000),
+    )?;
+    let evidence_ref = write_tool_evidence(
+        &state.store,
+        request.run_id.as_deref(),
+        RepoEvidenceKind::RepoRead,
+        &request.repo_root,
+        format!("Read file range '{}'.", snippet.path),
+        json!({
+            "evidence_kind": "repo_evidence",
+            "operation": "read_file_range",
+            "snippet": serde_json::to_value(&snippet).map_err(|error| ApiError::internal(error.to_string()))?
+        }),
+    )?;
+    Ok(Json(RepoReadFileRangeResponse {
+        evidence_ref,
+        snippet,
+    }))
+}
+
+async fn git_status_endpoint(
+    State(state): State<ApiState>,
+    Json(request): Json<GitStatusRequest>,
+) -> Result<Json<GitStatusResponse>, ApiError> {
+    let status = git_status(&request.repo_root)?;
+    let evidence_ref = write_tool_evidence(
+        &state.store,
+        request.run_id.as_deref(),
+        RepoEvidenceKind::RepoDiff,
+        &request.repo_root,
+        "Captured git status.",
+        json!({
+            "evidence_kind": "repo_evidence",
+            "operation": "git_status",
+            "status": serde_json::to_value(&status).map_err(|error| ApiError::internal(error.to_string()))?
+        }),
+    )?;
+    Ok(Json(GitStatusResponse {
+        evidence_ref,
+        status,
+    }))
+}
+
+async fn git_diff_endpoint(
+    State(state): State<ApiState>,
+    Json(request): Json<GitDiffRequest>,
+) -> Result<Json<GitDiffResponse>, ApiError> {
+    let diff = git_diff(
+        &request.repo_root,
+        request
+            .max_output_bytes
+            .unwrap_or(coder_tools::DEFAULT_MAX_GIT_OUTPUT_BYTES),
+    )?;
+    let evidence_ref = write_tool_evidence(
+        &state.store,
+        request.run_id.as_deref(),
+        RepoEvidenceKind::RepoDiff,
+        &request.repo_root,
+        "Captured git diff.",
+        json!({
+            "evidence_kind": "repo_evidence",
+            "operation": "git_diff",
+            "diff": serde_json::to_value(&diff).map_err(|error| ApiError::internal(error.to_string()))?
+        }),
+    )?;
+    Ok(Json(GitDiffResponse { evidence_ref, diff }))
 }
 
 async fn preview_patch_endpoint(
@@ -569,6 +1090,113 @@ struct HealthResponse {
     api_version: &'static str,
 }
 
+#[derive(Debug, Serialize)]
+pub struct CapabilitiesResponse {
+    pub api_version: &'static str,
+    pub workflow: Vec<&'static str>,
+    pub runs: Vec<&'static str>,
+    pub tools: Vec<&'static str>,
+    pub planner_chat: Vec<&'static str>,
+    pub settings: Vec<&'static str>,
+    pub extensions: Vec<&'static str>,
+    pub memory: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentRoleCardsResponse {
+    pub role_cards: Vec<AgentRoleCard>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentRoleCard {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub archetype: &'static str,
+    pub role: &'static str,
+    pub engine_id: &'static str,
+    pub default_capabilities: Vec<&'static str>,
+    pub description: &'static str,
+    pub default_output_contract: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DefaultWorkflowResponse {
+    pub workflow_id: String,
+    pub config: ProjectConfig,
+    pub workflow: Option<coder_config::WorkflowSpec>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LibraryResponse {
+    pub workflows: Vec<LibraryWorkflowSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LibraryWorkflowSummary {
+    pub id: String,
+    pub workflow: Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LibraryWorkflowSaveRequest {
+    pub workflow_id: String,
+    pub workflow: Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LibraryWorkflowSaveResponse {
+    pub workflow_id: String,
+    pub workflow: Value,
+    pub saved: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LibraryWorkflowGetResponse {
+    pub workflow_id: String,
+    pub workflow: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannerChatSession {
+    pub session_id: String,
+    pub workflow_id: String,
+    pub mode: String,
+    pub ready: bool,
+    pub turns: Vec<PlannerChatTurn>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlannerChatTurn {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PlannerChatSessionCreateRequest {
+    pub workflow_id: Option<String>,
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlannerChatSessionResponse {
+    pub session: PlannerChatSession,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PlannerChatTurnRequest {
+    pub message: String,
+    pub confirmed: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PlannerChatTurnResponse {
+    pub session: PlannerChatSession,
+    pub assistant_message: String,
+    pub ready: bool,
+    pub execution_allowed: bool,
+    pub run_preview: Option<Value>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ProjectMemoryLoadRequest {
     pub repo_root: String,
@@ -654,6 +1282,110 @@ pub struct CommandPreviewRequest {
     pub argv: Vec<String>,
     pub source: Option<String>,
     pub sandbox: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CommandRunToolRequest {
+    pub repo_root: String,
+    pub cwd: Option<String>,
+    pub argv: Vec<String>,
+    pub timeout_seconds: Option<u64>,
+    pub max_output_bytes: Option<usize>,
+    pub source: Option<String>,
+    pub sandbox: Option<bool>,
+    pub approved: Option<bool>,
+    pub run_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CommandRunResponse {
+    pub evidence_ref: Option<RepoEvidenceRef>,
+    pub result: CommandRunEvidence,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RepoFindFilesRequest {
+    pub repo_root: String,
+    pub query: Option<String>,
+    pub extensions: Option<Vec<String>>,
+    pub max_results: Option<usize>,
+    pub run_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RepoFindFilesResponse {
+    pub evidence_ref: Option<RepoEvidenceRef>,
+    pub files: Vec<RepoFileRef>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RepoSearchTextRequest {
+    pub repo_root: String,
+    pub query: String,
+    pub max_file_bytes: Option<u64>,
+    pub max_matches: Option<usize>,
+    pub run_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RepoSearchTextResponse {
+    pub evidence_ref: Option<RepoEvidenceRef>,
+    pub matches: Vec<RepoSearchMatch>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RepoReadFileRequest {
+    pub repo_root: String,
+    pub path: String,
+    pub max_file_bytes: Option<u64>,
+    pub run_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RepoReadFileResponse {
+    pub evidence_ref: Option<RepoEvidenceRef>,
+    pub file: RepoFileEvidence,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RepoReadFileRangeRequest {
+    pub repo_root: String,
+    pub path: String,
+    pub start_line: Option<usize>,
+    pub max_lines: Option<usize>,
+    pub max_chars: Option<usize>,
+    pub run_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RepoReadFileRangeResponse {
+    pub evidence_ref: Option<RepoEvidenceRef>,
+    pub snippet: RepoReadSnippet,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitStatusRequest {
+    pub repo_root: String,
+    pub run_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitStatusResponse {
+    pub evidence_ref: Option<RepoEvidenceRef>,
+    pub status: GitStatusEvidence,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitDiffRequest {
+    pub repo_root: String,
+    pub max_output_bytes: Option<usize>,
+    pub run_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitDiffResponse {
+    pub evidence_ref: Option<RepoEvidenceRef>,
+    pub diff: GitDiffEvidence,
 }
 
 #[derive(Debug, Deserialize)]
@@ -875,6 +1607,105 @@ fn control_run(
     }))
 }
 
+fn write_tool_evidence(
+    store: &RunStore,
+    run_id: Option<&str>,
+    kind: RepoEvidenceKind,
+    repo_root: &str,
+    summary: impl Into<String>,
+    payload: Value,
+) -> Result<Option<RepoEvidenceRef>, ApiError> {
+    let Some(run_id) = run_id else {
+        return Ok(None);
+    };
+    let repo_root = fs::canonicalize(repo_root)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| repo_root.to_owned());
+    let reference = store.write_repo_evidence(
+        &RunId::from_string(run_id.to_owned()),
+        kind,
+        repo_root,
+        Vec::new(),
+        summary,
+        payload,
+    )?;
+    Ok(Some(reference))
+}
+
+fn record_command_events(
+    store: &RunStore,
+    run_id: &RunId,
+    output: &CommandRunEvidence,
+    evidence_ref: &RepoEvidenceRef,
+) -> Result<(), StoreError> {
+    let mut sequence = store.read_events(run_id)?.len() as u64 + 1;
+    let evidence_uri = format!("repo-evidence://{}", evidence_ref.ref_id);
+    if output.blocked && output.requires_approval {
+        store.append_event(
+            run_id,
+            &coder_events::CoderEvent::new(
+                run_id.clone(),
+                sequence,
+                "approval.requested",
+                json!({
+                    "approval_type": "command",
+                    "approval_key": &output.approval_key,
+                    "command": &output.command,
+                    "cwd": &output.cwd,
+                    "policy": &output.policy,
+                    "evidence_ref": &evidence_ref.ref_id,
+                }),
+            )
+            .with_ref("command_evidence", evidence_uri),
+        )?;
+        return Ok(());
+    }
+
+    store.append_event(
+        run_id,
+        &coder_events::CoderEvent::new(
+            run_id.clone(),
+            sequence,
+            "command.started",
+            json!({
+                "command": &output.command,
+                "argv": &output.argv,
+                "cwd": &output.cwd,
+                "approval_key": &output.approval_key,
+                "policy": &output.policy,
+                "evidence_ref": &evidence_ref.ref_id,
+            }),
+        )
+        .with_ref("command_evidence", evidence_uri.clone()),
+    )?;
+    sequence += 1;
+    let kind = match output.status.as_str() {
+        "completed" => "command.completed",
+        _ => "command.failed",
+    };
+    store.append_event(
+        run_id,
+        &coder_events::CoderEvent::new(
+            run_id.clone(),
+            sequence,
+            kind,
+            json!({
+                "command": &output.command,
+                "cwd": &output.cwd,
+                "status": &output.status,
+                "passed": output.passed,
+                "returncode": output.returncode,
+                "timed_out": output.timed_out,
+                "output_preview": &output.output,
+                "output_truncated": output.output_truncated,
+                "evidence_ref": &evidence_ref.ref_id,
+            }),
+        )
+        .with_ref("command_evidence", evidence_uri),
+    )?;
+    Ok(())
+}
+
 fn record_patch_apply_event(
     store: &RunStore,
     run_id: &RunId,
@@ -1064,6 +1895,215 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["status"], "ok");
         assert_eq!(body["api_version"], "v3");
+    }
+
+    #[tokio::test]
+    async fn capabilities_and_role_cards_expose_product_surface() {
+        let app = test_router();
+        let capabilities_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(capabilities_response.status(), StatusCode::OK);
+        let capabilities = response_json(capabilities_response).await;
+        assert_eq!(capabilities["api_version"], "v3");
+        assert!(capabilities["workflow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str() == Some("graph_semantics")));
+        assert!(capabilities["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str() == Some("command_run")));
+
+        let role_cards_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/agent-role-cards")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(role_cards_response.status(), StatusCode::OK);
+        let role_cards = response_json(role_cards_response).await;
+        let executor = role_cards["role_cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|card| card["id"] == "executor")
+            .unwrap();
+        assert_eq!(executor["role"], "executor");
+        assert!(executor["default_capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.as_str() == Some("return_execution_result")));
+    }
+
+    #[tokio::test]
+    async fn default_workflow_endpoint_returns_planner_led_spec() {
+        let app = test_router();
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/workflows/default")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["workflow_id"], "planner-led");
+        assert_eq!(body["config"]["version"], 1);
+        assert_eq!(body["workflow"]["name"], "Planner-led Agent Workflow");
+    }
+
+    #[tokio::test]
+    async fn library_workflow_endpoints_roundtrip_in_memory_specs() {
+        let app = test_router();
+        let save_response = post_json(
+            app.clone(),
+            "/api/v3/library/workflows",
+            json!({
+                "workflow_id": "custom-flow",
+                "workflow": {
+                    "name": "Custom Flow",
+                    "nodes": [{"id": "planner", "agent": "planner", "harness": "planner-harness"}],
+                    "edges": []
+                }
+            }),
+        )
+        .await;
+        assert_eq!(save_response.status(), StatusCode::OK);
+        let save_body = response_json(save_response).await;
+        assert_eq!(save_body["workflow_id"], "custom-flow");
+        assert_eq!(save_body["saved"], true);
+
+        let get_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/library/workflows/custom-flow")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let get_body = response_json(get_response).await;
+        assert_eq!(get_body["workflow"]["name"], "Custom Flow");
+
+        let list_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/library")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let list_body = response_json(list_response).await;
+        assert_eq!(list_body["workflows"][0]["id"], "custom-flow");
+    }
+
+    #[tokio::test]
+    async fn planner_chat_discuss_mode_never_allows_execution() {
+        let app = test_router();
+        let create_response = post_json(
+            app.clone(),
+            "/api/v3/planner-chat/sessions",
+            json!({
+                "workflow_id": "planner-led",
+                "mode": "discuss"
+            }),
+        )
+        .await;
+        assert_eq!(create_response.status(), StatusCode::OK);
+        let create_body = response_json(create_response).await;
+        let session_id = create_body["session"]["session_id"].as_str().unwrap();
+
+        let turn_response = post_json(
+            app,
+            &format!("/api/v3/planner-chat/sessions/{session_id}/turn"),
+            json!({
+                "message": "ready to implement",
+                "confirmed": true
+            }),
+        )
+        .await;
+        assert_eq!(turn_response.status(), StatusCode::OK);
+        let turn_body = response_json(turn_response).await;
+        assert_eq!(turn_body["ready"], true);
+        assert_eq!(turn_body["execution_allowed"], false);
+        assert_eq!(turn_body["run_preview"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn planner_chat_work_mode_requires_ready_and_confirmation() {
+        let app = test_router();
+        let create_response = post_json(
+            app.clone(),
+            "/api/v3/planner-chat/sessions",
+            json!({
+                "workflow_id": "planner-led",
+                "mode": "work"
+            }),
+        )
+        .await;
+        let session_id = response_json(create_response).await["session"]["session_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let unready_response = post_json(
+            app.clone(),
+            &format!("/api/v3/planner-chat/sessions/{session_id}/turn"),
+            json!({
+                "message": "please inspect this first",
+                "confirmed": true
+            }),
+        )
+        .await;
+        let unready = response_json(unready_response).await;
+        assert_eq!(unready["execution_allowed"], false);
+        assert_eq!(unready["run_preview"]["status"], "blocked");
+
+        let unconfirmed_response = post_json(
+            app.clone(),
+            &format!("/api/v3/planner-chat/sessions/{session_id}/turn"),
+            json!({
+                "message": "ready to run",
+                "confirmed": false
+            }),
+        )
+        .await;
+        let unconfirmed = response_json(unconfirmed_response).await;
+        assert_eq!(unconfirmed["ready"], true);
+        assert_eq!(unconfirmed["execution_allowed"], false);
+        assert_eq!(unconfirmed["run_preview"]["requires_confirmation"], true);
+
+        let confirmed_response = post_json(
+            app,
+            &format!("/api/v3/planner-chat/sessions/{session_id}/turn"),
+            json!({
+                "message": "ready and confirmed",
+                "confirmed": true
+            }),
+        )
+        .await;
+        let confirmed = response_json(confirmed_response).await;
+        assert_eq!(confirmed["execution_allowed"], true);
     }
 
     #[tokio::test]
@@ -1418,6 +2458,85 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn repo_read_file_range_endpoint_writes_evidence_when_run_id_is_present() {
+        let repo = temp_root();
+        let store_root = temp_root();
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::write(repo.join("src").join("app.rs"), "one\ntwo\nthree\n").unwrap();
+        let store = RunStore::new(&store_root);
+        let app = router(ApiState::new(store.clone()));
+
+        let response = post_json(
+            app,
+            "/api/v3/tools/repo/read-file-range",
+            json!({
+                "repo_root": repo.display().to_string(),
+                "path": "src/app.rs",
+                "start_line": 2,
+                "max_lines": 1,
+                "run_id": "run-1"
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["snippet"]["text"], "two\n");
+        assert!(body["evidence_ref"]["ref_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("repo-read:"));
+        let evidence = store
+            .list_repo_evidence(&RunId::from_string("run-1"))
+            .unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].kind, RepoEvidenceKind::RepoRead);
+        assert!(evidence[0].summary.contains("Read file range"));
+        let _ = fs::remove_dir_all(repo);
+        let _ = fs::remove_dir_all(store_root);
+    }
+
+    #[tokio::test]
+    async fn command_run_endpoint_blocks_model_command_without_approval() {
+        let repo = temp_root();
+        let store_root = temp_root();
+        fs::create_dir_all(&repo).unwrap();
+        let store = RunStore::new(&store_root);
+        let app = router(ApiState::new(store.clone()));
+
+        let response = post_json(
+            app,
+            "/api/v3/tools/command/run",
+            json!({
+                "repo_root": repo.display().to_string(),
+                "cwd": ".",
+                "argv": platform_echo_args("blocked"),
+                "source": "model",
+                "sandbox": false,
+                "approved": false,
+                "run_id": "run-1"
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["result"]["status"], "blocked");
+        assert_eq!(body["result"]["blocked"], true);
+        assert!(body["result"]["requires_approval"].as_bool().unwrap());
+        assert!(body["evidence_ref"]["ref_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("repo-test:"));
+        let events = store.read_events(&RunId::from_string("run-1")).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "approval.requested");
+        assert_eq!(events[0].payload["approval_type"], "command");
+        let _ = fs::remove_dir_all(repo);
+        let _ = fs::remove_dir_all(store_root);
     }
 
     #[tokio::test]
@@ -2064,5 +3183,18 @@ diff --git a/tracked.txt b/tracked.txt
         static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         std::env::temp_dir().join(format!("coder-server-{}-{}", std::process::id(), id))
+    }
+
+    fn platform_echo_args(text: &str) -> Vec<String> {
+        if cfg!(windows) {
+            vec![
+                "cmd.exe".to_owned(),
+                "/C".to_owned(),
+                "echo".to_owned(),
+                text.to_owned(),
+            ]
+        } else {
+            vec!["sh".to_owned(), "-c".to_owned(), format!("printf {text}")]
+        }
     }
 }
