@@ -366,6 +366,7 @@ dependencies = [
  "coder-harness",
  "coder-openhands",
  "coder-store",
+ "coder-tools",
  "serde_json",
  "serde_yaml",
  "thiserror",

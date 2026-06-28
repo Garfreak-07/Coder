@@ -22,7 +22,12 @@ use coder_openhands::{
     normalize_openhands_event, openhands_final_report, openhands_raw_event_kind, OpenHandsApiPaths,
     OpenHandsAuthHeaderMode, OpenHandsClient, OpenHandsRunStartStrategy, OpenHandsServerConfig,
 };
-use coder_store::{RunStore, StoreError};
+use coder_store::{RepoEvidenceKind, RepoEvidenceRef, RunStore, StoreError};
+use coder_tools::{
+    apply_patch_file, find_files, git_diff, git_status, preview_command, preview_patch_file,
+    read_file, read_file_range, run_command, search_text, CommandRunRequest,
+    PatchApplyRequest as ToolPatchApplyRequest, RepoToolConfig,
+};
 use serde_json::{json, Value};
 use thiserror::Error;
 
@@ -369,6 +374,8 @@ impl WorkflowRunner {
         let mut checks = Vec::new();
         let mut blockers = Vec::new();
         let mut evidence_refs = Vec::new();
+        let mut changed_files = BTreeSet::new();
+        let mut patch_refs = BTreeSet::new();
         let mut current_node_id = graph.start_node_id.clone();
         let mut round = 1;
         self.emit(
@@ -423,6 +430,7 @@ impl WorkflowRunner {
                     node_id: node.id.clone(),
                     agent_id: node.agent.clone(),
                     harness_id: node.harness.clone(),
+                    repo_root: options.repo_root.display().to_string(),
                     task: options.task.clone(),
                     backend_context: harness_backend_context(OpenHandsConversationPayloadInput {
                         run_id: &run_id,
@@ -472,6 +480,8 @@ impl WorkflowRunner {
             if let Some(report) = backend_result.report {
                 evidence_refs.extend(report.evidence_refs);
                 blockers.extend(report.blockers);
+                changed_files.extend(report.changed_files);
+                patch_refs.extend(report.patch_refs);
             }
 
             let Some(signal) = signal else {
@@ -621,6 +631,8 @@ impl WorkflowRunner {
             checks,
             evidence_refs,
             blockers,
+            changed_files: changed_files.into_iter().collect(),
+            patch_refs: patch_refs.into_iter().collect(),
         });
         let report_ref = self.store.write_report(&run_id, &report)?;
         self.emit(
@@ -930,14 +942,36 @@ pub fn build_openhands_conversation_payload(input: OpenHandsConversationPayloadI
 }
 
 fn harness_backend_context(input: OpenHandsConversationPayloadInput<'_>) -> Value {
+    let coder = json!({
+        "workflow_id": input.workflow_id,
+        "node_id": input.node.id,
+        "agent_id": input.agent_id,
+        "harness_id": input.harness_id,
+        "agent": {
+            "role": &input.agent.role,
+            "model": &input.agent.model,
+            "output_contract": &input.agent.output_contract
+        },
+        "harness": {
+            "backend": &input.harness.backend,
+            "selected_tools": &input.harness.tools,
+            "permissions": serde_json::to_value(&input.harness.permissions).unwrap_or(Value::Null),
+            "memory": serde_json::to_value(&input.harness.memory).unwrap_or(Value::Null),
+            "verification": serde_json::to_value(&input.harness.verification).unwrap_or(Value::Null)
+        },
+        "model": model_reference(input.agent, input.model),
+        "memory": memory_scope_summary(input.agent, input.harness),
+        "permissions": permission_summary(input.harness)
+    });
     if input.harness.backend == "openhands" {
         json!({
+            "coder": coder,
             "openhands": {
                 "create_conversation_payload": build_openhands_conversation_payload(input)
             }
         })
     } else {
-        Value::Null
+        json!({ "coder": coder })
     }
 }
 
@@ -1006,6 +1040,7 @@ pub struct WorkflowRunOutput {
 
 #[derive(Clone)]
 pub struct BackendRegistry {
+    native_rust: Arc<dyn HarnessBackend>,
     native_mock: Arc<dyn HarnessBackend>,
     openhands: Option<Arc<dyn HarnessBackend>>,
 }
@@ -1013,6 +1048,7 @@ pub struct BackendRegistry {
 impl BackendRegistry {
     pub fn native_only() -> Self {
         Self {
+            native_rust: Arc::new(NativeMockBackend::default()),
             native_mock: Arc::new(NativeMockBackend::default()),
             openhands: None,
         }
@@ -1025,17 +1061,18 @@ impl BackendRegistry {
             .find(|harness| harness.backend == "openhands")
             .and_then(|harness| harness.openhands.as_ref())
             .map(|config| {
-                Arc::new(OpenHandsHarnessBackend::new(config.clone(), store))
+                Arc::new(OpenHandsHarnessBackend::new(config.clone(), store.clone()))
                     as Arc<dyn HarnessBackend>
             });
         Self {
+            native_rust: Arc::new(NativeRustBackend::new(store.clone())),
             native_mock: Arc::new(NativeMockBackend::default()),
             openhands,
         }
     }
 
     pub fn with_native_backend(mut self, backend: Arc<dyn HarnessBackend>) -> Self {
-        self.native_mock = backend;
+        self.native_rust = backend;
         self
     }
 
@@ -1046,11 +1083,730 @@ impl BackendRegistry {
 
     pub fn backend_for(&self, backend: &str) -> Option<Arc<dyn HarnessBackend>> {
         match backend {
-            "native-rust" | "native_mock" | "mock" => Some(Arc::clone(&self.native_mock)),
+            "native-rust" => Some(Arc::clone(&self.native_rust)),
+            "native_mock" | "mock" => Some(Arc::clone(&self.native_mock)),
             "openhands" => self.openhands.as_ref().map(Arc::clone),
             _ => None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct NativeRustBackend {
+    store: RunStore,
+}
+
+impl NativeRustBackend {
+    pub fn new(store: RunStore) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl HarnessBackend for NativeRustBackend {
+    async fn run(&self, request: HarnessRunRequest) -> Result<HarnessRunResult, HarnessError> {
+        let repo_root = if request.repo_root.trim().is_empty() {
+            ".".to_owned()
+        } else {
+            request.repo_root.clone()
+        };
+        let tools = native_selected_tools(&request);
+        let mut events = vec![HarnessRunEvent::new(
+            "backend.native_rust.started",
+            json!({
+                "backend": "native-rust",
+                "node_id": request.node_id,
+                "agent_id": request.agent_id,
+                "harness_id": request.harness_id,
+                "tools": tools.iter().cloned().collect::<Vec<_>>()
+            }),
+        )];
+        let mut evidence_refs = Vec::new();
+        let mut patch_refs = Vec::new();
+        let mut changed_files = BTreeSet::new();
+        let mut checks = Vec::new();
+        let mut blockers = Vec::new();
+        let mut failures = Vec::new();
+        let mut completed_tools = 0usize;
+
+        if native_tool_enabled(&tools, "repo_find_files") {
+            match find_files(&repo_root, None, &[], 50) {
+                Ok(files) => {
+                    let file_count = files.len();
+                    let reference = write_native_repo_evidence(
+                        &self.store,
+                        &request.run_id,
+                        RepoEvidenceKind::RepoFileList,
+                        &repo_root,
+                        format!("Native Rust backend found {file_count} repo file(s)."),
+                        json!({
+                            "evidence_kind": "repo_evidence",
+                            "operation": "find_files",
+                            "files": files
+                        }),
+                    )?;
+                    evidence_refs.push(repo_evidence_ref(&reference));
+                    events.push(native_tool_event(
+                        "repo_find_files",
+                        "completed",
+                        json!({ "file_count": file_count }),
+                        Some(&reference),
+                    ));
+                    checks.push("repo_find_files: completed".to_owned());
+                    completed_tools += 1;
+                }
+                Err(error) => {
+                    failures.push(format!("repo_find_files failed: {error}"));
+                    events.push(native_tool_failure_event(
+                        "repo_find_files",
+                        error.to_string(),
+                    ));
+                }
+            }
+        }
+
+        if native_tool_enabled(&tools, "repo_search_text") {
+            let query = native_search_query(&request.task);
+            match search_text(&repo_root, &query, &RepoToolConfig::default()) {
+                Ok(matches) => {
+                    let match_count = matches.len();
+                    let reference = write_native_repo_evidence(
+                        &self.store,
+                        &request.run_id,
+                        RepoEvidenceKind::RepoTextSearch,
+                        &repo_root,
+                        format!("Native Rust backend found {match_count} text match(es)."),
+                        json!({
+                            "evidence_kind": "repo_evidence",
+                            "operation": "search_text",
+                            "query": query,
+                            "matches": matches
+                        }),
+                    )?;
+                    evidence_refs.push(repo_evidence_ref(&reference));
+                    events.push(native_tool_event(
+                        "repo_search_text",
+                        "completed",
+                        json!({ "match_count": match_count }),
+                        Some(&reference),
+                    ));
+                    checks.push("repo_search_text: completed".to_owned());
+                    completed_tools += 1;
+                }
+                Err(error) => {
+                    failures.push(format!("repo_search_text failed: {error}"));
+                    events.push(native_tool_failure_event(
+                        "repo_search_text",
+                        error.to_string(),
+                    ));
+                }
+            }
+        }
+
+        let candidate_file = native_candidate_file(&repo_root, &request.task);
+        if native_tool_enabled(&tools, "repo_read_file") {
+            if let Some(path) = &candidate_file {
+                match read_file(&repo_root, path, &RepoToolConfig::default()) {
+                    Ok(file) => {
+                        let file_path = file.path.clone();
+                        let reference = write_native_repo_evidence(
+                            &self.store,
+                            &request.run_id,
+                            RepoEvidenceKind::RepoRead,
+                            &repo_root,
+                            format!("Native Rust backend read {file_path}."),
+                            json!({
+                                "evidence_kind": "repo_evidence",
+                                "operation": "read_file",
+                                "file": file
+                            }),
+                        )?;
+                        evidence_refs.push(repo_evidence_ref(&reference));
+                        events.push(native_tool_event(
+                            "repo_read_file",
+                            "completed",
+                            json!({ "path": file_path }),
+                            Some(&reference),
+                        ));
+                        checks.push(format!("repo_read_file: {file_path}"));
+                        completed_tools += 1;
+                    }
+                    Err(error) => {
+                        failures.push(format!("repo_read_file failed: {error}"));
+                        events.push(native_tool_failure_event(
+                            "repo_read_file",
+                            error.to_string(),
+                        ));
+                    }
+                }
+            } else {
+                events.push(native_tool_skipped_event(
+                    "repo_read_file",
+                    "no safe readable candidate file found",
+                ));
+            }
+        }
+
+        if native_tool_enabled(&tools, "repo_read_file_range") {
+            if let Some(path) = &candidate_file {
+                match read_file_range(&repo_root, path, 1, 80, 16_000) {
+                    Ok(snippet) => {
+                        let snippet_path = snippet.path.clone();
+                        let reference = write_native_repo_evidence(
+                            &self.store,
+                            &request.run_id,
+                            RepoEvidenceKind::RepoRead,
+                            &repo_root,
+                            format!(
+                                "Native Rust backend read {snippet_path}:1-{}.",
+                                snippet.end_line
+                            ),
+                            json!({
+                                "evidence_kind": "repo_evidence",
+                                "operation": "read_file_range",
+                                "snippet": snippet
+                            }),
+                        )?;
+                        evidence_refs.push(repo_evidence_ref(&reference));
+                        events.push(native_tool_event(
+                            "repo_read_file_range",
+                            "completed",
+                            json!({ "path": snippet_path }),
+                            Some(&reference),
+                        ));
+                        checks.push(format!("repo_read_file_range: {snippet_path}"));
+                        completed_tools += 1;
+                    }
+                    Err(error) => {
+                        failures.push(format!("repo_read_file_range failed: {error}"));
+                        events.push(native_tool_failure_event(
+                            "repo_read_file_range",
+                            error.to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        if native_tool_enabled(&tools, "git_status") {
+            match git_status(&repo_root) {
+                Ok(status) => {
+                    let reference = write_native_repo_evidence(
+                        &self.store,
+                        &request.run_id,
+                        RepoEvidenceKind::RepoDiff,
+                        &repo_root,
+                        "Native Rust backend captured git status.",
+                        json!({
+                            "evidence_kind": "repo_evidence",
+                            "operation": "git_status",
+                            "status": status
+                        }),
+                    )?;
+                    evidence_refs.push(repo_evidence_ref(&reference));
+                    events.push(native_tool_event(
+                        "git_status",
+                        "completed",
+                        json!({}),
+                        Some(&reference),
+                    ));
+                    checks.push("git_status: completed".to_owned());
+                    completed_tools += 1;
+                }
+                Err(error) => {
+                    events.push(native_tool_failure_event("git_status", error.to_string()));
+                }
+            }
+        }
+
+        if native_tool_enabled(&tools, "git_diff") {
+            match git_diff(&repo_root, coder_tools::DEFAULT_MAX_GIT_OUTPUT_BYTES) {
+                Ok(diff) => {
+                    let reference = write_native_repo_evidence(
+                        &self.store,
+                        &request.run_id,
+                        RepoEvidenceKind::RepoDiff,
+                        &repo_root,
+                        "Native Rust backend captured git diff.",
+                        json!({
+                            "evidence_kind": "repo_evidence",
+                            "operation": "git_diff",
+                            "diff": diff
+                        }),
+                    )?;
+                    evidence_refs.push(repo_evidence_ref(&reference));
+                    events.push(native_tool_event(
+                        "git_diff",
+                        "completed",
+                        json!({}),
+                        Some(&reference),
+                    ));
+                    checks.push("git_diff: completed".to_owned());
+                    completed_tools += 1;
+                }
+                Err(error) => {
+                    events.push(native_tool_failure_event("git_diff", error.to_string()));
+                }
+            }
+        }
+
+        if native_tool_enabled(&tools, "command_preview") {
+            if let Some(argv) = native_command_args(&request.task) {
+                match preview_command(&repo_root, ".", argv, "model", false) {
+                    Ok(preview) => {
+                        events.push(HarnessRunEvent::new(
+                            "native.tool.completed",
+                            json!({
+                                "tool": "command_preview",
+                                "status": "completed",
+                                "command": preview.command,
+                                "requires_approval": preview.requires_approval,
+                                "approval_key": preview.approval_key,
+                                "policy": preview.policy
+                            }),
+                        ));
+                        checks.push("command_preview: completed".to_owned());
+                        completed_tools += 1;
+                    }
+                    Err(error) => {
+                        failures.push(format!("command_preview failed: {error}"));
+                        events.push(native_tool_failure_event(
+                            "command_preview",
+                            error.to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        if native_tool_enabled(&tools, "command_run") {
+            if let Some(argv) = native_command_args(&request.task) {
+                match run_command(
+                    &repo_root,
+                    CommandRunRequest {
+                        argv,
+                        source: "model".to_owned(),
+                        approved: false,
+                        ..CommandRunRequest::default()
+                    },
+                ) {
+                    Ok(output) => {
+                        let blocked = output.blocked;
+                        let requires_approval = output.requires_approval;
+                        let reference = write_native_repo_evidence(
+                            &self.store,
+                            &request.run_id,
+                            RepoEvidenceKind::RepoTest,
+                            &repo_root,
+                            format!("Native Rust command {}: {}.", output.status, output.command),
+                            json!({
+                                "evidence_kind": "command_evidence",
+                                "operation": "command_run",
+                                "result": output
+                            }),
+                        )?;
+                        evidence_refs.push(repo_evidence_ref(&reference));
+                        let event_kind = if blocked && requires_approval {
+                            "approval.requested"
+                        } else {
+                            "native.tool.completed"
+                        };
+                        events.push(
+                            HarnessRunEvent::new(
+                                event_kind,
+                                json!({
+                                    "tool": "command_run",
+                                    "approval_type": if blocked && requires_approval { "command" } else { "" },
+                                    "status": if blocked { "blocked" } else { "completed" },
+                                    "requires_approval": requires_approval,
+                                    "evidence_ref": reference.ref_id
+                                }),
+                            )
+                            .with_ref("command_evidence", format!("repo-evidence://{}", reference.ref_id)),
+                        );
+                        if blocked && requires_approval {
+                            blockers.push("command_run requires approval".to_owned());
+                        } else {
+                            checks.push("command_run: completed".to_owned());
+                            completed_tools += 1;
+                        }
+                    }
+                    Err(error) => {
+                        failures.push(format!("command_run failed: {error}"));
+                        events.push(native_tool_failure_event("command_run", error.to_string()));
+                    }
+                }
+            }
+        }
+
+        let patch_file = native_patch_file(&repo_root, &request.task);
+        if native_tool_enabled(&tools, "patch_preview") {
+            if let Some(path) = &patch_file {
+                match preview_patch_file(&repo_root, path, coder_tools::DEFAULT_MAX_PATCH_BYTES) {
+                    Ok(preview) => {
+                        let touched = preview
+                            .files
+                            .iter()
+                            .filter_map(|file| {
+                                file.new_path.clone().or_else(|| file.old_path.clone())
+                            })
+                            .collect::<Vec<_>>();
+                        for path in &touched {
+                            changed_files.insert(path.clone());
+                        }
+                        let reference = write_native_repo_evidence(
+                            &self.store,
+                            &request.run_id,
+                            RepoEvidenceKind::RepoDiff,
+                            &repo_root,
+                            format!(
+                                "Native Rust backend previewed patch touching {} file(s).",
+                                preview.file_count
+                            ),
+                            json!({
+                                "evidence_kind": "repo_evidence",
+                                "operation": "patch_preview",
+                                "preview": preview
+                            }),
+                        )?;
+                        patch_refs.push(format!("repo-evidence://{}", reference.ref_id));
+                        evidence_refs.push(repo_evidence_ref(&reference));
+                        events.push(native_tool_event(
+                            "patch_preview",
+                            "completed",
+                            json!({ "files": touched }),
+                            Some(&reference),
+                        ));
+                        checks.push("patch_preview: completed".to_owned());
+                        completed_tools += 1;
+                    }
+                    Err(error) => {
+                        failures.push(format!("patch_preview failed: {error}"));
+                        events.push(native_tool_failure_event(
+                            "patch_preview",
+                            error.to_string(),
+                        ));
+                    }
+                }
+            } else {
+                events.push(native_tool_skipped_event(
+                    "patch_preview",
+                    "no patch file found",
+                ));
+            }
+        }
+
+        if native_tool_enabled(&tools, "patch_apply")
+            && native_task_requests_patch_apply(&request.task)
+        {
+            if let Some(path) = &patch_file {
+                match apply_patch_file(
+                    &repo_root,
+                    ToolPatchApplyRequest {
+                        patch_file: path.clone(),
+                        max_patch_bytes: coder_tools::DEFAULT_MAX_PATCH_BYTES,
+                        source: "model".to_owned(),
+                        approved: false,
+                    },
+                ) {
+                    Ok(result) => {
+                        let blocked = result.requires_approval;
+                        let reference = write_native_repo_evidence(
+                            &self.store,
+                            &request.run_id,
+                            RepoEvidenceKind::RepoDiff,
+                            &repo_root,
+                            format!(
+                                "Native Rust patch apply {}: {} file(s).",
+                                result.status, result.preview.file_count
+                            ),
+                            json!({
+                                "evidence_kind": "patch_apply",
+                                "operation": "patch_apply",
+                                "result": result
+                            }),
+                        )?;
+                        patch_refs.push(format!("repo-evidence://{}", reference.ref_id));
+                        evidence_refs.push(repo_evidence_ref(&reference));
+                        events.push(
+                            HarnessRunEvent::new(
+                                if blocked {
+                                    "approval.requested"
+                                } else {
+                                    "native.tool.completed"
+                                },
+                                json!({
+                                    "tool": "patch_apply",
+                                    "approval_type": if blocked { "patch_apply" } else { "" },
+                                    "status": if blocked { "blocked" } else { "completed" },
+                                    "requires_approval": blocked,
+                                    "evidence_ref": reference.ref_id
+                                }),
+                            )
+                            .with_ref(
+                                "patch_evidence",
+                                format!("repo-evidence://{}", reference.ref_id),
+                            ),
+                        );
+                        if blocked {
+                            blockers.push("patch_apply requires approval".to_owned());
+                        } else {
+                            checks.push("patch_apply: completed".to_owned());
+                            completed_tools += 1;
+                        }
+                    }
+                    Err(error) => {
+                        failures.push(format!("patch_apply failed: {error}"));
+                        events.push(native_tool_failure_event("patch_apply", error.to_string()));
+                    }
+                }
+            }
+        }
+
+        let status = if !blockers.is_empty() {
+            "blocked"
+        } else if completed_tools == 0 && !failures.is_empty() {
+            "failed"
+        } else if request_agent_role(&request) == Some("planner") {
+            "ready"
+        } else {
+            "completed"
+        };
+        let mut report = match status {
+            "blocked" => FinalReport::blocked(
+                "Native Rust backend stopped before side effects.",
+                blockers.join("; "),
+            ),
+            "failed" => FinalReport::failed(
+                "Native Rust backend could not complete requested tool work.",
+                failures.join("; "),
+            ),
+            _ => FinalReport::completed(format!(
+                "Native Rust backend completed {} tool operation(s).",
+                completed_tools
+            )),
+        };
+        report.checks = checks;
+        report.evidence_refs = evidence_refs;
+        report.patch_refs = patch_refs;
+        report.changed_files = changed_files.into_iter().collect();
+        if !failures.is_empty() && status != "failed" {
+            report.next_steps = failures;
+        }
+        events.push(HarnessRunEvent::new(
+            format!("backend.native_rust.{status}"),
+            json!({
+                "backend": "native-rust",
+                "node_id": request.node_id,
+                "agent_id": request.agent_id,
+                "harness_id": request.harness_id,
+                "status": status,
+                "completed_tools": completed_tools
+            }),
+        ));
+        Ok(HarnessRunResult {
+            status: status.to_owned(),
+            report: Some(report),
+            events,
+        })
+    }
+}
+
+fn native_selected_tools(request: &HarnessRunRequest) -> BTreeSet<String> {
+    request
+        .backend_context
+        .pointer("/coder/harness/selected_tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn native_tool_enabled(tools: &BTreeSet<String>, canonical: &str) -> bool {
+    if tools.is_empty() {
+        return matches!(
+            canonical,
+            "repo_find_files" | "repo_read_file_range" | "git_status" | "git_diff"
+        );
+    }
+    native_tool_aliases(canonical)
+        .iter()
+        .any(|alias| tools.contains(*alias))
+}
+
+fn native_tool_aliases(canonical: &str) -> &'static [&'static str] {
+    match canonical {
+        "repo_find_files" => &["repo_find_files", "find_files", "repo_files"],
+        "repo_search_text" => &["repo_search_text", "repo_search", "search_text"],
+        "repo_read_file" => &["repo_read_file", "read_file"],
+        "repo_read_file_range" => &["repo_read_file_range", "read_file_range", "read_file"],
+        "git_status" => &["git_status"],
+        "git_diff" => &["git_diff"],
+        "command_preview" => &["command_preview", "preview_command"],
+        "command_run" => &["command_run", "run_command", "run_command_sandbox"],
+        "patch_preview" => &["patch_preview", "preview_patch", "apply_patch_sandbox"],
+        "patch_apply" => &["patch_apply", "apply_patch", "apply_patch_sandbox"],
+        _ => &[],
+    }
+}
+
+fn write_native_repo_evidence(
+    store: &RunStore,
+    run_id: &RunId,
+    kind: RepoEvidenceKind,
+    repo_root: &str,
+    summary: impl Into<String>,
+    payload: Value,
+) -> Result<RepoEvidenceRef, HarnessError> {
+    store
+        .write_repo_evidence(run_id, kind, repo_root, Vec::new(), summary, payload)
+        .map_err(|error| HarnessError::Failed(error.to_string()))
+}
+
+fn repo_evidence_ref(reference: &RepoEvidenceRef) -> coder_core::EvidenceRef {
+    coder_core::EvidenceRef {
+        kind: "repo_evidence".to_owned(),
+        reference: format!("repo-evidence://{}", reference.ref_id),
+    }
+}
+
+fn native_tool_event(
+    tool: &str,
+    status: &str,
+    mut payload: Value,
+    reference: Option<&RepoEvidenceRef>,
+) -> HarnessRunEvent {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("tool".to_owned(), Value::String(tool.to_owned()));
+        object.insert("status".to_owned(), Value::String(status.to_owned()));
+        if let Some(reference) = reference {
+            object.insert(
+                "evidence_ref".to_owned(),
+                Value::String(reference.ref_id.clone()),
+            );
+        }
+    }
+    let event = HarnessRunEvent::new("native.tool.completed", payload);
+    if let Some(reference) = reference {
+        event.with_ref(
+            "repo_evidence",
+            format!("repo-evidence://{}", reference.ref_id),
+        )
+    } else {
+        event
+    }
+}
+
+fn native_tool_failure_event(tool: &str, error: String) -> HarnessRunEvent {
+    HarnessRunEvent::new(
+        "native.tool.failed",
+        json!({
+            "tool": tool,
+            "status": "failed",
+            "error": error
+        }),
+    )
+}
+
+fn native_tool_skipped_event(tool: &str, reason: &str) -> HarnessRunEvent {
+    HarnessRunEvent::new(
+        "native.tool.skipped",
+        json!({
+            "tool": tool,
+            "status": "skipped",
+            "reason": reason
+        }),
+    )
+}
+
+fn native_search_query(task: &str) -> String {
+    for marker in ['"', '\''] {
+        let mut parts = task.split(marker);
+        let _ = parts.next();
+        if let Some(quoted) = parts.next() {
+            let candidate = quoted.trim();
+            if !candidate.is_empty() {
+                return candidate.to_owned();
+            }
+        }
+    }
+    if task.to_ascii_lowercase().contains("todo") {
+        "TODO".to_owned()
+    } else {
+        "fn ".to_owned()
+    }
+}
+
+fn native_candidate_file(repo_root: &str, task: &str) -> Option<PathBuf> {
+    if let Some(path) = native_path_token(task, &[".rs", ".py", ".ts", ".tsx", ".js", ".md"]) {
+        return Some(path);
+    }
+    for preferred in ["README.md", "readme.md", "Cargo.toml", "package.json"] {
+        if read_file_range(repo_root, preferred, 1, 1, 256).is_ok() {
+            return Some(PathBuf::from(preferred));
+        }
+    }
+    find_files(repo_root, None, &[], 20)
+        .ok()
+        .and_then(|files| files.into_iter().next())
+        .map(|file| PathBuf::from(file.path))
+}
+
+fn native_patch_file(repo_root: &str, task: &str) -> Option<PathBuf> {
+    if let Some(path) = native_path_token(task, &[".patch", ".diff"]) {
+        return Some(path);
+    }
+    find_files(
+        repo_root,
+        None,
+        &[String::from("patch"), String::from("diff")],
+        20,
+    )
+    .ok()
+    .and_then(|files| files.into_iter().next())
+    .map(|file| PathBuf::from(file.path))
+}
+
+fn native_path_token(task: &str, suffixes: &[&str]) -> Option<PathBuf> {
+    task.split_whitespace()
+        .map(|token| {
+            token.trim_matches(|ch: char| {
+                ch == '"' || ch == '\'' || ch == '`' || ch == ',' || ch == ';' || ch == '.'
+            })
+        })
+        .find(|token| suffixes.iter().any(|suffix| token.ends_with(suffix)))
+        .map(PathBuf::from)
+}
+
+fn native_command_args(task: &str) -> Option<Vec<String>> {
+    let lower = task.to_ascii_lowercase();
+    let marker = lower.find("command:").or_else(|| lower.find("run:"))?;
+    let command_start = marker + task[marker..].find(':')? + 1;
+    let args = task[command_start..]
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if args.is_empty() {
+        None
+    } else {
+        Some(args)
+    }
+}
+
+fn native_task_requests_patch_apply(task: &str) -> bool {
+    let lower = task.to_ascii_lowercase();
+    lower.contains("apply patch") || lower.contains("patch apply")
+}
+
+fn request_agent_role(request: &HarnessRunRequest) -> Option<&str> {
+    request
+        .backend_context
+        .pointer("/coder/agent/role")
+        .and_then(Value::as_str)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1400,6 +2156,8 @@ struct WorkflowReportInput<'a> {
     checks: Vec<String>,
     evidence_refs: Vec<coder_core::EvidenceRef>,
     blockers: Vec<String>,
+    changed_files: Vec<String>,
+    patch_refs: Vec<String>,
 }
 
 fn workflow_run_report(input: WorkflowReportInput<'_>) -> FinalReport {
@@ -1420,6 +2178,8 @@ fn workflow_run_report(input: WorkflowReportInput<'_>) -> FinalReport {
     );
     report.checks = input.checks;
     report.blockers = input.blockers;
+    report.changed_files = input.changed_files;
+    report.patch_refs = input.patch_refs;
     if report.blockers.is_empty() {
         if let Some(reason) = input.reason {
             report.blockers.push(reason.to_owned());
@@ -1611,24 +2371,162 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workflow_runner_native_mock_completed() {
+    async fn workflow_runner_native_rust_read_only_review_writes_evidence() {
         let (mut config, root, store) = fixture();
+        let repo = temp_root();
+        fs::create_dir_all(repo.join("src")).unwrap();
+        fs::write(repo.join("README.md"), "# Native review\n").unwrap();
+        fs::write(
+            repo.join("src").join("lib.rs"),
+            "pub fn answer() -> u8 { 42 }\n",
+        )
+        .unwrap();
         make_single_node_terminal_workflow(&mut config);
-        make_workflow_native_only(&mut config);
+        config.harnesses.get_mut("review-only").unwrap().tools = vec![
+            "repo_find_files".to_owned(),
+            "repo_read_file_range".to_owned(),
+            "git_diff".to_owned(),
+        ];
         let runner = WorkflowRunner::new(config, store.clone());
+        let mut options = WorkflowRunOptions::new("planner-led", "review README.md for TODO");
+        options.repo_root = repo.clone();
 
-        let output = runner
-            .run(WorkflowRunOptions::new("planner-led", "complete task"))
-            .await
-            .unwrap();
+        let output = runner.run(options).await.unwrap();
         let events = store.read_events(&output.run_id).unwrap();
+        let evidence = store.list_repo_evidence(&output.run_id).unwrap();
 
         assert_eq!(output.report.status, ReportStatus::Completed);
         assert_eq!(events.first().unwrap().kind, "run.started");
         assert_eq!(events.last().unwrap().kind, "run.completed");
         assert!(events
             .iter()
-            .any(|event| event.kind == "backend.native_mock.completed"));
+            .any(|event| event.kind == "backend.native_rust.completed"));
+        assert!(events.iter().any(|event| {
+            event.kind == "native.tool.completed"
+                && event.payload["tool"].as_str() == Some("repo_find_files")
+        }));
+        assert!(evidence
+            .iter()
+            .any(|item| item.kind == RepoEvidenceKind::RepoFileList));
+        assert!(evidence
+            .iter()
+            .any(|item| item.kind == RepoEvidenceKind::RepoRead));
+        assert!(output
+            .report
+            .evidence_refs
+            .iter()
+            .any(|item| item.reference.starts_with("repo-evidence://")));
+        let _ = fs::remove_dir_all(repo);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn workflow_runner_native_rust_patch_preview_records_diff_evidence() {
+        let (mut config, root, store) = fixture();
+        let repo = temp_root();
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        fs::write(
+            repo.join("change.patch"),
+            "\
+diff --git a/tracked.txt b/tracked.txt
+--- a/tracked.txt
++++ b/tracked.txt
+@@ -1 +1 @@
+-base
++changed
+",
+        )
+        .unwrap();
+        make_single_node_terminal_workflow(&mut config);
+        config.harnesses.get_mut("review-only").unwrap().tools = vec!["patch_preview".to_owned()];
+        let runner = WorkflowRunner::new(config, store.clone());
+        let mut options = WorkflowRunOptions::new("planner-led", "preview change.patch");
+        options.repo_root = repo.clone();
+
+        let output = runner.run(options).await.unwrap();
+        let events = store.read_events(&output.run_id).unwrap();
+        let evidence = store.list_repo_evidence(&output.run_id).unwrap();
+
+        assert_eq!(output.report.status, ReportStatus::Completed);
+        assert_eq!(output.report.changed_files, vec!["tracked.txt"]);
+        assert_eq!(output.report.patch_refs.len(), 1);
+        assert!(events.iter().any(|event| {
+            event.kind == "native.tool.completed"
+                && event.payload["tool"].as_str() == Some("patch_preview")
+        }));
+        assert!(evidence
+            .iter()
+            .any(|item| item.kind == RepoEvidenceKind::RepoDiff));
+        let _ = fs::remove_dir_all(repo);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn workflow_runner_native_rust_patch_apply_requires_approval() {
+        let (mut config, root, store) = fixture();
+        let repo = temp_root();
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        fs::write(
+            repo.join("change.patch"),
+            "\
+diff --git a/tracked.txt b/tracked.txt
+--- a/tracked.txt
++++ b/tracked.txt
+@@ -1 +1 @@
+-base
++changed
+",
+        )
+        .unwrap();
+        make_single_node_terminal_workflow(&mut config);
+        config.harnesses.get_mut("review-only").unwrap().tools = vec!["patch_apply".to_owned()];
+        let runner = WorkflowRunner::new(config, store.clone());
+        let mut options = WorkflowRunOptions::new("planner-led", "apply patch change.patch");
+        options.repo_root = repo.clone();
+
+        let output = runner.run(options).await.unwrap();
+        let events = store.read_events(&output.run_id).unwrap();
+
+        assert_eq!(output.report.status, ReportStatus::Blocked);
+        assert!(output.report.blockers[0].contains("requires approval"));
+        assert_eq!(
+            fs::read_to_string(repo.join("tracked.txt")).unwrap(),
+            "base\n"
+        );
+        assert!(events.iter().any(|event| {
+            event.kind == "approval.requested"
+                && event.payload["approval_type"].as_str() == Some("patch_apply")
+        }));
+        let _ = fs::remove_dir_all(repo);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn workflow_runner_native_rust_command_run_requires_approval() {
+        let (mut config, root, store) = fixture();
+        let repo = temp_root();
+        fs::create_dir_all(&repo).unwrap();
+        make_single_node_terminal_workflow(&mut config);
+        config.harnesses.get_mut("review-only").unwrap().tools = vec!["command_run".to_owned()];
+        let runner = WorkflowRunner::new(config, store.clone());
+        let mut options = WorkflowRunOptions::new("planner-led", "run command: definitely-not-run");
+        options.repo_root = repo.clone();
+
+        let output = runner.run(options).await.unwrap();
+        let events = store.read_events(&output.run_id).unwrap();
+        let evidence = store.list_repo_evidence(&output.run_id).unwrap();
+
+        assert_eq!(output.report.status, ReportStatus::Blocked);
+        assert!(events.iter().any(|event| {
+            event.kind == "approval.requested"
+                && event.payload["approval_type"].as_str() == Some("command")
+        }));
+        assert!(evidence
+            .iter()
+            .any(|item| item.kind == RepoEvidenceKind::RepoTest));
+        let _ = fs::remove_dir_all(repo);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2062,6 +2960,7 @@ mod tests {
             node_id: "node".to_owned(),
             agent_id: "agent".to_owned(),
             harness_id: "harness".to_owned(),
+            repo_root: ".".to_owned(),
             task: "task".to_owned(),
             backend_context: json!({
                 "openhands": {
@@ -2255,6 +3154,7 @@ mod tests {
             node_id: "executor".to_owned(),
             agent_id: "executor".to_owned(),
             harness_id: "openhands-code-edit".to_owned(),
+            repo_root: ".".to_owned(),
             task: task.to_owned(),
             backend_context: Value::Null,
         }

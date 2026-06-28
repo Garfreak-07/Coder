@@ -11,6 +11,8 @@ pub struct HarnessRunRequest {
     pub node_id: String,
     pub agent_id: String,
     pub harness_id: String,
+    #[serde(default)]
+    pub repo_root: String,
     pub task: String,
     #[serde(default)]
     pub backend_context: Value,
