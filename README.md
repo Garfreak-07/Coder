@@ -48,6 +48,13 @@ Optional RAG dependencies:
 pip install -e .[rag]
 ```
 
+OpenHands SDK compatibility tools are optional for local runtime use but are
+installed for the full Python compatibility test suite:
+
+```powershell
+pip install -e .[openhands]
+```
+
 ## Run Locally
 
 Start the API:
@@ -71,6 +78,7 @@ Open `http://127.0.0.1:5173`. Vite proxies `/api/*` to
 Python:
 
 ```powershell
+.\.venv\Scripts\python.exe -m pip install -e ".[openhands]"
 .\.venv\Scripts\python.exe -m unittest discover -s tests
 .\.venv\Scripts\python.exe -m compileall src tests
 ```

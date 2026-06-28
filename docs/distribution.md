@@ -58,6 +58,7 @@ master migration plan:
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+.\.venv\Scripts\python.exe -m pip install -e ".[openhands]"
 .\.venv\Scripts\python.exe -m unittest discover -s tests
 .\.venv\Scripts\python.exe -m compileall src tests
 cd frontend
