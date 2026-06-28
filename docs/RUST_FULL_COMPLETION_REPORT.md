@@ -69,6 +69,9 @@ Local verification on this checkpoint:
 
 ## Known Limitations
 
+Detailed remaining blockers are tracked in
+`docs/RUST_FULL_COMPLETION_BLOCKERS.md`.
+
 - MCP execution/client support remains explicitly disabled or approval-gated at
   the baseline; manifest validation and deny-by-default behavior are tested.
 - Dense RAG remains optional; lexical retrieval is the always-available Rust
