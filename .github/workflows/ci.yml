@@ -8,7 +8,7 @@ on:
 
 jobs:
   python:
-    name: Python tests (${{ matrix.python-version }})
+    name: Legacy Python compatibility (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

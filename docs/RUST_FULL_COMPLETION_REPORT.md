@@ -3,7 +3,10 @@
 ## Commit Range
 
 - Latest Rust-default completion work starts after `5b586b36`.
-- Current local commit range: `5b586b36..HEAD`.
+- Rust-default switch commit: `e1958377`.
+- Current completed range: `5b586b36..e1958377`.
+- GitHub CI evidence: `CI` run
+  `28328414843` completed successfully for `e195837735da3779a65dc1c7257b9851e91a6b7a`.
 
 ## Rust Default
 
@@ -28,7 +31,7 @@ See `docs/legacy-python.md`.
 ## Coverage Added In This Checkpoint
 
 - Frontend resolver tests now prove v3 is the default and v2 is explicit.
-- Python CI installs the `openhands` extra so the legacy compatibility suite
+- Legacy Python compatibility CI installs the `openhands` extra so the suite
   remains green without skipping OpenHands custom tool tests.
 - `scripts/smoke-rust-v3.ps1` exercises the default Rust v3 HTTP product path:
   health, library save/load, run preview, mock run, events, report preview,
@@ -49,6 +52,19 @@ The Rust workspace already includes tests for:
 
 Frontend coverage includes workflow spec roundtrips, Rust API selection,
 library save/get mapping, run event mapping, and TypeScript/Vite build.
+
+## Verification
+
+Local verification on this checkpoint:
+
+- `.\.venv\Scripts\python.exe -m unittest discover -s tests`
+- `.\.venv\Scripts\python.exe -m compileall src tests`
+- `cargo fmt --all --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test --workspace`
+- `cd frontend; npm.cmd run test`
+- `cd frontend; npm.cmd run build`
+- `powershell -ExecutionPolicy Bypass -File .\scripts\smoke-rust-v3.ps1 -Store .tmp\smoke-rust-v3`
 
 ## Known Limitations
 
