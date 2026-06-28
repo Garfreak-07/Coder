@@ -206,4 +206,4 @@ ignored by Git.
 
 ## License
 
-License: AGPL-3.0-or-later. See [LICENSE](LICENSE).
+License: MIT. See [LICENSE](LICENSE).

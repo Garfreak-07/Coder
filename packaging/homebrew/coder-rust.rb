@@ -2,7 +2,7 @@ class CoderRust < Formula
   desc "Rust-first Coder control plane"
   homepage "https://github.com/Garfreak-07/Coder"
   version "0.1.0"
-  license "AGPL-3.0-or-later"
+  license "MIT"
 
   on_macos do
     if Hardware::CPU.arm?

@@ -20,7 +20,7 @@ Files affected:
   added later
 - `pyproject.toml`
 - `README.md`
-- docs mentioning AGPL
+- docs mentioning the previous license
 
 Commands run:
 
@@ -40,7 +40,7 @@ Failing output summary:
 Minimal next patch required:
 
 - After owner/contributor approval, make a license-only commit that replaces
-  AGPL metadata and `LICENSE` with MIT text.
+  previous license metadata and `LICENSE` with MIT text.
 
 User approval needed:
 

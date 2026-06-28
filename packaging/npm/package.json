@@ -2,7 +2,7 @@
   "name": "coder-rust",
   "version": "0.1.0",
   "description": "Thin npm wrapper for the coder-rust CLI.",
-  "license": "AGPL-3.0-or-later",
+  "license": "MIT",
   "bin": {
     "coder-rust": "bin/coder-rust.js"
   },

@@ -526,12 +526,12 @@ def _license_metadata_check(request: HarnessRunRequest) -> HarnessDryRunCheck:
     pyproject_text = _read_text(legacy_root / "pyproject.toml")
     frontend_package = _read_json(repo_root / "frontend" / "package.json")
     checks = {
-        "license_agpl": "gnu affero general public license" in license_text.lower(),
-        "pyproject_agpl": 'license = "AGPL-3.0-or-later"' in pyproject_text,
-        "frontend_agpl": frontend_package.get("license") == "AGPL-3.0-or-later",
+        "license_mit": "mit license" in license_text.lower(),
+        "pyproject_mit": 'license = "MIT"' in pyproject_text,
+        "frontend_mit": frontend_package.get("license") == "MIT",
     }
     if all(checks.values()):
-        return _check("license_metadata", "ready", "License metadata is consistent with AGPL-3.0-or-later.", metadata=checks)
+        return _check("license_metadata", "ready", "License metadata is consistent with MIT.", metadata=checks)
     return _check(
         "license_metadata",
         "warning",

@@ -123,7 +123,7 @@ class HarnessDryRunTests(unittest.TestCase):
 
         check = _check(report, "license_metadata")
         self.assertEqual(check.status, "ready")
-        self.assertTrue(check.metadata["license_agpl"])
+        self.assertTrue(check.metadata["license_mit"])
 
     def test_secret_values_are_redacted_from_serialized_report(self) -> None:
         request = _request(input_artifacts={"requested_artifact_type": "planner_order"})

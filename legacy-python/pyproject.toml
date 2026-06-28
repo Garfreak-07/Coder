@@ -7,7 +7,7 @@ name = "coder-workbench"
 version = "0.1.0"
 description = "Planner-led local agent workflow workbench with structured handoffs."
 requires-python = ">=3.12"
-license = "AGPL-3.0-or-later"
+license = "MIT"
 dependencies = [
   "langchain-openai>=0.1.0",
   "python-dotenv>=1.0.0",
