@@ -139,28 +139,52 @@ export async function getAgentRoleCards(): Promise<RoleCardSpec[]> {
 }
 
 export function getInstalledSkills(): Promise<InstalledSkillsPayload> {
+  if (shouldUseRustApiV3()) {
+    return requestJson<InstalledSkillsPayload>("/api/v3/skills/installed");
+  }
   return requestJson<InstalledSkillsPayload>("/api/v2/skills/installed");
 }
 
 export async function getExtensionPlugins(): Promise<PluginManifest[]> {
+  if (shouldUseRustApiV3()) {
+    const payload = await requestJson<{ plugins: PluginManifest[] }>("/api/v3/extensions/plugins");
+    return payload.plugins;
+  }
   const payload = await requestJson<{ plugins: PluginManifest[] }>("/api/v2/extensions/plugins");
   return payload.plugins;
 }
 
 export async function searchExtensions(query: string): Promise<ExtensionManifest[]> {
+  if (shouldUseRustApiV3()) {
+    const payload = await requestJson<{ extensions: ExtensionManifest[] }>(`/api/v3/extensions/search?q=${encodeURIComponent(query)}`);
+    return payload.extensions;
+  }
   const payload = await requestJson<{ extensions: ExtensionManifest[] }>(`/api/v2/extensions/search?q=${encodeURIComponent(query)}`);
   return payload.extensions;
 }
 
 export function discoverSkills(registryUrl: string): Promise<DiscoverSkillsPayload> {
+  if (shouldUseRustApiV3()) {
+    return requestJson<DiscoverSkillsPayload>(`/api/v3/skills/discover?registry_url=${encodeURIComponent(registryUrl)}`);
+  }
   return requestJson<DiscoverSkillsPayload>(`/api/v2/skills/discover?registry_url=${encodeURIComponent(registryUrl)}`);
 }
 
 export function getSkillUpdates(registryUrl: string): Promise<{ updates: SkillUpdateInfo[] }> {
+  if (shouldUseRustApiV3()) {
+    return requestJson<{ updates: SkillUpdateInfo[] }>(`/api/v3/skills/updates?registry_url=${encodeURIComponent(registryUrl)}`);
+  }
   return requestJson<{ updates: SkillUpdateInfo[] }>(`/api/v2/skills/updates?registry_url=${encodeURIComponent(registryUrl)}`);
 }
 
 export function installSkill(skillId: string, registryUrl: string): Promise<Record<string, unknown>> {
+  if (shouldUseRustApiV3()) {
+    return requestJson("/api/v3/skills/install", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ skill_id: skillId, registry_url: registryUrl })
+    });
+  }
   return requestJson("/api/v2/skills/install", {
     method: "POST",
     headers: jsonHeaders,
@@ -169,6 +193,13 @@ export function installSkill(skillId: string, registryUrl: string): Promise<Reco
 }
 
 export function updateSkill(skillId: string, registryUrl: string): Promise<Record<string, unknown>> {
+  if (shouldUseRustApiV3()) {
+    return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/update`, {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ registry_url: registryUrl })
+    });
+  }
   return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/update`, {
     method: "POST",
     headers: jsonHeaders,
@@ -177,6 +208,13 @@ export function updateSkill(skillId: string, registryUrl: string): Promise<Recor
 }
 
 export function autoUpdateSkills(registryUrl: string): Promise<Record<string, unknown>> {
+  if (shouldUseRustApiV3()) {
+    return requestJson("/api/v3/skills/auto-update", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ registry_url: registryUrl })
+    });
+  }
   return requestJson("/api/v2/skills/auto-update", {
     method: "POST",
     headers: jsonHeaders,
@@ -185,6 +223,12 @@ export function autoUpdateSkills(registryUrl: string): Promise<Record<string, un
 }
 
 export function enableSkill(skillId: string): Promise<Record<string, unknown>> {
+  if (shouldUseRustApiV3()) {
+    return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/enable`, {
+      method: "POST",
+      headers: jsonHeaders
+    });
+  }
   return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/enable`, {
     method: "POST",
     headers: jsonHeaders
@@ -192,6 +236,12 @@ export function enableSkill(skillId: string): Promise<Record<string, unknown>> {
 }
 
 export function disableSkill(skillId: string): Promise<Record<string, unknown>> {
+  if (shouldUseRustApiV3()) {
+    return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/disable`, {
+      method: "POST",
+      headers: jsonHeaders
+    });
+  }
   return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/disable`, {
     method: "POST",
     headers: jsonHeaders
@@ -199,12 +249,24 @@ export function disableSkill(skillId: string): Promise<Record<string, unknown>> 
 }
 
 export function removeSkill(skillId: string): Promise<Record<string, unknown>> {
+  if (shouldUseRustApiV3()) {
+    return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}`, {
+      method: "DELETE"
+    });
+  }
   return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}`, {
     method: "DELETE"
   });
 }
 
 export function pinSkill(skillId: string): Promise<Record<string, unknown>> {
+  if (shouldUseRustApiV3()) {
+    return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/pin`, {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({})
+    });
+  }
   return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/pin`, {
     method: "POST",
     headers: jsonHeaders,
@@ -213,6 +275,12 @@ export function pinSkill(skillId: string): Promise<Record<string, unknown>> {
 }
 
 export function unpinSkill(skillId: string): Promise<Record<string, unknown>> {
+  if (shouldUseRustApiV3()) {
+    return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/unpin`, {
+      method: "POST",
+      headers: jsonHeaders
+    });
+  }
   return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/unpin`, {
     method: "POST",
     headers: jsonHeaders
@@ -220,6 +288,13 @@ export function unpinSkill(skillId: string): Promise<Record<string, unknown>> {
 }
 
 export function rollbackSkill(skillId: string): Promise<Record<string, unknown>> {
+  if (shouldUseRustApiV3()) {
+    return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/rollback`, {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({})
+    });
+  }
   return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/rollback`, {
     method: "POST",
     headers: jsonHeaders,
@@ -228,6 +303,13 @@ export function rollbackSkill(skillId: string): Promise<Record<string, unknown>>
 }
 
 export function setSkillUpdatePolicy(skillId: string, updatePolicy: "manual" | "auto_official_low_risk"): Promise<Record<string, unknown>> {
+  if (shouldUseRustApiV3()) {
+    return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/update-policy`, {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ update_policy: updatePolicy })
+    });
+  }
   return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/update-policy`, {
     method: "POST",
     headers: jsonHeaders,
@@ -236,6 +318,13 @@ export function setSkillUpdatePolicy(skillId: string, updatePolicy: "manual" | "
 }
 
 export function importDeveloperSkill(path: string): Promise<Record<string, unknown>> {
+  if (shouldUseRustApiV3()) {
+    return requestJson("/api/v3/skills/developer-import", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ path })
+    });
+  }
   return requestJson("/api/v2/skills/developer-import", {
     method: "POST",
     headers: jsonHeaders,

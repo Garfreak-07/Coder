@@ -18,7 +18,11 @@ use coder_config::{
 };
 use coder_core::{FinalReport, RunId, RunState, RunStatus};
 use coder_extensions::{
-    builtin_plugin_manifests, validate_plugin_manifest, PluginManifest, PluginManifestValidation,
+    builtin_plugin_manifests, builtin_remote_skill_entries, discover_skills_payload,
+    extension_search, installed_skills_payload, remote_skill_summary, validate_plugin_manifest,
+    validate_skill_manifest, DiscoverSkillsPayload, ExtensionManifestSummary,
+    InstalledSkillsPayload, PluginManifest, PluginManifestValidation, RemoteSkillEntry,
+    SkillManifestValidation, SkillSummary, SkillUpdateInfo,
 };
 use coder_harness::{
     validate_mcp_manifest, McpManifestValidation, ToolRegistry, ToolRegistryEntry,
@@ -50,6 +54,7 @@ pub struct ApiState {
     pub store: RunStore,
     library_workflows: Arc<Mutex<BTreeMap<String, Value>>>,
     planner_sessions: Arc<Mutex<BTreeMap<String, PlannerChatSession>>>,
+    installed_skills: Arc<Mutex<BTreeMap<String, InstalledSkillRecord>>>,
 }
 
 impl ApiState {
@@ -58,6 +63,7 @@ impl ApiState {
             store,
             library_workflows: Arc::new(Mutex::new(BTreeMap::new())),
             planner_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+            installed_skills: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 }
@@ -114,6 +120,39 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/api/v3/extensions/plugins/validate",
             post(validate_extension_plugin),
+        )
+        .route("/api/v3/extensions/skills", get(list_extension_skills))
+        .route(
+            "/api/v3/extensions/installed",
+            get(list_extensions_installed),
+        )
+        .route("/api/v3/extensions/search", get(search_extensions_endpoint))
+        .route(
+            "/api/v3/extensions/skills/validate",
+            post(validate_extension_skill),
+        )
+        .route("/api/v3/skills/installed", get(list_installed_skills))
+        .route("/api/v3/skills/discover", get(discover_skills_endpoint))
+        .route("/api/v3/skills/updates", get(list_skill_updates))
+        .route("/api/v3/skills/install", post(install_skill))
+        .route("/api/v3/skills/auto-update", post(auto_update_skills))
+        .route(
+            "/api/v3/skills/developer-import",
+            post(developer_import_skill),
+        )
+        .route("/api/v3/skills/{skill_id}/update", post(update_skill))
+        .route("/api/v3/skills/{skill_id}/enable", post(enable_skill))
+        .route("/api/v3/skills/{skill_id}/disable", post(disable_skill))
+        .route(
+            "/api/v3/skills/{skill_id}",
+            axum::routing::delete(remove_skill),
+        )
+        .route("/api/v3/skills/{skill_id}/pin", post(pin_skill))
+        .route("/api/v3/skills/{skill_id}/unpin", post(unpin_skill))
+        .route("/api/v3/skills/{skill_id}/rollback", post(rollback_skill))
+        .route(
+            "/api/v3/skills/{skill_id}/update-policy",
+            post(set_skill_update_policy),
         )
         .route("/api/v3/harness/tools", get(list_harness_tools))
         .route("/api/v3/runs", get(list_runs).post(run_workflow))
@@ -230,6 +269,15 @@ async fn capabilities() -> Json<CapabilitiesResponse> {
         extensions: vec![
             "plugins_list",
             "plugin_validate",
+            "extensions_search",
+            "installed_extensions_list",
+            "skills_list",
+            "skill_manifest_validate",
+            "skill_install_baseline",
+            "skill_update_baseline",
+            "skill_enable_disable",
+            "skill_pin_unpin",
+            "skill_rollback_baseline",
             "mcp_validate",
             "harness_tools",
         ],
@@ -632,6 +680,334 @@ async fn validate_extension_plugin(
     Json(request): Json<ExtensionPluginValidationRequest>,
 ) -> Json<PluginManifestValidation> {
     Json(validate_plugin_manifest(&request.manifest))
+}
+
+async fn validate_extension_skill(
+    Json(request): Json<SkillManifestValidationRequest>,
+) -> Json<SkillManifestValidation> {
+    Json(validate_skill_manifest(&request.manifest))
+}
+
+async fn list_extension_skills(State(state): State<ApiState>) -> Json<ExtensionSkillListResponse> {
+    let skills = installed_skill_summaries(&state);
+    let extensions = extension_search("", &[], &skills);
+    Json(ExtensionSkillListResponse {
+        skills: extensions
+            .into_iter()
+            .filter(|extension| extension.extension_type == "skill")
+            .collect(),
+    })
+}
+
+async fn list_extensions_installed(
+    State(state): State<ApiState>,
+) -> Json<ExtensionInstalledResponse> {
+    let skills = installed_skill_summaries(&state);
+    Json(ExtensionInstalledResponse {
+        extensions: extension_search("", &builtin_plugin_manifests(), &skills),
+    })
+}
+
+async fn search_extensions_endpoint(
+    State(state): State<ApiState>,
+    Query(query): Query<ExtensionSearchQuery>,
+) -> Json<ExtensionInstalledResponse> {
+    let skills = installed_skill_summaries(&state);
+    Json(ExtensionInstalledResponse {
+        extensions: extension_search(
+            query.q.as_deref().unwrap_or_default(),
+            &builtin_plugin_manifests(),
+            &skills,
+        ),
+    })
+}
+
+async fn list_installed_skills(State(state): State<ApiState>) -> Json<InstalledSkillsPayload> {
+    Json(installed_skills_payload(installed_skill_summaries(&state)))
+}
+
+async fn discover_skills_endpoint(
+    State(state): State<ApiState>,
+    Query(query): Query<SkillRegistryQuery>,
+) -> Json<DiscoverSkillsPayload> {
+    let installed_ids = state
+        .installed_skills
+        .lock()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    Json(discover_skills_payload(
+        query.registry_url.as_deref().unwrap_or_default(),
+        &installed_ids,
+    ))
+}
+
+async fn list_skill_updates(
+    State(state): State<ApiState>,
+    Query(_query): Query<SkillRegistryQuery>,
+) -> Json<SkillUpdatesResponse> {
+    let installed = state.installed_skills.lock().unwrap();
+    let updates = installed
+        .values()
+        .map(skill_update_info)
+        .collect::<Vec<_>>();
+    Json(SkillUpdatesResponse { updates })
+}
+
+async fn install_skill(
+    State(state): State<ApiState>,
+    Json(request): Json<SkillInstallRequest>,
+) -> Result<Json<SkillActionResponse>, ApiError> {
+    let entry = available_skill(&request.skill_id).ok_or_else(|| {
+        ApiError::not_found(format!("skill '{}' was not found", request.skill_id))
+    })?;
+    let mut installed = state.installed_skills.lock().unwrap();
+    let previous = installed.get(&entry.id).cloned();
+    let mut record = InstalledSkillRecord::from_remote(&entry, true, request.registry_url);
+    if let Some(previous) = previous {
+        record.history = previous.history;
+        record.history.push(previous.summary);
+        record.pinned_version = previous.pinned_version;
+        record.update_policy = previous.update_policy;
+    }
+    let summary = record.summary.clone();
+    installed.insert(summary.id.clone(), record);
+    Ok(Json(SkillActionResponse {
+        skill_id: summary.id.clone(),
+        status: "installed".to_owned(),
+        skill: Some(summary),
+        deleted: false,
+        updated: Vec::new(),
+    }))
+}
+
+async fn update_skill(
+    State(state): State<ApiState>,
+    Path(skill_id): Path<String>,
+    Json(request): Json<SkillUpdateRequest>,
+) -> Result<Json<SkillActionResponse>, ApiError> {
+    let entry = available_skill(&skill_id)
+        .ok_or_else(|| ApiError::not_found(format!("skill '{skill_id}' was not found")))?;
+    let mut installed = state.installed_skills.lock().unwrap();
+    let current = installed
+        .get(&skill_id)
+        .cloned()
+        .ok_or_else(|| ApiError::not_found(format!("skill '{skill_id}' is not installed")))?;
+    if current.pinned_version.is_some() && current.pinned_version.as_deref() != Some(&entry.version)
+    {
+        return Ok(Json(SkillActionResponse {
+            skill_id,
+            status: "pinned".to_owned(),
+            skill: Some(current.summary),
+            deleted: false,
+            updated: Vec::new(),
+        }));
+    }
+    let mut next =
+        InstalledSkillRecord::from_remote(&entry, current.summary.enabled, request.registry_url);
+    next.history = current.history;
+    if current.summary.version != next.summary.version {
+        next.history.push(current.summary);
+    }
+    next.pinned_version = current.pinned_version;
+    next.update_policy = current.update_policy;
+    let summary = next.summary.clone();
+    installed.insert(skill_id.clone(), next);
+    Ok(Json(SkillActionResponse {
+        skill_id,
+        status: "updated".to_owned(),
+        skill: Some(summary),
+        deleted: false,
+        updated: Vec::new(),
+    }))
+}
+
+async fn auto_update_skills(
+    State(state): State<ApiState>,
+    Json(_request): Json<SkillRegistryQuery>,
+) -> Json<SkillActionResponse> {
+    let mut installed = state.installed_skills.lock().unwrap();
+    let mut updated = Vec::new();
+    let ids = installed.keys().cloned().collect::<Vec<_>>();
+    for skill_id in ids {
+        let Some(current) = installed.get(&skill_id).cloned() else {
+            continue;
+        };
+        if !auto_update_allowed(&current) {
+            continue;
+        }
+        let Some(entry) = available_skill(&skill_id) else {
+            continue;
+        };
+        if entry.version == current.summary.version {
+            continue;
+        }
+        let mut next =
+            InstalledSkillRecord::from_remote(&entry, current.summary.enabled, current.source_url);
+        next.history = current.history;
+        next.history.push(current.summary);
+        next.update_policy = current.update_policy;
+        updated.push(next.summary.clone());
+        installed.insert(skill_id, next);
+    }
+    Json(SkillActionResponse {
+        skill_id: "all".to_owned(),
+        status: "auto_update_completed".to_owned(),
+        skill: None,
+        deleted: false,
+        updated,
+    })
+}
+
+async fn enable_skill(
+    State(state): State<ApiState>,
+    Path(skill_id): Path<String>,
+) -> Result<Json<SkillActionResponse>, ApiError> {
+    set_skill_enabled(state, skill_id, true)
+}
+
+async fn disable_skill(
+    State(state): State<ApiState>,
+    Path(skill_id): Path<String>,
+) -> Result<Json<SkillActionResponse>, ApiError> {
+    set_skill_enabled(state, skill_id, false)
+}
+
+async fn remove_skill(
+    State(state): State<ApiState>,
+    Path(skill_id): Path<String>,
+) -> Result<Json<SkillActionResponse>, ApiError> {
+    let removed = state
+        .installed_skills
+        .lock()
+        .unwrap()
+        .remove(&skill_id)
+        .ok_or_else(|| ApiError::not_found(format!("skill '{skill_id}' is not installed")))?;
+    Ok(Json(SkillActionResponse {
+        skill_id: removed.summary.id,
+        status: "removed".to_owned(),
+        skill: None,
+        deleted: true,
+        updated: Vec::new(),
+    }))
+}
+
+async fn pin_skill(
+    State(state): State<ApiState>,
+    Path(skill_id): Path<String>,
+    Json(request): Json<SkillPinRequest>,
+) -> Result<Json<SkillActionResponse>, ApiError> {
+    let mut installed = state.installed_skills.lock().unwrap();
+    let record = installed
+        .get_mut(&skill_id)
+        .ok_or_else(|| ApiError::not_found(format!("skill '{skill_id}' is not installed")))?;
+    let version = request
+        .version
+        .filter(|version| !version.trim().is_empty())
+        .unwrap_or_else(|| record.summary.version.clone());
+    let available_versions = record
+        .history
+        .iter()
+        .map(|skill| skill.version.clone())
+        .chain(std::iter::once(record.summary.version.clone()))
+        .collect::<BTreeSet<_>>();
+    if !available_versions.contains(&version) {
+        return Err(ApiError::bad_request(format!(
+            "version '{version}' is not available for skill '{skill_id}'"
+        )));
+    }
+    record.pinned_version = Some(version);
+    record.update_policy = "manual".to_owned();
+    Ok(Json(SkillActionResponse {
+        skill_id,
+        status: "pinned".to_owned(),
+        skill: Some(record.summary.clone()),
+        deleted: false,
+        updated: Vec::new(),
+    }))
+}
+
+async fn unpin_skill(
+    State(state): State<ApiState>,
+    Path(skill_id): Path<String>,
+) -> Result<Json<SkillActionResponse>, ApiError> {
+    let mut installed = state.installed_skills.lock().unwrap();
+    let record = installed
+        .get_mut(&skill_id)
+        .ok_or_else(|| ApiError::not_found(format!("skill '{skill_id}' is not installed")))?;
+    record.pinned_version = None;
+    Ok(Json(SkillActionResponse {
+        skill_id,
+        status: "unpinned".to_owned(),
+        skill: Some(record.summary.clone()),
+        deleted: false,
+        updated: Vec::new(),
+    }))
+}
+
+async fn rollback_skill(
+    State(state): State<ApiState>,
+    Path(skill_id): Path<String>,
+    Json(_request): Json<SkillPinRequest>,
+) -> Result<Json<SkillActionResponse>, ApiError> {
+    let mut installed = state.installed_skills.lock().unwrap();
+    let record = installed
+        .get_mut(&skill_id)
+        .ok_or_else(|| ApiError::not_found(format!("skill '{skill_id}' is not installed")))?;
+    let status = if let Some(previous) = record.history.pop() {
+        record.summary = previous;
+        "rolled_back"
+    } else {
+        "no_history"
+    };
+    Ok(Json(SkillActionResponse {
+        skill_id,
+        status: status.to_owned(),
+        skill: Some(record.summary.clone()),
+        deleted: false,
+        updated: Vec::new(),
+    }))
+}
+
+async fn set_skill_update_policy(
+    State(state): State<ApiState>,
+    Path(skill_id): Path<String>,
+    Json(request): Json<SkillUpdatePolicyRequest>,
+) -> Result<Json<SkillActionResponse>, ApiError> {
+    let mut installed = state.installed_skills.lock().unwrap();
+    let record = installed
+        .get_mut(&skill_id)
+        .ok_or_else(|| ApiError::not_found(format!("skill '{skill_id}' is not installed")))?;
+    match request.update_policy.as_str() {
+        "manual" => record.update_policy = "manual".to_owned(),
+        "auto_official_low_risk" if auto_update_allowed(record) => {
+            record.update_policy = "auto_official_low_risk".to_owned();
+        }
+        "auto_official_low_risk" => {
+            return Err(ApiError::bad_request(
+                "auto-update is only allowed for official low-risk skills without external effects",
+            ));
+        }
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "unsupported update_policy '{other}'"
+            )));
+        }
+    }
+    Ok(Json(SkillActionResponse {
+        skill_id,
+        status: "update_policy_set".to_owned(),
+        skill: Some(record.summary.clone()),
+        deleted: false,
+        updated: Vec::new(),
+    }))
+}
+
+async fn developer_import_skill() -> Result<Json<SkillActionResponse>, ApiError> {
+    Err(ApiError::forbidden(
+        "developer skill import is disabled in Rust v3 baseline; use explicit user-controlled install flow",
+    ))
 }
 
 async fn list_harness_tools(Query(query): Query<ToolRegistryQuery>) -> Json<ToolRegistryResponse> {
@@ -1464,6 +1840,75 @@ pub struct ExtensionPluginListResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SkillManifestValidationRequest {
+    pub manifest: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExtensionSkillListResponse {
+    pub skills: Vec<ExtensionManifestSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExtensionInstalledResponse {
+    pub extensions: Vec<ExtensionManifestSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExtensionSearchQuery {
+    pub q: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillRegistryQuery {
+    pub registry_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillInstallRequest {
+    pub skill_id: String,
+    pub registry_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillUpdateRequest {
+    pub registry_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillPinRequest {
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillUpdatePolicyRequest {
+    pub update_policy: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkillUpdatesResponse {
+    pub updates: Vec<SkillUpdateInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkillActionResponse {
+    pub skill_id: String,
+    pub status: String,
+    pub skill: Option<SkillSummary>,
+    pub deleted: bool,
+    pub updated: Vec<SkillSummary>,
+}
+
+#[derive(Debug, Clone)]
+struct InstalledSkillRecord {
+    summary: SkillSummary,
+    source_url: Option<String>,
+    pinned_version: Option<String>,
+    update_policy: String,
+    history: Vec<SkillSummary>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ToolRegistryQuery {
     pub harness_id: Option<String>,
 }
@@ -1754,6 +2199,86 @@ fn stored_run_exists(store: &RunStore, run_id: &RunId) -> Result<bool, StoreErro
         || store.read_report(run_id)?.is_some()
         || store.repo_evidence_count(run_id)? > 0
         || !store.list_checkpoints(run_id)?.is_empty())
+}
+
+impl InstalledSkillRecord {
+    fn from_remote(entry: &RemoteSkillEntry, enabled: bool, source_url: Option<String>) -> Self {
+        Self {
+            summary: remote_skill_summary(entry, enabled),
+            source_url,
+            pinned_version: None,
+            update_policy: "manual".to_owned(),
+            history: Vec::new(),
+        }
+    }
+}
+
+fn installed_skill_summaries(state: &ApiState) -> Vec<SkillSummary> {
+    state
+        .installed_skills
+        .lock()
+        .unwrap()
+        .values()
+        .map(|record| record.summary.clone())
+        .collect()
+}
+
+fn available_skill(skill_id: &str) -> Option<RemoteSkillEntry> {
+    builtin_remote_skill_entries()
+        .into_iter()
+        .find(|entry| entry.id == skill_id)
+}
+
+fn skill_update_info(record: &InstalledSkillRecord) -> SkillUpdateInfo {
+    let available = available_skill(&record.summary.id);
+    let available_version = available.as_ref().map(|entry| entry.version.clone());
+    let update_available = available_version
+        .as_deref()
+        .map(|version| version != record.summary.version)
+        .unwrap_or(false);
+    SkillUpdateInfo {
+        skill_id: record.summary.id.clone(),
+        installed_version: record.summary.version.clone(),
+        available_version,
+        update_available,
+        auto_update_eligible: auto_update_allowed(record),
+        pinned_version: record.pinned_version.clone(),
+        update_policy: record.update_policy.clone(),
+        reason: if available.is_some() {
+            None
+        } else {
+            Some("not listed in Rust v3 builtin registry".to_owned())
+        },
+        risk_level: record.summary.risk_level,
+        trust_level: record.summary.trust_level,
+        external_effect: record.summary.external_effect,
+    }
+}
+
+fn auto_update_allowed(record: &InstalledSkillRecord) -> bool {
+    record.summary.trust_level == coder_extensions::SkillTrustLevel::Official
+        && record.summary.risk_level == coder_extensions::SkillRiskLevel::Low
+        && !record.summary.external_effect
+        && record.pinned_version.is_none()
+}
+
+fn set_skill_enabled(
+    state: ApiState,
+    skill_id: String,
+    enabled: bool,
+) -> Result<Json<SkillActionResponse>, ApiError> {
+    let mut installed = state.installed_skills.lock().unwrap();
+    let record = installed
+        .get_mut(&skill_id)
+        .ok_or_else(|| ApiError::not_found(format!("skill '{skill_id}' is not installed")))?;
+    record.summary.enabled = enabled;
+    Ok(Json(SkillActionResponse {
+        skill_id,
+        status: if enabled { "enabled" } else { "disabled" }.to_owned(),
+        skill: Some(record.summary.clone()),
+        deleted: false,
+        updated: Vec::new(),
+    }))
 }
 
 fn resolve_repo_relative_path(repo_root: &str, relative_path: &str) -> Result<PathBuf, ApiError> {
@@ -2742,6 +3267,201 @@ mod tests {
             .unwrap()
             .iter()
             .any(|error| error == "external_effect plugins must require preview"));
+    }
+
+    #[tokio::test]
+    async fn skill_manifest_validate_endpoint_rejects_unsafe_manifest() {
+        let app = test_router();
+        let response = post_json(
+            app,
+            "/api/v3/extensions/skills/validate",
+            json!({
+                "manifest": {
+                    "id": "unsafe-skill",
+                    "name": "Unsafe Skill",
+                    "version": "0.1.0",
+                    "description": "Runs externally.",
+                    "category": "coding",
+                    "publisher": "local",
+                    "external_effect": true,
+                    "requires_preview": false,
+                    "requires_human_approval": false
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["ok"], false);
+        assert!(body["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error == "external_effect skills must require preview"));
+    }
+
+    #[tokio::test]
+    async fn skill_lifecycle_endpoints_cover_ui_baseline() {
+        let app = test_router();
+        let initial = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/skills/installed")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let initial_body = response_json(initial).await;
+        assert!(initial_body["skills"].as_array().unwrap().is_empty());
+
+        let discover = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/skills/discover?registry_url=builtin%3A%2F%2Fskills")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let discover_body = response_json(discover).await;
+        assert_eq!(discover_body["skills"][0]["installed"], false);
+
+        let install = post_json(
+            app.clone(),
+            "/api/v3/skills/install",
+            json!({"skill_id": "coder.repo-review", "registry_url": "builtin://skills"}),
+        )
+        .await;
+        assert_eq!(install.status(), StatusCode::OK);
+        let install_body = response_json(install).await;
+        assert_eq!(install_body["status"], "installed");
+        assert_eq!(install_body["skill"]["enabled"], true);
+
+        let disable = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v3/skills/coder.repo-review/disable")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let disable_body = response_json(disable).await;
+        assert_eq!(disable_body["skill"]["enabled"], false);
+
+        let enable = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v3/skills/coder.repo-review/enable")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let enable_body = response_json(enable).await;
+        assert_eq!(enable_body["skill"]["enabled"], true);
+
+        let pin = post_json(
+            app.clone(),
+            "/api/v3/skills/coder.repo-review/pin",
+            json!({}),
+        )
+        .await;
+        let pin_body = response_json(pin).await;
+        assert_eq!(pin_body["status"], "pinned");
+
+        let updates = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/skills/updates?registry_url=builtin%3A%2F%2Fskills")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let updates_body = response_json(updates).await;
+        assert_eq!(updates_body["updates"][0]["skill_id"], "coder.repo-review");
+        assert_eq!(updates_body["updates"][0]["pinned_version"], "0.1.0");
+
+        let unpin = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v3/skills/coder.repo-review/unpin")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let unpin_body = response_json(unpin).await;
+        assert_eq!(unpin_body["status"], "unpinned");
+
+        let policy = post_json(
+            app.clone(),
+            "/api/v3/skills/coder.repo-review/update-policy",
+            json!({"update_policy": "auto_official_low_risk"}),
+        )
+        .await;
+        let policy_body = response_json(policy).await;
+        assert_eq!(policy_body["status"], "update_policy_set");
+
+        let rollback = post_json(
+            app.clone(),
+            "/api/v3/skills/coder.repo-review/rollback",
+            json!({}),
+        )
+        .await;
+        let rollback_body = response_json(rollback).await;
+        assert_eq!(rollback_body["status"], "no_history");
+
+        let search = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/extensions/search?q=repo")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let search_body = response_json(search).await;
+        assert!(search_body["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|extension| extension["extension_type"] == "skill"));
+
+        let remove = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v3/skills/coder.repo-review")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let remove_body = response_json(remove).await;
+        assert_eq!(remove_body["deleted"], true);
+
+        let developer_import = post_json(
+            app,
+            "/api/v3/skills/developer-import",
+            json!({"path": "C:/unsafe"}),
+        )
+        .await;
+        assert_eq!(developer_import.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
