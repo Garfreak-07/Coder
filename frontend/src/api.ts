@@ -14,6 +14,7 @@ import type {
   PlannerChatConfirmResult,
   PlannerChatDraft,
   PlannerChatSession,
+  PlannerChatTurn,
   PlannerChatTurnResponse,
   PlannerInteractionMode,
   ProviderSettings,
@@ -85,6 +86,79 @@ import { legacyCanvasToWorkflowSpec } from "./workflowSpecAdapter";
 const jsonHeaders = {
   "Content-Type": "application/json"
 };
+
+interface RustPlannerChatSession {
+  session_id: string;
+  workflow_id: string;
+  mode: PlannerInteractionMode | string;
+  ready: boolean;
+  turns: Array<{
+    role: string;
+    content: string;
+  }>;
+}
+
+interface RustPlannerChatSessionResponse {
+  session: RustPlannerChatSession;
+}
+
+interface RustPlannerChatTurnResponse {
+  session: RustPlannerChatSession;
+  assistant_message: string;
+  ready: boolean;
+  execution_allowed: boolean;
+  run_preview?: {
+    status?: string;
+    requires_confirmation?: boolean;
+    workflow_id?: string;
+  } | null;
+}
+
+interface RustRunPreviewResponse {
+  status: string;
+  requires_confirmation: boolean;
+  workflow_id: string;
+  task: string;
+  backends: string[];
+  issues: Array<{
+    level?: string;
+    code?: string;
+    message?: string;
+    target?: string;
+  }>;
+}
+
+interface RustRunResponse {
+  run_id: string;
+  report_ref?: string;
+  report?: {
+    status?: string;
+  };
+  events_url?: string;
+}
+
+interface PlannerSessionContext {
+  repo?: string | null;
+  workflowId: string;
+  plannerAgentId: string;
+  agentWorkflow: AgentWorkflowSpec;
+  scopes: string[];
+  knowledgePackIds: string[];
+  skillPackIds: string[];
+  memoryPackIds: string[];
+  interactionMode: PlannerInteractionMode;
+}
+
+interface PlannerDraftContext {
+  config: RustProjectConfig;
+  workflowId: string;
+  task: string;
+  repo: string;
+  scopes: string[];
+}
+
+const rustPlannerSessionContexts = new Map<string, PlannerSessionContext>();
+const rustPlannerDraftContexts = new Map<string, PlannerDraftContext>();
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
@@ -709,6 +783,9 @@ export function createPlannerChatDraft(input: {
   skill_pack_ids?: string[];
   memory_pack_ids?: string[];
 }): Promise<PlannerChatDraft> {
+  if (shouldUseRustApiV3()) {
+    return createRustPlannerChatDraft(input);
+  }
   return requestJson("/api/v2/planner-chat/draft", {
     method: "POST",
     headers: jsonHeaders,
@@ -724,6 +801,9 @@ export function confirmPlannerChatDraft(input: {
   edits?: Record<string, unknown>;
   initial_data?: Record<string, unknown>;
 }): Promise<PlannerChatConfirmResult> {
+  if (shouldUseRustApiV3()) {
+    return confirmRustPlannerChatDraft(input);
+  }
   return requestJson("/api/v2/planner-chat/confirm", {
     method: "POST",
     headers: jsonHeaders,
@@ -742,6 +822,9 @@ export function createPlannerChatSession(input: {
   memory_pack_ids?: string[];
   interaction_mode: PlannerInteractionMode;
 }): Promise<PlannerChatSession> {
+  if (shouldUseRustApiV3()) {
+    return createRustPlannerChatSession(input);
+  }
   return requestJson("/api/v2/planner-chat/sessions", {
     method: "POST",
     headers: jsonHeaders,
@@ -754,7 +837,18 @@ export function sendPlannerChatTurn(input: {
   message: string;
   interaction_mode: PlannerInteractionMode;
   start_if_ready?: boolean;
+  repo?: string;
+  workflow_id?: string;
+  planner_agent_id?: string;
+  agent_workflow?: AgentWorkflowSpec;
+  scopes?: string[];
+  knowledge_pack_ids?: string[];
+  skill_pack_ids?: string[];
+  memory_pack_ids?: string[];
 }): Promise<PlannerChatTurnResponse> {
+  if (shouldUseRustApiV3()) {
+    return sendRustPlannerChatTurn(input);
+  }
   return requestJson(`/api/v2/planner-chat/sessions/${encodeURIComponent(input.session_id)}/turn`, {
     method: "POST",
     headers: jsonHeaders,
@@ -767,6 +861,9 @@ export function sendPlannerChatTurn(input: {
 }
 
 export function getPlannerChatSession(sessionId: string): Promise<PlannerChatSession> {
+  if (shouldUseRustApiV3()) {
+    return getRustPlannerChatSession(sessionId);
+  }
   return requestJson(`/api/v2/planner-chat/sessions/${encodeURIComponent(sessionId)}`);
 }
 
@@ -778,11 +875,397 @@ export async function startLiveAgentRun(input: {
   scopes: string[];
   initial_data?: Record<string, unknown>;
 }): Promise<{ run_id: string; status: string; events_url: string; result_url: string }> {
+  if (shouldUseRustApiV3()) {
+    return startRustAgentRun(input);
+  }
   return requestJson("/api/v2/live-agent-runs", {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify(input)
   });
+}
+
+async function createRustPlannerChatDraft(input: {
+  repo: string;
+  request: string;
+  workflow_id: string;
+  agent_workflow: AgentWorkflowSpec;
+  scopes: string[];
+}): Promise<PlannerChatDraft> {
+  const config = legacyCanvasToWorkflowSpec(input.agent_workflow);
+  const preview = await requestJson<RustRunPreviewResponse>("/api/v3/runs/preview", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      config,
+      workflow_id: input.workflow_id,
+      task: input.request
+    })
+  });
+  const draftId = `rust_draft_${Date.now().toString(36)}`;
+  rustPlannerDraftContexts.set(draftId, {
+    config,
+    workflowId: input.workflow_id,
+    task: preview.task || input.request,
+    repo: input.repo,
+    scopes: input.scopes
+  });
+  const issueMessages = preview.issues.map((issue) => issue.message || issue.code || "Workflow preview issue.");
+  return {
+    draft_id: draftId,
+    artifact_type: "project_plan_draft",
+    summary: `Rust run preview is ${preview.status} for workflow ${preview.workflow_id}.`,
+    proposed_scope: input.scopes,
+    success_criteria:
+      preview.status === "ready"
+        ? ["Run completes with an evidence-backed final report."]
+        : ["Resolve workflow preview issues before running."],
+    risks: issueMessages,
+    requires_confirmation: preview.requires_confirmation
+  };
+}
+
+async function confirmRustPlannerChatDraft(input: {
+  draft_id: string;
+  approved: boolean;
+  edits?: Record<string, unknown>;
+}): Promise<PlannerChatConfirmResult> {
+  if (!input.approved) {
+    rustPlannerDraftContexts.delete(input.draft_id);
+    return {
+      draft_id: input.draft_id,
+      status: "cancelled"
+    };
+  }
+  const context = rustPlannerDraftContexts.get(input.draft_id);
+  if (!context) {
+    throw new Error(`Rust planner draft ${input.draft_id} was not found.`);
+  }
+  const editedRequest = typeof input.edits?.request === "string" ? input.edits.request : context.task;
+  const response = await requestJson<RustRunResponse>("/api/v3/runs", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      config: context.config,
+      workflow_id: context.workflowId,
+      task: editedRequest
+    })
+  });
+  rustPlannerDraftContexts.delete(input.draft_id);
+  return {
+    draft_id: input.draft_id,
+    run_id: response.run_id,
+    status: response.report?.status ?? "completed"
+  };
+}
+
+async function createRustPlannerChatSession(input: {
+  repo?: string;
+  workflow_id: string;
+  planner_agent_id: string;
+  agent_workflow: AgentWorkflowSpec;
+  scopes: string[];
+  knowledge_pack_ids?: string[];
+  skill_pack_ids?: string[];
+  memory_pack_ids?: string[];
+  interaction_mode: PlannerInteractionMode;
+}): Promise<PlannerChatSession> {
+  const payload = await requestJson<RustPlannerChatSessionResponse>("/api/v3/planner-chat/sessions", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      workflow_id: input.workflow_id,
+      mode: input.interaction_mode
+    })
+  });
+  const context = plannerSessionContextFromCreateInput(input);
+  rustPlannerSessionContexts.set(payload.session.session_id, context);
+  return mapRustPlannerSession(payload.session, context);
+}
+
+async function getRustPlannerChatSession(sessionId: string): Promise<PlannerChatSession> {
+  const payload = await requestJson<RustPlannerChatSessionResponse>(
+    `/api/v3/planner-chat/sessions/${encodeURIComponent(sessionId)}`
+  );
+  return mapRustPlannerSession(payload.session, rustPlannerSessionContexts.get(sessionId));
+}
+
+async function sendRustPlannerChatTurn(input: {
+  session_id: string;
+  message: string;
+  interaction_mode: PlannerInteractionMode;
+  start_if_ready?: boolean;
+  repo?: string;
+  workflow_id?: string;
+  planner_agent_id?: string;
+  agent_workflow?: AgentWorkflowSpec;
+  scopes?: string[];
+  knowledge_pack_ids?: string[];
+  skill_pack_ids?: string[];
+  memory_pack_ids?: string[];
+}): Promise<PlannerChatTurnResponse> {
+  const explicitContext = plannerSessionContextFromTurnInput(input);
+  if (explicitContext) {
+    rustPlannerSessionContexts.set(input.session_id, explicitContext);
+  }
+  const payload = await requestJson<RustPlannerChatTurnResponse>(
+    `/api/v3/planner-chat/sessions/${encodeURIComponent(input.session_id)}/turn`,
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        message: input.message,
+        confirmed: input.start_if_ready ?? false
+      })
+    }
+  );
+  const context = explicitContext ?? rustPlannerSessionContexts.get(input.session_id);
+  const mappedSession = mapRustPlannerSession(payload.session, context);
+  const turn = mapRustPlannerTurn(payload, input.message, context);
+  let runId: string | null = null;
+  let status = mappedSession.status;
+  if (payload.execution_allowed && context) {
+    const response = await requestJson<RustRunResponse>("/api/v3/runs", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        config: legacyCanvasToWorkflowSpec(context.agentWorkflow),
+        workflow_id: context.workflowId,
+        task: input.message
+      })
+    });
+    runId = response.run_id;
+    status = "running";
+  }
+  return {
+    session_id: input.session_id,
+    generation: mappedSession.generation,
+    status,
+    run_id: runId,
+    turn,
+    session: {
+      ...mappedSession,
+      last_turn: turn,
+      run_id: runId,
+      status
+    }
+  };
+}
+
+async function startRustAgentRun(input: {
+  request: string;
+  agent_workflow: AgentWorkflowSpec;
+}): Promise<{ run_id: string; status: string; events_url: string; result_url: string }> {
+  const config = legacyCanvasToWorkflowSpec(input.agent_workflow);
+  const response = await requestJson<RustRunResponse>("/api/v3/runs", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      config,
+      workflow_id: input.agent_workflow.id,
+      task: input.request
+    })
+  });
+  return {
+    run_id: response.run_id,
+    status: response.report?.status ?? "completed",
+    events_url: response.events_url ?? `/api/v3/runs/${encodeURIComponent(response.run_id)}/events`,
+    result_url: `/api/v3/runs/${encodeURIComponent(response.run_id)}`
+  };
+}
+
+function plannerSessionContextFromCreateInput(input: {
+  repo?: string;
+  workflow_id: string;
+  planner_agent_id: string;
+  agent_workflow: AgentWorkflowSpec;
+  scopes: string[];
+  knowledge_pack_ids?: string[];
+  skill_pack_ids?: string[];
+  memory_pack_ids?: string[];
+  interaction_mode: PlannerInteractionMode;
+}): PlannerSessionContext {
+  return {
+    repo: input.repo,
+    workflowId: input.workflow_id,
+    plannerAgentId: input.planner_agent_id,
+    agentWorkflow: input.agent_workflow,
+    scopes: input.scopes,
+    knowledgePackIds: input.knowledge_pack_ids ?? [],
+    skillPackIds: input.skill_pack_ids ?? [],
+    memoryPackIds: input.memory_pack_ids ?? [],
+    interactionMode: input.interaction_mode
+  };
+}
+
+function plannerSessionContextFromTurnInput(input: {
+  repo?: string;
+  workflow_id?: string;
+  planner_agent_id?: string;
+  agent_workflow?: AgentWorkflowSpec;
+  scopes?: string[];
+  knowledge_pack_ids?: string[];
+  skill_pack_ids?: string[];
+  memory_pack_ids?: string[];
+  interaction_mode: PlannerInteractionMode;
+}): PlannerSessionContext | null {
+  if (!input.workflow_id || !input.planner_agent_id || !input.agent_workflow) {
+    return null;
+  }
+  return {
+    repo: input.repo,
+    workflowId: input.workflow_id,
+    plannerAgentId: input.planner_agent_id,
+    agentWorkflow: input.agent_workflow,
+    scopes: input.scopes ?? [],
+    knowledgePackIds: input.knowledge_pack_ids ?? [],
+    skillPackIds: input.skill_pack_ids ?? [],
+    memoryPackIds: input.memory_pack_ids ?? [],
+    interactionMode: input.interaction_mode
+  };
+}
+
+function mapRustPlannerSession(
+  session: RustPlannerChatSession,
+  context?: PlannerSessionContext
+): PlannerChatSession {
+  const mode = session.mode === "work" ? "work" : "discuss";
+  const messages = session.turns.map((turn) => ({
+    role: normalizePlannerMessageRole(turn.role),
+    content: turn.content
+  }));
+  const latestAssistant = [...session.turns].reverse().find((turn) => turn.role === "assistant");
+  const taskState = rustPlannerTaskState(session.ready, context?.scopes ?? []);
+  return {
+    session_id: session.session_id,
+    workflow_id: session.workflow_id,
+    planner_agent_id: context?.plannerAgentId ?? "planner",
+    agent_workflow: context?.agentWorkflow ?? fallbackAgentWorkflow(session.workflow_id),
+    repo: context?.repo,
+    scopes: context?.scopes ?? [],
+    knowledge_pack_ids: context?.knowledgePackIds ?? [],
+    skill_pack_ids: context?.skillPackIds ?? [],
+    memory_pack_ids: context?.memoryPackIds ?? [],
+    interaction_mode: mode,
+    messages,
+    task_state: taskState,
+    generation: session.turns.length,
+    last_turn: latestAssistant
+      ? {
+          artifact_type: "planner_chat_turn",
+          assistant_message: latestAssistant.content,
+          interaction_mode: mode,
+          decision: session.ready ? "produce_plan" : "continue_chat",
+          visible_thinking: {
+            phase: session.ready ? "ready_to_start" : "checking_readiness",
+            summary: latestAssistant.content
+          },
+          task_state: taskState,
+          handoff: session.ready
+            ? {
+                workflow_request: latestAssistant.content,
+                scope: context?.scopes ?? [],
+                success_criteria: [],
+                risks: []
+              }
+            : null
+        }
+      : null,
+    run_id: null,
+    status: session.ready ? "ready" : "chatting"
+  };
+}
+
+function mapRustPlannerTurn(
+  response: RustPlannerChatTurnResponse,
+  userMessage: string,
+  context?: PlannerSessionContext
+): PlannerChatTurn {
+  const mode = response.session.mode === "work" ? "work" : "discuss";
+  const taskState = rustPlannerTaskState(response.ready, context?.scopes ?? []);
+  return {
+    artifact_type: "planner_chat_turn",
+    assistant_message: response.assistant_message,
+    interaction_mode: mode,
+    decision: response.execution_allowed
+      ? "start_workflow"
+      : response.ready
+        ? "produce_plan"
+        : "continue_chat",
+    visible_thinking: {
+      phase: response.execution_allowed
+        ? "ready_to_start"
+        : response.ready
+          ? "checking_readiness"
+          : "understanding",
+      summary: response.assistant_message
+    },
+    task_state: taskState,
+    handoff: response.ready
+      ? {
+          workflow_request: userMessage,
+          scope: context?.scopes ?? [],
+          success_criteria: [],
+          risks: []
+        }
+      : null
+  };
+}
+
+function rustPlannerTaskState(ready: boolean, scopes: string[]): PlannerChatSession["task_state"] {
+  return {
+    goal: null,
+    user_intent: null,
+    scope: scopes,
+    constraints: [],
+    success_criteria: [],
+    known_context: [],
+    missing_context: [],
+    open_questions: [],
+    assumptions: [],
+    risks: [],
+    plan_steps: [],
+    readiness: ready ? "ready_to_execute" : "needs_clarification"
+  };
+}
+
+function normalizePlannerMessageRole(role: string): "user" | "assistant" | "system" {
+  if (role === "assistant" || role === "system") return role;
+  return "user";
+}
+
+function fallbackAgentWorkflow(workflowId: string): AgentWorkflowSpec {
+  return {
+    id: workflowId,
+    version: "0.5",
+    name: workflowId,
+    description: "",
+    primary_planner_id: "planner",
+    agents: [
+      {
+        id: "planner",
+        name: "Planner",
+        role: "planner",
+        model_tier: "standard",
+        can_talk_to_human: true,
+        capabilities: ["negotiate_contract", "make_plan"]
+      },
+      {
+        id: "executor",
+        name: "Executor",
+        role: "executor",
+        model_tier: "standard",
+        can_talk_to_human: false,
+        capabilities: ["follow_planner_order", "modify_files"]
+      }
+    ],
+    edges: [{ from: "planner", to: "executor", handoff: "planner_order" }],
+    loop_policy: {
+      max_auto_rounds: 1,
+      user_can_change: true
+    },
+    ui: { layout: {} }
+  };
 }
 
 export function deleteRun(runId: string): Promise<{ run_id: string; deleted: boolean; orphan_blobs_removed: number }> {

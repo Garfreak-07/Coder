@@ -102,30 +102,46 @@ Classification values:
 - Extensions/skills: `/api/v2/extensions/*`, `/api/v2/skills/*`.
 - Patches: `/api/v2/patches/rollback`.
 
-## Missing Rust Tests To Add Next
+## Rust Parity Coverage Added
 
-- `coder-config`: parse `.coder/coder.yaml` including agents, harnesses, and
-  workflows.
-- `coder-store`: event sequence ordering, replay, artifact traversal denial,
-  blob hash stability and retrieval, large payload preview/ref behavior, and
-  sanitized repo evidence refs under `runs/{run_id}/repo_evidence/`.
-- `coder-workflow`: mock runner completed/blocked/failed/max-rounds cases.
-- `coder-openhands`: default Agent Server paths, legacy path compatibility,
-  bearer and legacy auth headers, response-shape parsing, unavailable server,
-  classified auth/workspace failure, raw event normalization, redacted secrets.
-- `coder-server`: `/api/v3` health, config validation, workflow validation,
-  mock run, run listing, event listing, stored artifact/blob retrieval, and
-  stored repo evidence payload retrieval by ref.
-- `coder-memory`: project memory file loading, bounded memory write previews,
-  and content-free memory read events.
-- `coder-cli`: side-effect-free workflow preview, mock/OpenHands run commands,
-  plus stored run list/show inspection helpers.
-- Frontend adapter: legacy canvas to `WorkflowSpec` plus additive Rust API v3
-  helper functions for validation and stored run inspection.
-- `coder-tools`: path-safe read-only repo file discovery, full-file reads,
-  bounded line-range reads, bounded text search, read-only git status evidence,
-  and bounded git diff previews. The first Rust slice skips runtime/vendor
-  directories and sensitive repo paths. The CLI can optionally record
-  find/read metadata/read-range/search/diff outputs into `coder-store` repo
-  evidence refs.
-- Frontend adapter: legacy canvas to `WorkflowSpec` and back.
+The Rust-first track now has tests or frontend build coverage for:
+
+- `coder-config`: project config validation and invalid graph references.
+- `coder-store`: event JSONL roundtrip, content-addressed blobs, artifact and
+  checkpoint traversal denial, repo evidence refs, large payload previews, and
+  evidence-backed final reports.
+- `coder-workflow`: graph semantics, terminal transitions, max-rounds guards,
+  replay, native/mock/OpenHands backend dispatch, command approval, patch
+  approval, and report evidence.
+- `coder-openhands`: Agent Server default paths, legacy path compatibility,
+  bearer and session-key auth headers, response parsing, unavailable/auth/
+  workspace error classification, polling lifecycle, raw event refs, and secret
+  redaction.
+- `coder-server`: API v3 health/capabilities, role cards, workflow validation
+  and preview, Planner Chat baseline, mock/run storage, run controls,
+  report/artifact/blob/repo-evidence reads, native tools, memory/knowledge,
+  skills/extensions/MCP, and provider settings.
+- `coder-memory`: project memory load, bounded read/write events, confirmed
+  long-term writes, executor write denial, text/Markdown knowledge import,
+  ACL/trust metadata, and lexical retrieval hints.
+- `coder-cli`: doctor/config/workflow/run/server/OpenHands/tools command
+  surface, workflow preview/run helpers, stored run list/show, report helpers,
+  and repo evidence helpers.
+- `coder-tools`: path-safe file discovery/search/read/range reads, git
+  status/diff, command preview/run, patch preview/apply, approval gates,
+  sensitive path denial, bounded outputs, and evidence recording.
+- Frontend adapter: legacy canvas to Rust `WorkflowSpec` roundtrips, Rust API
+  v3 selection, Rust default workflow mapping, Rust library save/get shape, run
+  event pagination mapping, and TypeScript/Vite build coverage for the v3 API
+  switch.
+
+## Remaining Legacy Gates
+
+- Python remains the v2 compatibility path until Rust v3 is the frontend
+  default and the Python entrypoints are no longer required by users or CI.
+- Rust Planner Chat v3 currently provides baseline session/readiness/run
+  preview behavior. Rich v2 live-run stream behavior stays in Python until the
+  v3 stored-run/event flow is the ordinary UI default.
+- Dense RAG, full MCP execution/client support, package-manager installers,
+  and license migration are deferred by the master plan. MIT migration requires
+  explicit ownership/contributor approval in a separate license-only change.

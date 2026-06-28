@@ -19,12 +19,33 @@ behavior is covered by a Rust equivalent and tests listed here.
 | Phase 7 | Quarantine/delete legacy internals | Remove any user-visible behavior silently |
 | Separate | MIT license migration after ownership confirmation | Combine license churn with runtime rewrites |
 
+## Current Phase 11 Decision
+
+Python is not physically moved to `legacy-python/` in this checkpoint. The v2
+Python/FastAPI tree remains the default compatibility path while the React app
+can opt into Rust API v3 with `VITE_CODER_API_VERSION=v3`,
+`CODER_USE_RUST_API=1`, `?coder_api_version=v3`, or local storage key
+`coder_api_version=v3`.
+
+This is an intentional quarantine gate, not a deletion. Moving the Python tree
+now would break the current v2 fallback, Python compatibility tests, and local
+developer entrypoints before the frontend default has switched to v3. Physical
+quarantine is allowed only after:
+
+- the React default path is Rust v3,
+- Planner Chat and run execution no longer depend on v2 live-run streams,
+- Python compatibility tests have Rust/frontend replacements or are retired,
+- CI is green with the Python package no longer on the default product path.
+
+Until then, Python is treated as legacy compatibility code: kept buildable,
+tested in CI, and excluded from new Rust control-plane ownership.
+
 ## Subsystem Mapping
 
 | Current subsystem | Current files | Rust target | Migration action | Deletion gate |
 |---|---|---|---|---|
-| Planner Chat sessions | `server/planner_chat_sessions.py`, `server/app.py`, planner chat frontend | `coder-core` run/session types, `coder-server` API, `coder-agent` prompt rendering | Add Rust session DTOs and readiness gate, then adapter endpoint | Discuss/work behavior has parity tests and UI uses Rust API |
-| Legacy draft/confirm | `planner-chat/draft`, `planner-chat/confirm` | Rust run preview and confirmation gate | Keep compatibility until Rust preview supports edits/approval | Existing frontend no longer depends on legacy draft payloads |
+| Planner Chat sessions | `server/planner_chat_sessions.py`, `server/app.py`, planner chat frontend | `coder-core` run/session types, `coder-server` API, `coder-agent` prompt rendering | Rust v3 session/turn endpoints and a gated frontend adapter cover baseline discuss/work readiness; v2 remains the compatibility fallback for richer live session behavior | Discuss/work behavior has parity tests and UI uses Rust API by default |
+| Legacy draft/confirm | `planner-chat/draft`, `planner-chat/confirm` | Rust run preview and confirmation gate | Frontend v3 adapter maps draft/confirm to `/api/v3/runs/preview` and `/api/v3/runs`; v2 remains fallback | Existing frontend no longer depends on legacy draft payloads |
 | Agent workflow model | `core/agent_workflow.py`, `frontend/src/types.ts` | `coder-config::AgentSpec`, `HarnessSpec`, `WorkflowSpec`, UI protocol DTOs | Add adapters between legacy JSON and specs | Roundtrip preserves layout, max rounds, agents, harness bindings |
 | Workflow canvas | `frontend/src/features/agent-workflow`, `workflowGraph.ts` | Frontend adapter plus Rust validation API | Validate spec through Rust when available, keep current UI simple | Browser/UI tests prove save/import/export parity |
 | Agent role cards | `core/archetypes.py` | Agent templates in `coder-config`/`coder-agent` | Generate role catalog from stable specs | UI no longer needs Python role card endpoint |
@@ -46,13 +67,13 @@ behavior is covered by a Rust equivalent and tests listed here.
 | Agentic router | `context/agentic_router.py` | Later Rust context router | Defer until repo tools and memory are stable | Router policy tests pass in Rust |
 | Memory service | `memory/service.py`, `run_memory.py` | `coder-memory` | Project memory JSON loading, bounded `memory.read` recording, and event-only `memory.write.proposed` proposals are exposed through v3 | Long-term writes are confirmed and executor cannot write directly |
 | Knowledge import/RAG | `memory/knowledge_import.py`, `hybrid_*` | `coder-memory`, `coder-rag` | Port lexical retrieval first, dense optional later | ACL and hint-only behavior covered |
-| Extensions/plugins | `extensions/*` | `coder-extensions` plugin registry | Rust plugin/harness-runtime manifest types, builtin plugin manifests, external-effect preview validation, and v3 list/validate API are in place; install/search/execute parity remains later | External-effect approval and manifest tests pass |
-| Skills | `skills/*` | Rust skill store/router | Preserve discover/install/update/pin/rollback | Skill lifecycle tests pass |
+| Extensions/plugins | `extensions/*` | `coder-extensions` plugin registry | Rust plugin/harness-runtime manifest types, builtin plugin manifests, external-effect preview validation, extension search, installed list, and v3 list/validate API are in place; execution remains approval-gated/deferred | External-effect approval and manifest tests pass |
+| Skills | `skills/*` | Rust skill store/router | Rust v3 covers installed/discover/updates/install/update/auto-update/enable/disable/remove/pin/unpin/rollback/update-policy; unsafe developer import is denied in the baseline | Skill lifecycle tests pass |
 | MCP | `tools/mcp.py`, registries | Rust MCP registry/server/client | Rust `coder-harness` and v3 API now validate MCP manifests, force server/operation default enablement off, and keep operations approval-required; execution/client support remains later | Manifest validation and no-auto-enable tests pass |
 | Provider settings | `server/settings.py`, frontend settings | `coder-model` profiles and Rust settings API | Keep secret refs only, redact values | Provider status/test behavior has Rust parity |
 | Python CLI | `cli.py` | `coder-cli` | Add Rust commands while keeping Python CLI | Rust CLI can run and inspect mock/OpenHands spike workflows |
-| FastAPI server | `server/app.py` | `coder-server` Axum API v3 | Added v3 health, validation, run/event/report/store reads, command preview, and patch preview/apply endpoints; preserve v2 until frontend migrates | Frontend can run against Rust server for main flow |
-| React app | `frontend/src` | Same app with Rust API adapter | Avoid rewrite; add adapter/helper layer before switching product paths | Main pages validated through browser smoke |
+| FastAPI server | `server/app.py` | `coder-server` Axum API v3 | Added v3 health, validation, workflow/library, planner-chat baseline, run/event/report/store reads, tools, memory, extensions/skills/MCP, provider settings, command preview/run, and patch preview/apply endpoints; preserve v2 until frontend default migrates | Frontend can run against Rust server for main flow |
+| React app | `frontend/src` | Same app with Rust API adapter | Gated v3 adapter covers workflow/library, run inspection, report/artifact/blob retrieval, provider settings, skills/extensions, Planner Chat baseline, and run preview/confirmation while preserving v2 fallback | Main pages validated through browser smoke |
 | Tests | `tests/`, frontend build, future Cargo tests | Multi-language CI gates | Keep Python tests until parity tests replace them | Equivalent Rust/frontend tests exist before deleting Python tests |
 
 ## Stable Public Protocol Targets

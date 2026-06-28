@@ -26,6 +26,7 @@ import {
   subscribeRunEvents,
   validateAgentWorkflow
 } from "./api";
+import { shouldUseRustApiV3 } from "./apiVersion";
 import { defaultPlannerLedAgentWorkflow } from "./examples";
 import { AppSidebar, type AppSection } from "./components/AppSidebar";
 import { ProviderSettingsPanel } from "./components/ProviderSettingsPanel";
@@ -662,7 +663,15 @@ export function App() {
         session_id: session.session_id,
         message: requestText,
         interaction_mode: plannerInteractionMode,
-        start_if_ready: true
+        start_if_ready: true,
+        repo,
+        workflow_id: workflow.id,
+        planner_agent_id: workflow.primary_planner_id,
+        agent_workflow: workflow,
+        scopes,
+        skill_pack_ids: plannerChatWorkflowSummary.skillPackIds,
+        knowledge_pack_ids: plannerChatWorkflowSummary.knowledgePackIds,
+        memory_pack_ids: plannerChatWorkflowSummary.memoryPackIds
       });
       setPlannerSession(response.session);
       setPlannerDraft(null);
@@ -672,15 +681,20 @@ export function App() {
       setSubmittedRequest(requestText);
       setRequest("");
       if (response.run_id) {
-        setActiveRunId(response.run_id);
-        setSelectedRunKind("live");
-        setSelectedRunDetail(null);
-        setEvents([]);
-        setEventCursor(0);
-        setEventHasMore(false);
-        setEventsLoadingMore(false);
-        subscribeToRun(response.run_id, `/api/v2/live-agent-runs/${response.run_id}/events`);
-        setStatus(`Run ${response.status}.`);
+        if (shouldUseRustApiV3()) {
+          await openStoredRun(response.run_id);
+          setStatus(`Run ${response.status}.`);
+        } else {
+          setActiveRunId(response.run_id);
+          setSelectedRunKind("live");
+          setSelectedRunDetail(null);
+          setEvents([]);
+          setEventCursor(0);
+          setEventHasMore(false);
+          setEventsLoadingMore(false);
+          subscribeToRun(response.run_id, `/api/v2/live-agent-runs/${response.run_id}/events`);
+          setStatus(`Run ${response.status}.`);
+        }
         refreshRuntimeInfo();
       } else {
         setStatus(`Planner ${response.turn.decision.replaceAll("_", " ")}.`);
@@ -729,11 +743,16 @@ export function App() {
       setSubmittedRequest(confirmedRequest);
       setScopesText(confirmedScopes.join("\n"));
       setActiveRunId(run.run_id);
-      setSelectedRunKind("live");
-      setSelectedRunDetail(null);
-      setEvents([]);
-      subscribeToRun(run.run_id, `/api/v2/live-agent-runs/${run.run_id}/events`);
-      setStatus(`Run ${run.status}.`);
+      if (shouldUseRustApiV3()) {
+        await openStoredRun(run.run_id);
+        setStatus(`Run ${run.status}.`);
+      } else {
+        setSelectedRunKind("live");
+        setSelectedRunDetail(null);
+        setEvents([]);
+        subscribeToRun(run.run_id, `/api/v2/live-agent-runs/${run.run_id}/events`);
+        setStatus(`Run ${run.status}.`);
+      }
       refreshRuntimeInfo();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
