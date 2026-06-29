@@ -11,6 +11,8 @@
 - React frontend for Rust v3: COMPLETE
 - MCP execution baseline: COMPLETE
 - Memory/knowledge/RAG baseline: COMPLETE
+- Planner Conversation Harness and memory policy: COMPLETE
+- OpenHands-first executor boundary: COMPLETE
 - Release/installer baseline: COMPLETE
 - MIT migration: COMPLETE
 - Normal CI without live provider credentials: COMPLETE
@@ -32,8 +34,9 @@ The current product path is:
 ```text
 React frontend
 -> Rust API v3
+-> Planner Chat using planner AgentSpec + planner-model HarnessSpec
 -> Rust workflow runner
--> native Rust or OpenHands harness backend
+-> planner-model supervisor boundary, OpenHands executor, or native Rust fallback
 -> Rust event/evidence/report stores
 ```
 
@@ -49,6 +52,14 @@ for selecting a removed v2 backend.
   silently returning.
 - Updated README and migration documents to describe current `main` as
   Rust-only.
+- Added explicit `planner-conversation` / `planner-model` harness resolution for
+  Planner Chat.
+- Added PlanDraft memory proposals and Planner-only long-term memory
+  proposal/confirmation policy.
+- Kept executor code-edit workflows OpenHands-first while preserving native Rust
+  fallback/preflight/evidence tooling.
+- Added Planner events, Work confirmation gating, and final report plan context
+  summaries.
 
 ## CI State
 
@@ -57,6 +68,7 @@ Normal CI has explicit jobs for:
 - Rust workspace
 - Frontend build/test
 - Installer dry-run
+- Planner memory/OpenHands-first product loop
 
 No normal CI job installs or tests the removed Python/FastAPI v2 implementation.
 No normal CI job requires DeepSeek, OpenAI, Anthropic, Gemini, OpenHands live

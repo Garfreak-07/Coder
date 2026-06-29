@@ -13,8 +13,8 @@ const roleLabels: Record<string, string> = {
 };
 
 const defaultHarnessBindings: HarnessBindings = {
-  planning_chat: { profile_id: "openhands-planning-chat-default" },
-  workflow_supervisor: { profile_id: "openhands-workflow-supervisor-default" },
+  planning_chat: { profile_id: "planner-conversation" },
+  workflow_supervisor: { profile_id: "planner-conversation" },
   task_execution: { profile_id: "openhands-task-executor-default" },
   agent_overrides: {}
 };

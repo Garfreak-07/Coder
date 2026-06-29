@@ -18,6 +18,15 @@ $outLog = Join-Path $storePath "server.out.log"
 $errLog = Join-Path $storePath "server.err.log"
 New-Item -ItemType Directory -Force -Path $storePath | Out-Null
 
+# Some sandboxed Windows environments expose both Path and PATH. Start-Process
+# rejects duplicate environment keys, so keep Path and drop the duplicate PATH
+# from this script process before starting the server.
+$processEnv = [Environment]::GetEnvironmentVariables("Process")
+if ($processEnv.Contains("Path") -and $processEnv.Contains("PATH")) {
+  [Environment]::SetEnvironmentVariable("PATH", $null, "Process")
+}
+[Environment]::SetEnvironmentVariable("CARGO_TARGET_DIR", (Join-Path $repoRoot ".tmp\cargo-target"), "Process")
+
 $cargo = (Get-Command cargo).Source
 $server = Start-Process -FilePath $cargo `
   -ArgumentList @("run", "-p", "coder-cli", "--bin", "coder-rust", "--", "server", "--host", $HostName, "--port", "$Port", "--store", $storePath) `

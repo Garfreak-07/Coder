@@ -17,7 +17,7 @@ agents:
     memory:
       read: [user, project, run, repo_facts, knowledge_hints]
       write: [run]
-    output_contract: planner_order
+    output_contract: planner_conversation
 
   executor:
     role: executor
@@ -31,6 +31,25 @@ agents:
     output_contract: execution_result
 
 harnesses:
+  planner-conversation:
+    backend: planner-model
+    tools: [memory_read, knowledge_retrieve, repo_search, read_file, git_diff]
+    permissions:
+      read_files: allow
+      write_files: deny
+      run_commands: deny
+      network: deny
+      secrets: deny
+      publish_external: deny
+      git_commit: deny
+      git_push: deny
+      deploy: deny
+    memory:
+      read: [user, project, run, repo_facts, knowledge_hints]
+      write: [run]
+    verification:
+      require_evidence: false
+
   review-only:
     backend: native-rust
     tools: [repo_search, read_file, git_diff]
@@ -85,7 +104,7 @@ workflows:
     nodes:
       - id: planner
         agent: planner
-        harness: review-only
+        harness: planner-conversation
       - id: executor
         agent: executor
         harness: openhands-code-edit

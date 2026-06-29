@@ -10,7 +10,7 @@ User
 -> Work mode confirmation
 -> WorkflowRunner
 -> role-specific HarnessSpec
--> native Rust or OpenHands backend
+-> planner-model, native Rust, or OpenHands backend
 -> events, approvals, evidence, patches, checks
 -> evidence-backed final report
 -> Planner-facing result summary
@@ -26,6 +26,7 @@ It can:
 - ask clarifying questions
 - discuss scope, risks, assumptions, and acceptance criteria
 - maintain a small plan draft
+- propose user/project memory updates for review
 - mark readiness
 
 It must not:
@@ -33,6 +34,7 @@ It must not:
 - write files
 - run commands
 - start a workflow
+- silently write global memory
 - claim execution happened
 
 Backend contract:
@@ -42,10 +44,26 @@ Backend contract:
 - `PlannerConversationResponse`
 - `PlanDraft`
 
-The deterministic engine is the no-credential fallback used by tests and local
-offline development. The model-backed wrapper only attempts a live
-OpenAI-compatible request when mock mode is disabled and a credential exists in
-the environment.
+Planner Chat resolves runtime from the workflow:
+
+```text
+workflow_id -> planner node -> AgentSpec -> HarnessSpec -> model profile
+```
+
+The planner node must bind to the read-only `planner-model` HarnessSpec. The
+deterministic engine is only used in mock/test mode. In product mode, missing
+model provider configuration returns:
+
+```text
+Planner model provider is not configured.
+Set LLM_BASE_URL and LLM_API_KEY or configure provider settings.
+```
+
+PlanDraft includes `memory_proposals`. These are not writes. Durable project
+memory requires an explicit `memory.write.proposed` event followed by a
+`memory.write.confirmed` request with `confirmed_by_role = planning_chat`.
+Workflow supervisor and task execution roles cannot propose or confirm project
+memory writes.
 
 ## Work Mode
 
@@ -65,7 +83,7 @@ The Work-mode run request carries:
 
 `WorkflowRunner` records this plan context in run events, passes it into
 harness backend context, projects it into OpenHands payloads, and includes plan
-acceptance criteria in the final report checks.
+summary and acceptance criteria in the final report checks.
 
 ## Important Files
 

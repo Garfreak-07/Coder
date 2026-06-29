@@ -6,6 +6,7 @@ export type AgentWorkflowRole =
 export type AgentCapability = string;
 export type HandoffType =
   | "run_contract"
+  | "planner_conversation"
   | "planner_order"
   | "execution_result"
   | "planner_decision"
@@ -148,6 +149,7 @@ export interface RustProjectMemoryLoadResponse {
 
 export interface RustProjectMemoryWriteProposalRequest {
   run_id: string;
+  proposed_by_role: RustAgentMemoryRole;
   record: RustMemoryRecord;
 }
 
@@ -737,6 +739,14 @@ export interface PlannerPlanStep {
   status: "draft" | "ready" | "executing" | "done" | "blocked";
 }
 
+export interface PlannerMemoryProposal {
+  scope: "user" | "project" | string;
+  key: string;
+  content: string;
+  rationale: string;
+  requires_confirmation: boolean;
+}
+
 export interface PlannerTaskState {
   goal?: string | null;
   user_intent?: string | null;
@@ -748,6 +758,7 @@ export interface PlannerTaskState {
   open_questions: string[];
   assumptions: string[];
   risks: string[];
+  memory_proposals: PlannerMemoryProposal[];
   plan_steps: PlannerPlanStep[];
   readiness: "not_ready" | "needs_clarification" | "ready_to_plan" | "ready_to_execute";
 }

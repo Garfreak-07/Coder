@@ -119,6 +119,13 @@ interface RustPlannerPlanDraft {
   risks?: string[];
   open_questions?: string[];
   selected_workflow_id: string;
+  memory_proposals?: Array<{
+    scope: string;
+    key: string;
+    content: string;
+    rationale: string;
+    requires_confirmation: boolean;
+  }>;
 }
 
 interface RustPlannerChatSessionResponse {
@@ -137,6 +144,7 @@ interface RustPlannerChatTurnResponse {
   should_start_workflow?: boolean;
   ready: boolean;
   execution_allowed: boolean;
+  events?: Array<Record<string, unknown>>;
   run_preview?: {
     status?: string;
     requires_confirmation?: boolean;
@@ -875,6 +883,8 @@ async function createRustPlannerChatSession(input: {
     headers: jsonHeaders,
     body: JSON.stringify({
       workflow_id: input.workflow_id,
+      planner_agent_id: input.planner_agent_id,
+      config: legacyCanvasToWorkflowSpec(input.agent_workflow),
       mode: input.interaction_mode
     })
   });
@@ -916,7 +926,9 @@ async function sendRustPlannerChatTurn(input: {
       body: JSON.stringify({
         message: input.message,
         confirmed: input.start_if_ready ?? false,
-        mode: input.interaction_mode
+        mode: input.interaction_mode,
+        planner_agent_id: input.planner_agent_id,
+        config: input.agent_workflow ? legacyCanvasToWorkflowSpec(input.agent_workflow) : undefined
       })
     }
   );
@@ -1156,6 +1168,7 @@ function rustPlannerTaskState(
   const openQuestions = session.open_questions ?? plan?.open_questions ?? [];
   const acceptanceCriteria = session.acceptance_criteria ?? plan?.acceptance_criteria ?? [];
   const risks = session.risks ?? plan?.risks ?? [];
+  const memoryProposals = plan?.memory_proposals ?? [];
   const affectedPaths = plan?.affected_paths ?? [];
   const scope = plan?.scope && plan.scope.length > 0 ? plan.scope : fallbackScopes;
   return {
@@ -1169,6 +1182,7 @@ function rustPlannerTaskState(
     open_questions: openQuestions,
     assumptions: plan?.assumptions ?? [],
     risks,
+    memory_proposals: memoryProposals,
     plan_steps: (plan?.steps ?? []).map((summary, index) => ({
       id: `step-${index + 1}`,
       summary,

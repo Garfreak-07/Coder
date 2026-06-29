@@ -94,7 +94,7 @@ export function legacyCanvasToWorkflowSpec(agentWorkflow: AgentWorkflowSpec): Ru
   }
 
   const nodes = workflow.agents.map((agent) => {
-    const mode = agent.id === workflow.primary_planner_id ? "workflow_supervisor" : "task_execution";
+    const mode = agent.id === workflow.primary_planner_id ? "planning_chat" : "task_execution";
     const binding = harnessBindingForAgent(workflow, agent.id, mode);
     harnesses[binding.profile_id] = rustHarnessSpecFor(binding, mode);
     return {
@@ -325,13 +325,14 @@ function rustAgentSpecFor(agent: AgentWorkflowAgent, model: string): RustAgentSp
     model,
     system: agent.purpose?.trim() || systemInstructionsFor(agent),
     memory: memoryAccessFor(agent.role),
-    output_contract: planner ? "planner_order" : "execution_result"
+    output_contract: planner ? "planner_conversation" : "execution_result"
   };
 }
 
 function rustHarnessSpecFor(binding: HarnessModeBinding, mode: HarnessMode): RustHarnessSpec {
-  const backend = backendForBinding(binding);
+  const backend = backendForBinding(binding, mode);
   const taskMode = mode === "task_execution";
+  const plannerChatMode = mode === "planning_chat";
   return {
     backend,
     openhands:
@@ -349,6 +350,11 @@ function rustHarnessSpecFor(binding: HarnessModeBinding, mode: HarnessMode): Rus
           read: ["project", "run", "repo_facts", "knowledge_hints"],
           write: ["run"]
         }
+      : plannerChatMode
+        ? {
+            read: ["user", "project", "run", "repo_facts", "knowledge_hints"],
+            write: ["run"]
+          }
       : {
           read: ["user", "project", "workflow", "run", "repo_facts", "knowledge_hints"],
           write: ["workflow", "run"]
@@ -364,13 +370,17 @@ function toolsForHarness(backend: string, mode: HarnessMode): string[] {
   if (backend === "openhands" && mode === "task_execution") {
     return ["terminal", "file_editor", "task_tracker"];
   }
+  if (mode === "planning_chat") {
+    return ["memory_read", "knowledge_retrieve", "repo_search", "read_file", "git_diff"];
+  }
   if (mode === "task_execution") {
     return ["repo_search", "read_file", "git_diff", "apply_patch", "run_command"];
   }
   return ["repo_search", "read_file", "git_diff"];
 }
 
-function backendForBinding(binding: HarnessModeBinding): string {
+function backendForBinding(binding: HarnessModeBinding, mode: HarnessMode): string {
+  if (mode === "planning_chat") return "planner-model";
   const marker = `${binding.profile_id} ${binding.provider_id ?? ""}`.toLowerCase();
   if (marker.includes("openhands")) return "openhands";
   return "native-rust";
@@ -382,7 +392,7 @@ function harnessBindingForAgent(workflow: AgentWorkflowSpec, agentId: string, mo
   const binding = workflow.harness_bindings?.[mode];
   if (binding?.profile_id) return binding;
   return {
-    profile_id: mode === "task_execution" ? "openhands-task-executor-default" : "openhands-workflow-supervisor-default"
+    profile_id: mode === "planning_chat" ? "planner-conversation" : mode === "task_execution" ? "openhands-task-executor-default" : "openhands-workflow-supervisor-default"
   };
 }
 
@@ -390,10 +400,10 @@ function harnessBindingsForWorkflow(
   nodes: Array<{ id: string; agent: string; harness: string }>,
   primaryPlannerId: string
 ): NonNullable<AgentWorkflowSpec["harness_bindings"]> {
-  const primaryHarness = nodes.find((node) => node.id === primaryPlannerId)?.harness ?? "openhands-workflow-supervisor-default";
+  const primaryHarness = nodes.find((node) => node.id === primaryPlannerId)?.harness ?? "planner-conversation";
   const taskHarness = nodes.find((node) => node.id !== primaryPlannerId)?.harness ?? "openhands-task-executor-default";
   return {
-    planning_chat: { profile_id: "openhands-planning-chat-default" },
+    planning_chat: { profile_id: "planner-conversation" },
     workflow_supervisor: { profile_id: primaryHarness },
     task_execution: { profile_id: taskHarness },
     agent_overrides: Object.fromEntries(

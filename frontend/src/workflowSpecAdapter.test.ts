@@ -73,8 +73,11 @@ test("roundtrips Rust workflow export back to equivalent legacy canvas", () => {
 
 test("maps OpenHands harness profiles to OpenHands backend", () => {
   const config = legacyCanvasToWorkflowSpec(defaultPlannerLedAgentWorkflow);
+  const plannerHarness = config.harnesses["planner-conversation"];
   const taskHarness = config.harnesses["openhands-task-executor-default"];
 
+  assert.equal(plannerHarness.backend, "planner-model");
+  assert.equal(config.workflows["default-planner-led"].nodes[0].harness, "planner-conversation");
   assert.equal(taskHarness.backend, "openhands");
   assert.equal(taskHarness.openhands?.server_url, "http://127.0.0.1:8000");
 });
@@ -91,9 +94,10 @@ test("maps native read-only harness profiles to native Rust backend", () => {
   };
   const config = legacyCanvasToWorkflowSpec(workflow);
 
-  assert.equal(config.harnesses["review-only-supervisor"].backend, "native-rust");
+  assert.equal(config.harnesses["review-only-chat"].backend, "planner-model");
   assert.equal(config.harnesses["review-only-task"].backend, "native-rust");
   assert.equal(config.harnesses["review-only-task"].openhands, null);
+  assert.equal(config.workflows["default-planner-led"].nodes[0].harness, "review-only-chat");
 });
 
 test("validates invalid Rust specs with user-facing errors", () => {
@@ -196,6 +200,7 @@ test("frontend API client stays on Rust v3 without Python switch", () => {
   assert.ok(!apiSource.includes(removedV2Route));
   assert.ok(!apiSource.toLowerCase().includes(removedPythonServer));
   assert.ok(apiSource.includes("/api/v3/planner-chat/sessions"));
+  assert.ok(apiSource.includes("legacyCanvasToWorkflowSpec(input.agent_workflow)"));
 });
 
 test("run summary recognizes backend approval request events", () => {
@@ -203,4 +208,11 @@ test("run summary recognizes backend approval request events", () => {
 
   assert.ok(appSource.includes("approval.requested"));
   assert.ok(appSource.includes("isApprovalRequestEvent"));
+});
+
+test("Planner Chat page renders memory proposal review surface", () => {
+  const source = readFileSync("src/features/planner-chat/PlannerChatPage.tsx", "utf8");
+
+  assert.ok(source.includes("Memory proposals"));
+  assert.ok(source.includes("memory_proposals"));
 });

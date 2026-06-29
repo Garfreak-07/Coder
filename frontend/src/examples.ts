@@ -7,8 +7,8 @@ export const defaultPlannerLedAgentWorkflow: AgentWorkflowSpec = {
   description: "Planner decides. Executor executes, verifies, and returns execution evidence. Runtime hides graph details.",
   primary_planner_id: "planner",
   harness_bindings: {
-    planning_chat: { profile_id: "openhands-planning-chat-default" },
-    workflow_supervisor: { profile_id: "openhands-workflow-supervisor-default" },
+    planning_chat: { profile_id: "planner-conversation" },
+    workflow_supervisor: { profile_id: "planner-conversation" },
     task_execution: { profile_id: "openhands-task-executor-default" },
     agent_overrides: {}
   },
@@ -43,4 +43,3 @@ export const defaultPlannerLedAgentWorkflow: AgentWorkflowSpec = {
     }
   }
 };
-

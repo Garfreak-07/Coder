@@ -347,6 +347,26 @@ label {
   padding-left: 18px;
 }
 
+.memory-proposal-list li {
+  display: grid;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+
+.memory-proposal-list strong {
+  color: #e5e7eb;
+  font-size: 12px;
+}
+
+.memory-proposal-list p,
+.memory-proposal-list small {
+  margin: 0;
+}
+
+.memory-proposal-list small {
+  color: #94a3b8;
+}
+
 .plan-draft-card {
   background: #101826;
   border: 1px solid #334155;

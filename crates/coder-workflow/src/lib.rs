@@ -1049,6 +1049,7 @@ pub struct WorkflowRunOutput {
 
 #[derive(Clone)]
 pub struct BackendRegistry {
+    planner_model: Arc<dyn HarnessBackend>,
     native_rust: Arc<dyn HarnessBackend>,
     native_mock: Arc<dyn HarnessBackend>,
     openhands: Option<Arc<dyn HarnessBackend>>,
@@ -1057,6 +1058,7 @@ pub struct BackendRegistry {
 impl BackendRegistry {
     pub fn native_only() -> Self {
         Self {
+            planner_model: Arc::new(PlannerModelBackend),
             native_rust: Arc::new(NativeMockBackend::default()),
             native_mock: Arc::new(NativeMockBackend::default()),
             openhands: None,
@@ -1074,6 +1076,7 @@ impl BackendRegistry {
                     as Arc<dyn HarnessBackend>
             });
         Self {
+            planner_model: Arc::new(PlannerModelBackend),
             native_rust: Arc::new(NativeRustBackend::new(store.clone())),
             native_mock: Arc::new(NativeMockBackend::default()),
             openhands,
@@ -1092,11 +1095,69 @@ impl BackendRegistry {
 
     pub fn backend_for(&self, backend: &str) -> Option<Arc<dyn HarnessBackend>> {
         match backend {
+            "planner-model" => Some(Arc::clone(&self.planner_model)),
             "native-rust" => Some(Arc::clone(&self.native_rust)),
             "native_mock" | "mock" => Some(Arc::clone(&self.native_mock)),
             "openhands" => self.openhands.as_ref().map(Arc::clone),
             _ => None,
         }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PlannerModelBackend;
+
+#[async_trait]
+impl HarnessBackend for PlannerModelBackend {
+    async fn run(&self, request: HarnessRunRequest) -> Result<HarnessRunResult, HarnessError> {
+        let plan_goal = request
+            .backend_context
+            .pointer("/coder/plan_context/plan_draft/goal")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                request
+                    .backend_context
+                    .pointer("/coder/plan_context/original_user_request")
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or("Confirmed workflow plan");
+        let mut report = FinalReport::completed(
+            "Planner Conversation Harness accepted the confirmed plan without side effects.",
+        );
+        report.checks = vec![
+            "planner-model harness: read-only boundary enforced".to_owned(),
+            format!("plan_context: {plan_goal}"),
+        ];
+        Ok(HarnessRunResult {
+            status: "ready".to_owned(),
+            report: Some(report),
+            events: vec![
+                HarnessRunEvent::new(
+                    "planner.message.completed",
+                    json!({
+                        "backend": "planner-model",
+                        "node_id": request.node_id,
+                        "agent_id": request.agent_id,
+                        "harness_id": request.harness_id,
+                        "side_effects": "none"
+                    }),
+                ),
+                HarnessRunEvent::new(
+                    "planner.plan.updated",
+                    json!({
+                        "backend": "planner-model",
+                        "plan_context_summary": plan_goal
+                    }),
+                ),
+                HarnessRunEvent::new(
+                    "planner.readiness.changed",
+                    json!({
+                        "backend": "planner-model",
+                        "readiness": "ready"
+                    }),
+                ),
+            ],
+        })
     }
 }
 
@@ -2187,6 +2248,9 @@ fn workflow_run_report(input: WorkflowReportInput<'_>) -> FinalReport {
         ),
     );
     report.checks = input.checks;
+    if let Some(summary) = plan_context_summary(input.plan_context.as_ref()) {
+        report.checks.push(format!("plan_context: {summary}"));
+    }
     for criterion in plan_acceptance_criteria(input.plan_context.as_ref()) {
         report.checks.push(format!("acceptance: {criterion}"));
     }
@@ -2211,6 +2275,30 @@ fn workflow_run_report(input: WorkflowReportInput<'_>) -> FinalReport {
         .dedup_by(|left, right| left.kind == right.kind && left.reference == right.reference);
     report.evidence_refs = evidence_refs;
     report
+}
+
+fn plan_context_summary(plan_context: Option<&Value>) -> Option<String> {
+    let plan_context = plan_context?;
+    let summary = plan_context
+        .get("plan_draft")
+        .and_then(|plan| plan.get("goal"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            plan_context
+                .get("original_user_request")
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            plan_context
+                .get("planner_conversation_summary")
+                .and_then(Value::as_str)
+        })?
+        .trim();
+    if summary.is_empty() {
+        None
+    } else {
+        Some(summary.chars().take(240).collect())
+    }
 }
 
 fn plan_acceptance_criteria(plan_context: Option<&Value>) -> Vec<String> {

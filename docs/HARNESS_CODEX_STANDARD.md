@@ -43,7 +43,8 @@ Memory and knowledge:
 
 - read only allowed scopes
 - write only allowed scopes
-- execution agents cannot write long-term memory unless policy permits
+- long-term memory proposals and confirmations are Planner Chat only
+- workflow supervisor and task execution roles can write only run/workflow memory
 - knowledge hints are not current-code evidence
 - repo evidence overrides stale memory
 
@@ -64,6 +65,18 @@ and evidence-backed reports.
 It is not a hidden second full coding-agent runtime competing with OpenHands.
 Its purpose is deterministic local work, policy preflight, evidence capture,
 and development without a live OpenHands server.
+
+## Planner Model Backend
+
+`planner-model` is a read-only Planner Conversation Harness backend. It is not a
+coding-agent runtime and does not edit files, run commands, publish, deploy,
+commit, push, or write long-term memory. Product Planner Chat resolves it from
+the selected workflow's planner node and uses its AgentSpec, HarnessSpec, memory
+scopes, read-only tools, and model profile as the conversation boundary.
+
+When a confirmed Work run enters the workflow graph, `planner-model` records
+planner boundary events and returns a `ready` transition so the executor can run
+through the configured executor harness.
 
 ## OpenHands Backend
 

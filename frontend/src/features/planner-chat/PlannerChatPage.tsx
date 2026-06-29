@@ -269,6 +269,7 @@ function PlannerTaskStateSummary({ session }: { session: PlannerChatSession }) {
       <PlannerStateList title="Open questions" items={state.open_questions} />
       <PlannerStateList title="Acceptance" items={state.success_criteria} />
       <PlannerStateList title="Risks" items={state.risks} />
+      <MemoryProposalList proposals={state.memory_proposals} />
     </div>
   );
 }
@@ -281,6 +282,24 @@ function PlannerStateList({ title, items }: { title: string; items: string[] }) 
       <ul>
         {items.slice(0, 4).map((item, index) => (
           <li key={`${title}-${index}`}>{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function MemoryProposalList({ proposals }: { proposals: PlannerChatSession["task_state"]["memory_proposals"] }) {
+  if (proposals.length === 0) return null;
+  return (
+    <div className="planner-state-list memory-proposal-list">
+      <span>Memory proposals</span>
+      <ul>
+        {proposals.slice(0, 3).map((proposal) => (
+          <li key={`${proposal.scope}-${proposal.key}`}>
+            <strong>{proposal.scope}: {proposal.key}</strong>
+            <p>{proposal.content}</p>
+            <small>{proposal.rationale}</small>
+          </li>
         ))}
       </ul>
     </div>

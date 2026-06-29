@@ -459,9 +459,9 @@ pub fn ensure_memory_write_allowed(
     record: &MemoryRecord,
 ) -> Result<(), MemoryError> {
     validate_memory_record_safety(record)?;
-    if is_long_term_scope(record.scope) && confirmed_by == AgentMemoryRole::TaskExecution {
+    if is_long_term_scope(record.scope) && confirmed_by != AgentMemoryRole::PlanningChat {
         return Err(MemoryError::PolicyViolation(
-            "task_execution cannot confirm long-term memory writes".to_owned(),
+            "only planning_chat can confirm long-term memory writes".to_owned(),
         ));
     }
     Ok(())
@@ -1439,7 +1439,7 @@ mod tests {
     }
 
     #[test]
-    fn executor_cannot_confirm_long_term_memory_write() {
+    fn only_planning_chat_can_confirm_long_term_memory_write() {
         let record = fixture_record("Rust owns the control plane.");
 
         let error =
@@ -1447,8 +1447,13 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("task_execution cannot confirm long-term memory writes"));
-        assert!(ensure_memory_write_allowed(AgentMemoryRole::WorkflowSupervisor, &record).is_ok());
+            .contains("only planning_chat can confirm long-term memory writes"));
+        let supervisor_error =
+            ensure_memory_write_allowed(AgentMemoryRole::WorkflowSupervisor, &record).unwrap_err();
+        assert!(supervisor_error
+            .to_string()
+            .contains("only planning_chat can confirm long-term memory writes"));
+        assert!(ensure_memory_write_allowed(AgentMemoryRole::PlanningChat, &record).is_ok());
     }
 
     #[test]

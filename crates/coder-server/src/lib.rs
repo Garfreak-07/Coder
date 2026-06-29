@@ -16,7 +16,10 @@ use axum::{
     Json, Router,
 };
 use coder_config::{
-    validate_project_config, ProjectConfig, ValidationIssue, ValidationLevel, ValidationReport,
+    validate_project_config, AgentSpec as ConfigAgentSpec, HarnessSpec as ConfigHarnessSpec,
+    MemoryScope as ConfigMemoryScope, ModelSpec as ConfigModelSpec,
+    PermissionDecision as ConfigPermissionDecision, ProjectConfig, ValidationIssue,
+    ValidationLevel, ValidationReport, WorkflowNodeSpec as ConfigWorkflowNodeSpec,
 };
 use coder_core::{FinalReport, RunId, RunState, RunStatus};
 use coder_extensions::{
@@ -340,7 +343,7 @@ async fn agent_role_cards() -> Json<AgentRoleCardsResponse> {
                     "round_summarize",
                 ],
                 description: "Plans work, decides readiness, and owns final reports.",
-                default_output_contract: "planner_order",
+                default_output_contract: "planner_conversation",
             },
             AgentRoleCard {
                 id: "executor",
@@ -362,8 +365,7 @@ async fn agent_role_cards() -> Json<AgentRoleCardsResponse> {
 }
 
 async fn default_workflow() -> Json<DefaultWorkflowResponse> {
-    let config: ProjectConfig =
-        serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+    let config = default_project_config();
     let workflow_id = "planner-led".to_owned();
     let workflow = config.workflows.get(&workflow_id).cloned();
     Json(DefaultWorkflowResponse {
@@ -371,6 +373,217 @@ async fn default_workflow() -> Json<DefaultWorkflowResponse> {
         config,
         workflow,
     })
+}
+
+fn default_project_config() -> ProjectConfig {
+    serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap()
+}
+
+fn resolve_planner_runtime(
+    config: &ProjectConfig,
+    workflow_id: &str,
+    planner_agent_id: Option<&str>,
+) -> Result<PlannerRuntimeContext, ApiError> {
+    let validation = validate_project_config(config);
+    if validation
+        .issues
+        .iter()
+        .any(|issue| issue.level == ValidationLevel::Error)
+    {
+        return Err(ApiError::bad_request(format!(
+            "Planner workflow config is invalid: {}",
+            validation_issue_summary(&validation)
+        )));
+    }
+    let workflow = config
+        .workflows
+        .get(workflow_id)
+        .ok_or_else(|| ApiError::bad_request(format!("workflow '{workflow_id}' was not found")))?;
+    let node = resolve_planner_node(config, workflow, workflow_id, planner_agent_id)?;
+    let agent = config.agents.get(&node.agent).ok_or_else(|| {
+        ApiError::bad_request(format!(
+            "workflow '{workflow_id}' planner node '{}' references missing agent '{}'",
+            node.id, node.agent
+        ))
+    })?;
+    if agent.role != "planner" {
+        return Err(ApiError::bad_request(format!(
+            "workflow '{workflow_id}' planner node '{}' must reference an agent with role 'planner'",
+            node.id
+        )));
+    }
+    let harness = config.harnesses.get(&node.harness).ok_or_else(|| {
+        ApiError::bad_request(format!(
+            "workflow '{workflow_id}' planner node '{}' references missing harness '{}'",
+            node.id, node.harness
+        ))
+    })?;
+    ensure_planner_conversation_harness(&node.harness, harness)?;
+    let model = config.models.get(&agent.model).ok_or_else(|| {
+        ApiError::bad_request(format!(
+            "planner agent '{}' references missing model '{}'",
+            node.agent, agent.model
+        ))
+    })?;
+    Ok(PlannerRuntimeContext {
+        workflow_id: workflow_id.to_owned(),
+        workflow_name: workflow.name.clone(),
+        node_id: node.id.clone(),
+        agent_id: node.agent.clone(),
+        harness_id: node.harness.clone(),
+        agent: agent.clone(),
+        harness: harness.clone(),
+        model: model.clone(),
+    })
+}
+
+fn resolve_planner_node<'a>(
+    config: &ProjectConfig,
+    workflow: &'a coder_config::WorkflowSpec,
+    workflow_id: &str,
+    planner_agent_id: Option<&str>,
+) -> Result<&'a ConfigWorkflowNodeSpec, ApiError> {
+    if let Some(planner_agent_id) = planner_agent_id.filter(|value| !value.trim().is_empty()) {
+        return workflow
+            .nodes
+            .iter()
+            .find(|node| node.agent == planner_agent_id || node.id == planner_agent_id)
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "workflow '{workflow_id}' has no planner node for '{planner_agent_id}'"
+                ))
+            });
+    }
+    workflow
+        .nodes
+        .iter()
+        .find(|node| {
+            config
+                .agents
+                .get(&node.agent)
+                .map(|agent| agent.role == "planner")
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "workflow '{workflow_id}' has no planner node. Add a planner AgentSpec and bind it to a planner-conversation HarnessSpec."
+            ))
+        })
+}
+
+fn ensure_planner_conversation_harness(
+    harness_id: &str,
+    harness: &ConfigHarnessSpec,
+) -> Result<(), ApiError> {
+    if harness.backend != "planner-model" {
+        return Err(ApiError::bad_request(format!(
+            "Planner Chat requires planner harness '{harness_id}' to use backend 'planner-model'"
+        )));
+    }
+    ensure_permission(
+        harness_id,
+        "read_files",
+        harness.permissions.read_files,
+        ConfigPermissionDecision::Allow,
+    )?;
+    for (permission, decision) in [
+        ("write_files", harness.permissions.write_files),
+        ("run_commands", harness.permissions.run_commands),
+        ("network", harness.permissions.network),
+        ("secrets", harness.permissions.secrets),
+        ("publish_external", harness.permissions.publish_external),
+        ("git_commit", harness.permissions.git_commit),
+        ("git_push", harness.permissions.git_push),
+        ("deploy", harness.permissions.deploy),
+    ] {
+        ensure_permission(
+            harness_id,
+            permission,
+            decision,
+            ConfigPermissionDecision::Deny,
+        )?;
+    }
+    if harness
+        .memory
+        .write
+        .iter()
+        .any(|scope| *scope != ConfigMemoryScope::Run)
+    {
+        return Err(ApiError::bad_request(format!(
+            "Planner Conversation Harness '{harness_id}' may only write run memory"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_permission(
+    harness_id: &str,
+    permission: &str,
+    actual: ConfigPermissionDecision,
+    expected: ConfigPermissionDecision,
+) -> Result<(), ApiError> {
+    if actual == expected {
+        return Ok(());
+    }
+    Err(ApiError::bad_request(format!(
+        "Planner Conversation Harness '{harness_id}' must set {permission} to {:?}",
+        expected
+    )))
+}
+
+fn validation_issue_summary(report: &ValidationReport) -> String {
+    report
+        .issues
+        .iter()
+        .filter(|issue| issue.level == ValidationLevel::Error)
+        .take(3)
+        .map(|issue| format!("{} at {}", issue.code, issue.target))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn planner_turn_events(
+    session: &PlannerChatSession,
+    response: &PlannerConversationResponse,
+) -> Vec<Value> {
+    let mut events = vec![json!({
+        "type": "planner.message.completed",
+        "session_id": session.session_id,
+        "workflow_id": session.workflow_id,
+        "readiness": response.readiness
+    })];
+    if let Some(plan) = &response.plan_draft {
+        events.push(json!({
+            "type": "planner.plan.updated",
+            "session_id": session.session_id,
+            "selected_workflow_id": plan.selected_workflow_id,
+            "open_questions": plan.open_questions,
+            "acceptance_criteria": plan.acceptance_criteria,
+            "risks": plan.risks
+        }));
+        for proposal in &plan.memory_proposals {
+            events.push(json!({
+                "type": "planner.memory.proposed",
+                "session_id": session.session_id,
+                "scope": proposal.scope,
+                "key": proposal.key,
+                "requires_confirmation": proposal.requires_confirmation
+            }));
+        }
+    }
+    events.push(json!({
+        "type": "planner.readiness.changed",
+        "session_id": session.session_id,
+        "readiness": response.readiness
+    }));
+    if session.mode == "work" && session.ready && !response.should_start_workflow {
+        events.push(json!({
+            "type": "work.confirmation.requested",
+            "session_id": session.session_id,
+            "workflow_id": session.workflow_id
+        }));
+    }
+    events
 }
 
 async fn get_library(State(state): State<ApiState>) -> Json<LibraryResponse> {
@@ -426,15 +639,19 @@ async fn get_library_workflow(
 async fn create_planner_chat_session(
     State(state): State<ApiState>,
     Json(request): Json<PlannerChatSessionCreateRequest>,
-) -> Json<PlannerChatSessionResponse> {
+) -> Result<Json<PlannerChatSessionResponse>, ApiError> {
     let session_id = format!("pcs_{}", RunId::new());
     let workflow_id = request
         .workflow_id
         .unwrap_or_else(|| "planner-led".to_owned());
+    let config = request.config.unwrap_or_else(default_project_config);
+    let runtime =
+        resolve_planner_runtime(&config, &workflow_id, request.planner_agent_id.as_deref())?;
     let session = PlannerChatSession {
         session_id: session_id.clone(),
         workflow_id: workflow_id.clone(),
         mode: normalize_planner_mode(request.mode.as_deref()),
+        runtime: Some(runtime),
         ready: false,
         readiness: PlannerReadiness::NeedsClarification,
         plan_draft: None,
@@ -448,7 +665,7 @@ async fn create_planner_chat_session(
         .lock()
         .unwrap()
         .insert(session_id.clone(), session.clone());
-    Json(PlannerChatSessionResponse { session })
+    Ok(Json(PlannerChatSessionResponse { session }))
 }
 
 async fn get_planner_chat_session(
@@ -483,9 +700,28 @@ async fn planner_chat_turn(
             .map(|mode| normalize_planner_mode(Some(mode)))
             .unwrap_or_else(|| normalize_planner_mode(Some(&session.mode)));
         session.mode = mode.clone();
+        if request.config.is_some()
+            || request.planner_agent_id.is_some()
+            || session.runtime.is_none()
+        {
+            let config = request
+                .config
+                .clone()
+                .unwrap_or_else(default_project_config);
+            session.runtime = Some(resolve_planner_runtime(
+                &config,
+                &session.workflow_id,
+                request.planner_agent_id.as_deref(),
+            )?);
+        }
+        let runtime = session
+            .runtime
+            .clone()
+            .ok_or_else(|| ApiError::bad_request("planner runtime is not configured"))?;
         PlannerConversationRequest {
             session_id: session.session_id.clone(),
             workflow_id: session.workflow_id.clone(),
+            runtime,
             mode: mode.clone(),
             message: request.message.clone(),
             confirmed,
@@ -539,6 +775,7 @@ async fn planner_chat_turn(
     } else {
         None
     };
+    let events = planner_turn_events(session, &planner_response);
     Ok(Json(PlannerChatTurnResponse {
         session: session.clone(),
         assistant_message: planner_response.assistant_message,
@@ -552,6 +789,7 @@ async fn planner_chat_turn(
         ready: session.ready,
         execution_allowed,
         run_preview,
+        events,
     }))
 }
 
@@ -591,6 +829,11 @@ async fn propose_project_memory_write(
     if request.record.scope != MemoryScope::Project {
         return Err(ApiError::bad_request(
             "project memory write proposals require scope 'project'",
+        ));
+    }
+    if request.proposed_by_role != AgentMemoryRole::PlanningChat {
+        return Err(ApiError::forbidden(
+            "only planning_chat can propose project memory writes",
         ));
     }
     let run_id = RunId::from_string(request.run_id);
@@ -1933,6 +2176,8 @@ pub struct PlannerChatSession {
     pub session_id: String,
     pub workflow_id: String,
     pub mode: String,
+    #[serde(skip)]
+    pub runtime: Option<PlannerRuntimeContext>,
     pub ready: bool,
     pub readiness: PlannerReadiness,
     pub plan_draft: Option<PlanDraft>,
@@ -1945,6 +2190,18 @@ pub struct PlannerChatSession {
     pub turns: Vec<PlannerChatTurn>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PlannerRuntimeContext {
+    pub workflow_id: String,
+    pub workflow_name: String,
+    pub node_id: String,
+    pub agent_id: String,
+    pub harness_id: String,
+    pub agent: ConfigAgentSpec,
+    pub harness: ConfigHarnessSpec,
+    pub model: ConfigModelSpec,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlannerChatTurn {
     pub role: String,
@@ -1954,6 +2211,8 @@ pub struct PlannerChatTurn {
 #[derive(Debug, Deserialize)]
 pub struct PlannerChatSessionCreateRequest {
     pub workflow_id: Option<String>,
+    pub planner_agent_id: Option<String>,
+    pub config: Option<ProjectConfig>,
     pub mode: Option<String>,
 }
 
@@ -1967,6 +2226,8 @@ pub struct PlannerChatTurnRequest {
     pub message: String,
     pub confirmed: Option<bool>,
     pub mode: Option<String>,
+    pub planner_agent_id: Option<String>,
+    pub config: Option<ProjectConfig>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1983,6 +2244,8 @@ pub struct PlannerChatTurnResponse {
     pub ready: bool,
     pub execution_allowed: bool,
     pub run_preview: Option<Value>,
+    #[serde(default)]
+    pub events: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2014,12 +2277,24 @@ pub struct PlanDraft {
     #[serde(default)]
     pub open_questions: Vec<String>,
     pub selected_workflow_id: String,
+    #[serde(default)]
+    pub memory_proposals: Vec<MemoryProposalDraft>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryProposalDraft {
+    pub scope: String,
+    pub key: String,
+    pub content: String,
+    pub rationale: String,
+    pub requires_confirmation: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct PlannerConversationRequest {
     pub session_id: String,
     pub workflow_id: String,
+    pub runtime: PlannerRuntimeContext,
     pub mode: String,
     pub message: String,
     pub confirmed: bool,
@@ -2068,6 +2343,7 @@ pub struct ProjectMemoryLoadResponse {
 #[derive(Debug, Deserialize)]
 pub struct ProjectMemoryWriteProposalRequest {
     pub run_id: String,
+    pub proposed_by_role: AgentMemoryRole,
     pub record: MemoryRecord,
 }
 
@@ -2905,6 +3181,7 @@ fn provider_env_keys() -> BTreeMap<String, String> {
 
 fn default_provider_base_url(provider: &str) -> Option<&'static str> {
     match provider {
+        "openai" => Some("https://api.openai.com/v1"),
         "deepseek" => Some("https://api.deepseek.com"),
         "moonshot" | "kimi" => Some("https://api.moonshot.cn/v1"),
         "qwen" | "dashscope" => Some("https://dashscope.aliyuncs.com/compatible-mode/v1"),
@@ -2965,24 +3242,34 @@ impl ModelPlannerConversationEngine {
         if request.provider_settings.mock_mode {
             return Ok(None);
         }
-        let provider = normalize_provider(&request.provider_settings.default_provider);
+        let model = planner_model_profile(request);
+        let provider = planner_model_provider(request, model);
         let env_keys = provider_env_keys();
-        let key_env = env_keys
-            .get(&provider)
-            .map(String::as_str)
+        let key_env = model
+            .api_key_env
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                env_keys
+                    .get(&provider)
+                    .map(String::as_str)
+                    .filter(|value| !value.trim().is_empty())
+            })
             .unwrap_or("CODER_API_KEY");
         let api_key = env::var(key_env)
             .or_else(|_| env::var("CODER_API_KEY"))
-            .map_err(|_| "planner model credential is not configured in the environment")?;
+            .or_else(|_| env::var("LLM_API_KEY"))
+            .map_err(|_| planner_model_config_error())?;
         if api_key.trim().is_empty() {
-            return Ok(None);
+            return Err(planner_model_config_error());
         }
-        let base_url = provider_base_url(&request.provider_settings, &provider)
-            .unwrap_or_else(|| "https://api.openai.com/v1".to_owned());
+        let base_url = planner_model_base_url(request, &provider, model)
+            .ok_or_else(planner_model_config_error)?;
         let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+        let model_name = planner_model_name(request, model);
         let mut messages = vec![json!({
             "role": "system",
-            "content": "You are the Coder Planner. Discuss, clarify, identify risks, draft concise plans, and never claim that Discuss mode started execution."
+            "content": planner_system_prompt(&request.runtime)
         })];
         for turn in request
             .history
@@ -3015,13 +3302,13 @@ impl ModelPlannerConversationEngine {
             .post(url)
             .bearer_auth(api_key)
             .json(&json!({
-                "model": &request.provider_settings.default_model,
+                "model": model_name,
                 "messages": messages,
                 "temperature": 0.2
             }))
             .send()
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("planner model request failed: {error}"))?;
         if !response.status().is_success() {
             return Err(format!("planner model returned HTTP {}", response.status()));
         }
@@ -3039,13 +3326,71 @@ impl ModelPlannerConversationEngine {
     }
 }
 
+fn planner_model_profile(request: &PlannerConversationRequest) -> &ConfigModelSpec {
+    &request.runtime.model
+}
+
+fn planner_model_name(request: &PlannerConversationRequest, model: &ConfigModelSpec) -> String {
+    if matches!(model.model.as_str(), "best" | "standard" | "economy") {
+        request.provider_settings.default_model.clone()
+    } else {
+        model.model.clone()
+    }
+}
+
+fn planner_model_provider(request: &PlannerConversationRequest, model: &ConfigModelSpec) -> String {
+    if matches!(model.model.as_str(), "best" | "standard" | "economy")
+        && !request.provider_settings.default_provider.trim().is_empty()
+    {
+        normalize_provider(&request.provider_settings.default_provider)
+    } else {
+        normalize_provider(&model.provider)
+    }
+}
+
+fn planner_model_base_url(
+    request: &PlannerConversationRequest,
+    provider: &str,
+    model: &ConfigModelSpec,
+) -> Option<String> {
+    if let Some(env_name) = model
+        .base_url_env
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        if let Ok(value) = env::var(env_name) {
+            if !value.trim().is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    provider_base_url(&request.provider_settings, provider)
+}
+
+fn planner_model_config_error() -> String {
+    "Planner model provider is not configured. Set LLM_BASE_URL and LLM_API_KEY or configure provider settings.".to_owned()
+}
+
+fn planner_system_prompt(runtime: &PlannerRuntimeContext) -> String {
+    format!(
+        "{}\n\nRuntime boundary:\n- workflow_id: {}\n- workflow_name: {}\n- node_id: {}\n- agent_id: {}\n- harness_id: {}\n- tools: {}\n- side effects: denied\n\nDiscuss, clarify, remember only through explicit proposals, draft concise plans, and never claim execution happened in Discuss mode.",
+        runtime.agent.system,
+        runtime.workflow_id,
+        runtime.workflow_name,
+        runtime.node_id,
+        runtime.agent_id,
+        runtime.harness_id,
+        runtime.harness.tools.join(", ")
+    )
+}
+
 #[async_trait]
 impl PlannerConversationEngine for ModelPlannerConversationEngine {
     async fn respond(
         &self,
         request: PlannerConversationRequest,
     ) -> Result<PlannerConversationResponse, String> {
-        let model_message = self.live_assistant_message(&request).await.ok().flatten();
+        let model_message = self.live_assistant_message(&request).await?;
         if model_message.is_some() {
             return Ok(deterministic_planner_response(&request, model_message));
         }
@@ -3197,6 +3542,17 @@ fn planner_plan_draft(request: &PlannerConversationRequest) -> PlanDraft {
                 })
         }
     };
+    let memory_proposals = {
+        let parsed = memory_proposals_for(&request.message);
+        if parsed.is_empty() {
+            current
+                .as_ref()
+                .map(|plan| plan.memory_proposals.clone())
+                .unwrap_or_default()
+        } else {
+            parsed
+        }
+    };
     PlanDraft {
         goal,
         scope,
@@ -3219,6 +3575,61 @@ fn planner_plan_draft(request: &PlannerConversationRequest) -> PlanDraft {
         risks,
         open_questions,
         selected_workflow_id: request.workflow_id.clone(),
+        memory_proposals,
+    }
+}
+
+fn memory_proposals_for(message: &str) -> Vec<MemoryProposalDraft> {
+    let lower = message.to_ascii_lowercase();
+    if !(lower.contains("remember")
+        || lower.contains("preference")
+        || lower.contains("project convention")
+        || lower.contains("记住"))
+    {
+        return Vec::new();
+    }
+    let content = message
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or(message.trim())
+        .trim_matches(|ch: char| ch == '"' || ch == '\'')
+        .to_owned();
+    if content.is_empty() {
+        return Vec::new();
+    }
+    vec![MemoryProposalDraft {
+        scope: "project".to_owned(),
+        key: stable_memory_key(&content),
+        content,
+        rationale: "The user phrased this as a durable preference or project convention."
+            .to_owned(),
+        requires_confirmation: true,
+    }]
+}
+
+fn stable_memory_key(content: &str) -> String {
+    let key = content
+        .chars()
+        .filter_map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                Some(ch.to_ascii_lowercase())
+            } else if ch.is_whitespace() || matches!(ch, '-' | '_' | '/' | '.') {
+                Some('-')
+            } else {
+                None
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .take(8)
+        .collect::<Vec<_>>()
+        .join("-");
+    if key.is_empty() {
+        "planner-memory-proposal".to_owned()
+    } else {
+        key
     }
 }
 
@@ -3855,6 +4266,14 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["workflow_id"], "planner-led");
         assert_eq!(body["config"]["version"], 1);
+        assert_eq!(
+            body["config"]["harnesses"]["planner-conversation"]["backend"],
+            "planner-model"
+        );
+        assert_eq!(
+            body["workflow"]["nodes"][0]["harness"],
+            "planner-conversation"
+        );
         assert_eq!(body["workflow"]["name"], "Planner-led Agent Workflow");
     }
 
@@ -3942,6 +4361,11 @@ mod tests {
         assert_eq!(turn_body["execution_allowed"], false);
         assert_eq!(turn_body["should_start_workflow"], false);
         assert_eq!(turn_body["run_preview"], Value::Null);
+        assert!(turn_body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "planner.message.completed"));
     }
 
     #[tokio::test]
@@ -3991,6 +4415,11 @@ mod tests {
         assert_eq!(unconfirmed["execution_allowed"], false);
         assert_eq!(unconfirmed["should_start_workflow"], false);
         assert_eq!(unconfirmed["run_preview"]["requires_confirmation"], true);
+        assert!(unconfirmed["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == "work.confirmation.requested"));
 
         let confirmed_response = post_json(
             app,
@@ -4008,6 +4437,83 @@ mod tests {
             confirmed["plan_draft"]["affected_paths"][0],
             "crates/coder-server/src/lib.rs"
         );
+    }
+
+    #[tokio::test]
+    async fn planner_chat_rejects_non_planner_model_harness() {
+        let app = test_router();
+        let mut config = default_project_config();
+        config
+            .workflows
+            .get_mut("planner-led")
+            .unwrap()
+            .nodes
+            .first_mut()
+            .unwrap()
+            .harness = "review-only".to_owned();
+
+        let response = post_json(
+            app,
+            "/api/v3/planner-chat/sessions",
+            json!({
+                "workflow_id": "planner-led",
+                "mode": "discuss",
+                "config": config
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("backend 'planner-model'"));
+    }
+
+    #[tokio::test]
+    async fn planner_chat_product_mode_requires_configured_model_provider() {
+        let store_root = temp_root();
+        let state = ApiState::new(RunStore::new(&store_root));
+        state.provider_settings.lock().unwrap().mock_mode = false;
+        let app = router(state);
+        let mut config = default_project_config();
+        let model = config.models.get_mut("default").unwrap();
+        model.provider = "missing-test-provider".to_owned();
+        model.model = "missing-test-model".to_owned();
+        model.base_url_env = Some("CODER_TEST_PLANNER_MISSING_BASE_URL".to_owned());
+        model.api_key_env = Some("CODER_TEST_PLANNER_MISSING_API_KEY".to_owned());
+        let create_response = post_json(
+            app.clone(),
+            "/api/v3/planner-chat/sessions",
+            json!({
+                "workflow_id": "planner-led",
+                "mode": "discuss",
+                "config": config
+            }),
+        )
+        .await;
+        let session_id = response_json(create_response).await["session"]["session_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let turn_response = post_json(
+            app,
+            &format!("/api/v3/planner-chat/sessions/{session_id}/turn"),
+            json!({
+                "message": "hello"
+            }),
+        )
+        .await;
+
+        assert_eq!(turn_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response_json(turn_response).await;
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("Planner model provider is not configured"));
+        let _ = fs::remove_dir_all(store_root);
     }
 
     #[tokio::test]
@@ -4077,6 +4583,7 @@ mod tests {
             "/api/v3/memory/project/propose-write",
             json!({
                 "run_id": "run-1",
+                "proposed_by_role": "planning_chat",
                 "record": {
                     "id": "mem_2",
                     "scope": "project",
@@ -4105,6 +4612,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workflow_agents_cannot_propose_project_memory_write() {
+        let store_root = temp_root();
+        let store = RunStore::new(&store_root);
+        let run_id = RunId::from_string("run-1");
+        let state = RunState::new(run_id.clone(), coder_core::WorkflowId::new("workflow"));
+        store.write_metadata(&state).unwrap();
+        let app = router(ApiState::new(store));
+
+        let response = post_json(
+            app,
+            "/api/v3/memory/project/propose-write",
+            json!({
+                "run_id": "run-1",
+                "proposed_by_role": "task_execution",
+                "record": {
+                    "id": "mem_executor_proposal",
+                    "scope": "project",
+                    "key": "blocked-proposal",
+                    "content": "Executor should not propose durable project memory.",
+                    "tags": [],
+                    "source_ref": "memory://project/blocked-proposal"
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let _ = fs::remove_dir_all(store_root);
+    }
+
+    #[tokio::test]
     async fn project_memory_confirm_write_persists_and_records_summary_event() {
         let repo = temp_root();
         let store_root = temp_root();
@@ -4122,7 +4660,7 @@ mod tests {
                 "repo_root": repo.display().to_string(),
                 "memory_path": "memory.json",
                 "run_id": "run-1",
-                "confirmed_by_role": "workflow_supervisor",
+                "confirmed_by_role": "planning_chat",
                 "record": {
                     "id": "mem_3",
                     "scope": "project",
@@ -4154,37 +4692,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_execution_cannot_confirm_project_memory_write() {
+    async fn workflow_agents_cannot_confirm_project_memory_write() {
         let repo = temp_root();
         let store_root = temp_root();
-        fs::create_dir_all(&repo).unwrap();
-        let store = RunStore::new(&store_root);
-        let run_id = RunId::from_string("run-1");
-        let state = RunState::new(run_id.clone(), coder_core::WorkflowId::new("workflow"));
-        store.write_metadata(&state).unwrap();
-        let app = router(ApiState::new(store));
+        for role in ["workflow_supervisor", "task_execution"] {
+            fs::create_dir_all(&repo).unwrap();
+            let store = RunStore::new(&store_root);
+            let run_id = RunId::from_string(format!("run-{role}"));
+            let state = RunState::new(run_id.clone(), coder_core::WorkflowId::new("workflow"));
+            store.write_metadata(&state).unwrap();
+            let app = router(ApiState::new(store));
 
-        let response = post_json(
-            app,
-            "/api/v3/memory/project/confirm-write",
-            json!({
-                "repo_root": repo.display().to_string(),
-                "memory_path": "memory.json",
-                "run_id": "run-1",
-                "confirmed_by_role": "task_execution",
-                "record": {
-                    "id": "mem_4",
-                    "scope": "project",
-                    "key": "blocked",
-                    "content": "Executor should not directly persist this.",
-                    "tags": [],
-                    "source_ref": "memory://project/blocked"
-                }
-            }),
-        )
-        .await;
+            let response = post_json(
+                app,
+                "/api/v3/memory/project/confirm-write",
+                json!({
+                    "repo_root": repo.display().to_string(),
+                    "memory_path": "memory.json",
+                    "run_id": run_id.as_str(),
+                    "confirmed_by_role": role,
+                    "record": {
+                        "id": format!("mem_{role}"),
+                        "scope": "project",
+                        "key": "blocked",
+                        "content": "Workflow agents should not directly persist this.",
+                        "tags": [],
+                        "source_ref": "memory://project/blocked"
+                    }
+                }),
+            )
+            .await;
 
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
         assert!(!repo.join("memory.json").exists());
         let _ = fs::remove_dir_all(repo);
         let _ = fs::remove_dir_all(store_root);
