@@ -7,7 +7,7 @@ bounded executor work. It is enabled with:
 CODER_ENABLE_CODE_WORKER_TOOL_LOOP=1
 ```
 
-When the flag is off, `CodeWorkerHarness` keeps the legacy single-shot
+When the flag is off, `CodeWorkerHarness` keeps the single-shot
 `execution_result` path.
 
 ## Authority Model
@@ -155,7 +155,10 @@ non-streaming.
 Run from the repository root:
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests
-.\.venv\Scripts\python.exe -m compileall src tests
+cargo test --workspace
+cd frontend
+npm.cmd run test
+npm.cmd run build
+cd ..
 git diff --check
 ```

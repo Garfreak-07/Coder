@@ -355,7 +355,7 @@ function rustHarnessSpecFor(binding: HarnessModeBinding, mode: HarnessMode): Rus
         },
     verification: {
       require_evidence: taskMode,
-      allowed_checks: taskMode ? ["cargo test", "python -m unittest", "npm run build"] : []
+      allowed_checks: taskMode ? ["cargo test", "npm run build"] : []
     }
   };
 }

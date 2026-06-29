@@ -65,7 +65,6 @@ import type {
   StoredRunDetail,
   ToolResultDetail
 } from "./types";
-import { shouldUseRustApiV3 } from "./apiVersion";
 import {
   agentWorkflowToRustLibrarySaveRequest,
   rustArtifactPayloadToArtifactDetail,
@@ -185,87 +184,49 @@ async function requestBlob(url: string, init?: RequestInit): Promise<Blob> {
 }
 
 export async function getLibrary(): Promise<LibraryIndex> {
-  if (shouldUseRustApiV3()) {
-    const payload = await requestJson<RustLibraryResponse>("/api/v3/library");
-    return rustLibraryToLibraryIndex(payload);
-  }
-  return requestJson<LibraryIndex>("/api/v2/library");
+  const payload = await requestJson<RustLibraryResponse>("/api/v3/library");
+  return rustLibraryToLibraryIndex(payload);
 }
 
 export async function getHealth(): Promise<HealthStatus> {
-  if (shouldUseRustApiV3()) {
-    const payload = await requestJson<RustHealthResponse>("/api/v3/health");
-    return rustHealthToHealthStatus(payload);
-  }
-  return requestJson<HealthStatus>("/api/v2/health");
+  const payload = await requestJson<RustHealthResponse>("/api/v3/health");
+  return rustHealthToHealthStatus(payload);
 }
 
 export async function getCapabilities(): Promise<CapabilitySpec[]> {
-  if (shouldUseRustApiV3()) {
-    const payload = await requestJson<RustCapabilitiesResponse>("/api/v3/capabilities");
-    return rustCapabilitiesToCapabilitySpecs(payload);
-  }
-  const payload = await requestJson<{ capabilities: CapabilitySpec[] }>("/api/v2/capabilities");
-  return payload.capabilities;
+  const payload = await requestJson<RustCapabilitiesResponse>("/api/v3/capabilities");
+  return rustCapabilitiesToCapabilitySpecs(payload);
 }
 
 export async function getAgentRoleCards(): Promise<RoleCardSpec[]> {
-  if (shouldUseRustApiV3()) {
-    const payload = await requestJson<{ role_cards: RoleCardSpec[] }>("/api/v3/agent-role-cards");
-    return rustRoleCardsToRoleCards(payload);
-  }
-  const payload = await requestJson<{ role_cards: RoleCardSpec[] }>("/api/v2/agent-role-cards");
-  return payload.role_cards;
+  const payload = await requestJson<{ role_cards: RoleCardSpec[] }>("/api/v3/agent-role-cards");
+  return rustRoleCardsToRoleCards(payload);
 }
 
 export function getInstalledSkills(): Promise<InstalledSkillsPayload> {
-  if (shouldUseRustApiV3()) {
-    return requestJson<InstalledSkillsPayload>("/api/v3/skills/installed");
-  }
-  return requestJson<InstalledSkillsPayload>("/api/v2/skills/installed");
+  return requestJson<InstalledSkillsPayload>("/api/v3/skills/installed");
 }
 
 export async function getExtensionPlugins(): Promise<PluginManifest[]> {
-  if (shouldUseRustApiV3()) {
-    const payload = await requestJson<{ plugins: PluginManifest[] }>("/api/v3/extensions/plugins");
-    return payload.plugins;
-  }
-  const payload = await requestJson<{ plugins: PluginManifest[] }>("/api/v2/extensions/plugins");
+  const payload = await requestJson<{ plugins: PluginManifest[] }>("/api/v3/extensions/plugins");
   return payload.plugins;
 }
 
 export async function searchExtensions(query: string): Promise<ExtensionManifest[]> {
-  if (shouldUseRustApiV3()) {
-    const payload = await requestJson<{ extensions: ExtensionManifest[] }>(`/api/v3/extensions/search?q=${encodeURIComponent(query)}`);
-    return payload.extensions;
-  }
-  const payload = await requestJson<{ extensions: ExtensionManifest[] }>(`/api/v2/extensions/search?q=${encodeURIComponent(query)}`);
+  const payload = await requestJson<{ extensions: ExtensionManifest[] }>(`/api/v3/extensions/search?q=${encodeURIComponent(query)}`);
   return payload.extensions;
 }
 
 export function discoverSkills(registryUrl: string): Promise<DiscoverSkillsPayload> {
-  if (shouldUseRustApiV3()) {
-    return requestJson<DiscoverSkillsPayload>(`/api/v3/skills/discover?registry_url=${encodeURIComponent(registryUrl)}`);
-  }
-  return requestJson<DiscoverSkillsPayload>(`/api/v2/skills/discover?registry_url=${encodeURIComponent(registryUrl)}`);
+  return requestJson<DiscoverSkillsPayload>(`/api/v3/skills/discover?registry_url=${encodeURIComponent(registryUrl)}`);
 }
 
 export function getSkillUpdates(registryUrl: string): Promise<{ updates: SkillUpdateInfo[] }> {
-  if (shouldUseRustApiV3()) {
-    return requestJson<{ updates: SkillUpdateInfo[] }>(`/api/v3/skills/updates?registry_url=${encodeURIComponent(registryUrl)}`);
-  }
-  return requestJson<{ updates: SkillUpdateInfo[] }>(`/api/v2/skills/updates?registry_url=${encodeURIComponent(registryUrl)}`);
+  return requestJson<{ updates: SkillUpdateInfo[] }>(`/api/v3/skills/updates?registry_url=${encodeURIComponent(registryUrl)}`);
 }
 
 export function installSkill(skillId: string, registryUrl: string): Promise<Record<string, unknown>> {
-  if (shouldUseRustApiV3()) {
-    return requestJson("/api/v3/skills/install", {
-      method: "POST",
-      headers: jsonHeaders,
-      body: JSON.stringify({ skill_id: skillId, registry_url: registryUrl })
-    });
-  }
-  return requestJson("/api/v2/skills/install", {
+  return requestJson("/api/v3/skills/install", {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify({ skill_id: skillId, registry_url: registryUrl })
@@ -273,14 +234,7 @@ export function installSkill(skillId: string, registryUrl: string): Promise<Reco
 }
 
 export function updateSkill(skillId: string, registryUrl: string): Promise<Record<string, unknown>> {
-  if (shouldUseRustApiV3()) {
-    return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/update`, {
-      method: "POST",
-      headers: jsonHeaders,
-      body: JSON.stringify({ registry_url: registryUrl })
-    });
-  }
-  return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/update`, {
+  return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/update`, {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify({ registry_url: registryUrl })
@@ -288,14 +242,7 @@ export function updateSkill(skillId: string, registryUrl: string): Promise<Recor
 }
 
 export function autoUpdateSkills(registryUrl: string): Promise<Record<string, unknown>> {
-  if (shouldUseRustApiV3()) {
-    return requestJson("/api/v3/skills/auto-update", {
-      method: "POST",
-      headers: jsonHeaders,
-      body: JSON.stringify({ registry_url: registryUrl })
-    });
-  }
-  return requestJson("/api/v2/skills/auto-update", {
+  return requestJson("/api/v3/skills/auto-update", {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify({ registry_url: registryUrl })
@@ -303,51 +250,27 @@ export function autoUpdateSkills(registryUrl: string): Promise<Record<string, un
 }
 
 export function enableSkill(skillId: string): Promise<Record<string, unknown>> {
-  if (shouldUseRustApiV3()) {
-    return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/enable`, {
-      method: "POST",
-      headers: jsonHeaders
-    });
-  }
-  return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/enable`, {
+  return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/enable`, {
     method: "POST",
     headers: jsonHeaders
   });
 }
 
 export function disableSkill(skillId: string): Promise<Record<string, unknown>> {
-  if (shouldUseRustApiV3()) {
-    return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/disable`, {
-      method: "POST",
-      headers: jsonHeaders
-    });
-  }
-  return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/disable`, {
+  return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/disable`, {
     method: "POST",
     headers: jsonHeaders
   });
 }
 
 export function removeSkill(skillId: string): Promise<Record<string, unknown>> {
-  if (shouldUseRustApiV3()) {
-    return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}`, {
-      method: "DELETE"
-    });
-  }
-  return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}`, {
+  return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}`, {
     method: "DELETE"
   });
 }
 
 export function pinSkill(skillId: string): Promise<Record<string, unknown>> {
-  if (shouldUseRustApiV3()) {
-    return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/pin`, {
-      method: "POST",
-      headers: jsonHeaders,
-      body: JSON.stringify({})
-    });
-  }
-  return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/pin`, {
+  return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/pin`, {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify({})
@@ -355,27 +278,14 @@ export function pinSkill(skillId: string): Promise<Record<string, unknown>> {
 }
 
 export function unpinSkill(skillId: string): Promise<Record<string, unknown>> {
-  if (shouldUseRustApiV3()) {
-    return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/unpin`, {
-      method: "POST",
-      headers: jsonHeaders
-    });
-  }
-  return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/unpin`, {
+  return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/unpin`, {
     method: "POST",
     headers: jsonHeaders
   });
 }
 
 export function rollbackSkill(skillId: string): Promise<Record<string, unknown>> {
-  if (shouldUseRustApiV3()) {
-    return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/rollback`, {
-      method: "POST",
-      headers: jsonHeaders,
-      body: JSON.stringify({})
-    });
-  }
-  return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/rollback`, {
+  return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/rollback`, {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify({})
@@ -383,14 +293,7 @@ export function rollbackSkill(skillId: string): Promise<Record<string, unknown>>
 }
 
 export function setSkillUpdatePolicy(skillId: string, updatePolicy: "manual" | "auto_official_low_risk"): Promise<Record<string, unknown>> {
-  if (shouldUseRustApiV3()) {
-    return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/update-policy`, {
-      method: "POST",
-      headers: jsonHeaders,
-      body: JSON.stringify({ update_policy: updatePolicy })
-    });
-  }
-  return requestJson(`/api/v2/skills/${encodeURIComponent(skillId)}/update-policy`, {
+  return requestJson(`/api/v3/skills/${encodeURIComponent(skillId)}/update-policy`, {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify({ update_policy: updatePolicy })
@@ -398,14 +301,7 @@ export function setSkillUpdatePolicy(skillId: string, updatePolicy: "manual" | "
 }
 
 export function importDeveloperSkill(path: string): Promise<Record<string, unknown>> {
-  if (shouldUseRustApiV3()) {
-    return requestJson("/api/v3/skills/developer-import", {
-      method: "POST",
-      headers: jsonHeaders,
-      body: JSON.stringify({ path })
-    });
-  }
-  return requestJson("/api/v2/skills/developer-import", {
+  return requestJson("/api/v3/skills/developer-import", {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify({ path })
@@ -413,33 +309,19 @@ export function importDeveloperSkill(path: string): Promise<Record<string, unkno
 }
 
 export async function getProviderSettings(): Promise<ProviderSettings> {
-  if (shouldUseRustApiV3()) {
-    const payload = await requestJson<{ settings: ProviderSettings }>("/api/v3/providers/settings");
-    return payload.settings;
-  }
-  const payload = await requestJson<{ settings: ProviderSettings }>("/api/v2/providers/settings");
+  const payload = await requestJson<{ settings: ProviderSettings }>("/api/v3/providers/settings");
   return payload.settings;
 }
 
 export function getProviderStatus(): Promise<ProviderStatus> {
-  if (shouldUseRustApiV3()) {
-    return requestJson<ProviderStatus>("/api/v3/providers/status");
-  }
-  return requestJson<ProviderStatus>("/api/v2/providers/status");
+  return requestJson<ProviderStatus>("/api/v3/providers/status");
 }
 
 export async function saveProviderSettings(input: Record<string, unknown>): Promise<{
   settings: ProviderSettings;
   status: ProviderStatus;
 }> {
-  if (shouldUseRustApiV3()) {
-    return requestJson("/api/v3/providers/settings", {
-      method: "POST",
-      headers: jsonHeaders,
-      body: JSON.stringify(input)
-    });
-  }
-  return requestJson("/api/v2/providers/settings", {
+  return requestJson("/api/v3/providers/settings", {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify(input)
@@ -447,15 +329,7 @@ export async function saveProviderSettings(input: Record<string, unknown>): Prom
 }
 
 export async function testProvider(provider: string): Promise<ProviderStatus> {
-  if (shouldUseRustApiV3()) {
-    const payload = await requestJson<{ status: ProviderStatus }>("/api/v3/providers/test", {
-      method: "POST",
-      headers: jsonHeaders,
-      body: JSON.stringify({ provider })
-    });
-    return payload.status;
-  }
-  const payload = await requestJson<{ status: ProviderStatus }>("/api/v2/providers/test", {
+  const payload = await requestJson<{ status: ProviderStatus }>("/api/v3/providers/test", {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify({ provider })
@@ -464,94 +338,83 @@ export async function testProvider(provider: string): Promise<ProviderStatus> {
 }
 
 export async function getRuns(): Promise<RunSummaryItem[]> {
-  if (shouldUseRustApiV3()) {
-    const runs = await getRustRuns();
-    return runs.map(rustRunSummaryToRunSummaryItem);
-  }
-  const payload = await requestJson<{ runs: RunSummaryItem[] }>("/api/v2/runs");
-  return payload.runs;
+  const runs = await getRustRuns();
+  return runs.map(rustRunSummaryToRunSummaryItem);
 }
 
 export async function getRun(runId: string, includeEvents = true): Promise<StoredRunDetail> {
-  if (shouldUseRustApiV3()) {
-    const detail = await getRustRun(runId);
-    const mapped = rustRunDetailToStoredRunDetail(detail);
-    if (!includeEvents) {
-      return {
-        ...mapped,
-        result: {
-          ...mapped.result,
-          events: []
-        }
-      };
-    }
-    return mapped;
+  const detail = await getRustRun(runId);
+  const mapped = rustRunDetailToStoredRunDetail(detail);
+  if (!includeEvents) {
+    return {
+      ...mapped,
+      result: {
+        ...mapped.result,
+        events: []
+      }
+    };
   }
-  return requestJson<StoredRunDetail>(`/api/v2/runs/${runId}?include_events=${includeEvents ? "true" : "false"}`);
+  return mapped;
 }
 
 export async function getRunEvents(runId: string, cursor = 0, limit = 200): Promise<RunEventsPage> {
-  if (shouldUseRustApiV3()) {
-    const payload = await getRustRunEvents(runId);
-    return rustRunEventsToRunEventsPage(payload, cursor, limit);
-  }
-  return requestJson<RunEventsPage>(`/api/v2/runs/${runId}/events?cursor=${cursor}&limit=${limit}`);
+  const payload = await getRustRunEvents(runId);
+  return rustRunEventsToRunEventsPage(payload, cursor, limit);
 }
 
 export function getContextPacket(runId: string, packetId: string): Promise<ContextPacketDetail> {
-  return requestJson<ContextPacketDetail>(`/api/v2/runs/${runId}/context-packets/${packetId}`);
+  void runId;
+  void packetId;
+  return Promise.reject(new Error("External context-packet lookup is not exposed by Rust API v3."));
 }
 
 export async function getArtifact(runId: string, artifactId: string): Promise<ArtifactDetail> {
-  if (shouldUseRustApiV3()) {
-    if (artifactId === "final-report.json" || artifactId === "final_report") {
-      const report = await previewRustRunReport(runId);
-      return rustRunReportToArtifactDetail(report);
-    }
-    const response = await getRustRunArtifact(runId, artifactId);
-    return rustArtifactPayloadToArtifactDetail(response.artifact_name, response.payload);
+  if (artifactId === "final-report.json" || artifactId === "final_report") {
+    const report = await previewRustRunReport(runId);
+    return rustRunReportToArtifactDetail(report);
   }
-  return requestJson<ArtifactDetail>(`/api/v2/runs/${runId}/artifacts/${artifactId}`);
+  const response = await getRustRunArtifact(runId, artifactId);
+  return rustArtifactPayloadToArtifactDetail(response.artifact_name, response.payload);
 }
 
 export function getToolResult(runId: string, toolResultId: string): Promise<ToolResultDetail> {
-  return requestJson<ToolResultDetail>(`/api/v2/runs/${runId}/tool-results/${toolResultId}`);
+  void runId;
+  void toolResultId;
+  return Promise.reject(new Error("External tool-result lookup is not exposed by Rust API v3."));
 }
 
 export async function getBlob(runId: string, blobId: string): Promise<BlobDetail> {
-  if (shouldUseRustApiV3()) {
-    const digest = blobId.startsWith("blob://sha256/") ? blobId.slice("blob://sha256/".length) : blobId;
-    const blob = await getRustBlobSha256(digest);
-    return rustBlobToBlobDetail(blobId, blob);
-  }
-  return requestJson<BlobDetail>(`/api/v2/runs/${runId}/blobs/${encodeURIComponent(blobId)}`);
+  void runId;
+  const digest = blobId.startsWith("blob://sha256/") ? blobId.slice("blob://sha256/".length) : blobId;
+  const blob = await getRustBlobSha256(digest);
+  return rustBlobToBlobDetail(blobId, blob);
 }
 
-export function getLiveAgentRun(runId: string): Promise<LiveRunDetail> {
-  return requestJson<LiveRunDetail>(`/api/v2/live-agent-runs/${runId}`);
+export async function getLiveAgentRun(runId: string): Promise<LiveRunDetail> {
+  const detail = await getRun(runId);
+  return {
+    id: detail.id,
+    workflow_id: detail.workflow_id,
+    repo_root: detail.repo_root,
+    request: detail.request,
+    status: detail.result.status,
+    events: detail.result.events,
+    result: detail.result,
+    stored_run_id: detail.id
+  };
 }
 
 export async function getDefaultAgentWorkflow(): Promise<{
   agent_workflow: AgentWorkflowSpec;
 }> {
-  if (shouldUseRustApiV3()) {
-    const payload = await requestJson<RustDefaultWorkflowResponse>("/api/v3/workflows/default");
-    return { agent_workflow: rustDefaultWorkflowToAgentWorkflow(payload) };
-  }
-  return requestJson("/api/v2/agent-workflows/default");
+  const payload = await requestJson<RustDefaultWorkflowResponse>("/api/v3/workflows/default");
+  return { agent_workflow: rustDefaultWorkflowToAgentWorkflow(payload) };
 }
 
 export async function validateAgentWorkflow(agentWorkflow: AgentWorkflowSpec): Promise<AgentWorkflowValidationResult> {
-  if (shouldUseRustApiV3()) {
-    const config = legacyCanvasToWorkflowSpec(agentWorkflow);
-    const report = await validateRustWorkflowSpec(config, agentWorkflow.id);
-    return rustValidationReportToAgentWorkflowValidationResult(report);
-  }
-  return requestJson<AgentWorkflowValidationResult>("/api/v2/agent-workflows/validate", {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify(agentWorkflow)
-  });
+  const config = legacyCanvasToWorkflowSpec(agentWorkflow);
+  const report = await validateRustWorkflowSpec(config, agentWorkflow.id);
+  return rustValidationReportToAgentWorkflowValidationResult(report);
 }
 
 export function validateRustWorkflowSpec(config: RustProjectConfig, workflowId: string): Promise<RustValidationReport> {
@@ -775,45 +638,24 @@ export function getRustBlobSha256(digest: string): Promise<Blob> {
   return requestBlob(`/api/v3/blobs/sha256/${encodeURIComponent(digest)}`);
 }
 
-export async function getAgentRuntimeProfiles(agentWorkflow: AgentWorkflowSpec): Promise<Record<string, unknown>[]> {
-  const payload = await requestJson<{ profiles: Record<string, unknown>[] }>("/api/v2/agent-workflows/runtime-profiles", {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify(agentWorkflow)
-  });
-  return payload.profiles;
-}
-
 export async function getAgentWorkflow(workflowId: string): Promise<AgentWorkflowSpec> {
-  if (shouldUseRustApiV3()) {
-    const payload = await requestJson<RustLibraryWorkflowGetResponse>(
-      `/api/v3/library/workflows/${encodeURIComponent(workflowId)}`
-    );
-    return rustLibraryWorkflowToAgentWorkflow(payload);
-  }
-  const payload = await requestJson<{ agent_workflow: AgentWorkflowSpec }>(`/api/v2/library/agent-workflows/${workflowId}`);
-  return payload.agent_workflow;
+  const payload = await requestJson<RustLibraryWorkflowGetResponse>(
+    `/api/v3/library/workflows/${encodeURIComponent(workflowId)}`
+  );
+  return rustLibraryWorkflowToAgentWorkflow(payload);
 }
 
 export async function saveAgentWorkflow(agentWorkflow: AgentWorkflowSpec): Promise<AgentWorkflowSpec> {
-  if (shouldUseRustApiV3()) {
-    const request = agentWorkflowToRustLibrarySaveRequest(agentWorkflow);
-    const payload = await requestJson<{ workflow_id: string; workflow: unknown; saved: boolean }>(
-      "/api/v3/library/workflows",
-      {
-        method: "POST",
-        headers: jsonHeaders,
-        body: JSON.stringify(request)
-      }
-    );
-    return rustLibraryWorkflowToAgentWorkflow(payload);
-  }
-  const payload = await requestJson<{ agent_workflow: AgentWorkflowSpec }>("/api/v2/library/agent-workflows", {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify(agentWorkflow)
-  });
-  return payload.agent_workflow;
+  const request = agentWorkflowToRustLibrarySaveRequest(agentWorkflow);
+  const payload = await requestJson<{ workflow_id: string; workflow: unknown; saved: boolean }>(
+    "/api/v3/library/workflows",
+    {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(request)
+    }
+  );
+  return rustLibraryWorkflowToAgentWorkflow(payload);
 }
 
 export function createPlannerChatDraft(input: {
@@ -827,14 +669,7 @@ export function createPlannerChatDraft(input: {
   skill_pack_ids?: string[];
   memory_pack_ids?: string[];
 }): Promise<PlannerChatDraft> {
-  if (shouldUseRustApiV3()) {
-    return createRustPlannerChatDraft(input);
-  }
-  return requestJson("/api/v2/planner-chat/draft", {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify(input)
-  });
+  return createRustPlannerChatDraft(input);
 }
 
 export function confirmPlannerChatDraft(input: {
@@ -845,14 +680,7 @@ export function confirmPlannerChatDraft(input: {
   edits?: Record<string, unknown>;
   initial_data?: Record<string, unknown>;
 }): Promise<PlannerChatConfirmResult> {
-  if (shouldUseRustApiV3()) {
-    return confirmRustPlannerChatDraft(input);
-  }
-  return requestJson("/api/v2/planner-chat/confirm", {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify(input)
-  });
+  return confirmRustPlannerChatDraft(input);
 }
 
 export function createPlannerChatSession(input: {
@@ -866,14 +694,7 @@ export function createPlannerChatSession(input: {
   memory_pack_ids?: string[];
   interaction_mode: PlannerInteractionMode;
 }): Promise<PlannerChatSession> {
-  if (shouldUseRustApiV3()) {
-    return createRustPlannerChatSession(input);
-  }
-  return requestJson("/api/v2/planner-chat/sessions", {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify(input)
-  });
+  return createRustPlannerChatSession(input);
 }
 
 export function sendPlannerChatTurn(input: {
@@ -890,25 +711,11 @@ export function sendPlannerChatTurn(input: {
   skill_pack_ids?: string[];
   memory_pack_ids?: string[];
 }): Promise<PlannerChatTurnResponse> {
-  if (shouldUseRustApiV3()) {
-    return sendRustPlannerChatTurn(input);
-  }
-  return requestJson(`/api/v2/planner-chat/sessions/${encodeURIComponent(input.session_id)}/turn`, {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify({
-      message: input.message,
-      interaction_mode: input.interaction_mode,
-      start_if_ready: input.start_if_ready ?? true
-    })
-  });
+  return sendRustPlannerChatTurn(input);
 }
 
 export function getPlannerChatSession(sessionId: string): Promise<PlannerChatSession> {
-  if (shouldUseRustApiV3()) {
-    return getRustPlannerChatSession(sessionId);
-  }
-  return requestJson(`/api/v2/planner-chat/sessions/${encodeURIComponent(sessionId)}`);
+  return getRustPlannerChatSession(sessionId);
 }
 
 export async function startLiveAgentRun(input: {
@@ -919,14 +726,7 @@ export async function startLiveAgentRun(input: {
   scopes: string[];
   initial_data?: Record<string, unknown>;
 }): Promise<{ run_id: string; status: string; events_url: string; result_url: string }> {
-  if (shouldUseRustApiV3()) {
-    return startRustAgentRun(input);
-  }
-  return requestJson("/api/v2/live-agent-runs", {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify(input)
-  });
+  return startRustAgentRun(input);
 }
 
 async function createRustPlannerChatDraft(input: {
@@ -1313,9 +1113,8 @@ function fallbackAgentWorkflow(workflowId: string): AgentWorkflowSpec {
 }
 
 export function deleteRun(runId: string): Promise<{ run_id: string; deleted: boolean; orphan_blobs_removed: number }> {
-  return requestJson(`/api/v2/runs/${runId}`, {
-    method: "DELETE"
-  });
+  void runId;
+  return Promise.reject(new Error("Stored run deletion is not exposed by Rust API v3."));
 }
 
 export async function rollbackPatch(input: {
@@ -1323,80 +1122,6 @@ export async function rollbackPatch(input: {
   snapshot_id: string;
   scopes: string[];
 }): Promise<{ rollback: Record<string, unknown> }> {
-  return requestJson("/api/v2/patches/rollback", {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify(input)
-  });
-}
-
-export function subscribeRunEvents(url: string, onEvent: (event: RunEvent) => void, onError: (error: Event) => void) {
-  const source = new EventSource(url);
-  source.onmessage = (message) => {
-    onEvent(JSON.parse(message.data) as RunEvent);
-  };
-  const eventTypes = [
-    "run.started",
-    "node.started",
-    "node.completed",
-    "node.skipped",
-    "node.retry_requested",
-    "loop.started",
-    "loop.iteration.started",
-    "loop.iteration.completed",
-    "loop.completed",
-    "loop.blocked",
-    "agent.context_packet",
-    "tool.called",
-    "tool.result",
-    "agent.called",
-    "artifact.produced",
-    "artifact.validation_failed",
-    "approval.required",
-    "approval.recorded",
-    "edge.selected",
-    "budget.warning",
-    "run.completed",
-    "run.blocked",
-    "run.failed",
-    "agent_graph.run.started",
-    "agent_graph.round.started",
-    "planner.order.produced",
-    "planner.plan_cached",
-    "skill.index.available",
-    "skill.route.selected",
-    "agent.context_packet_v2",
-    "agent.coding_context_packet",
-    "agent.context_compaction.applied",
-    "token.ledger.entry",
-    "agent_graph.agent_call.started",
-    "agent_graph.agent_call.completed",
-    "agent_graph.agent_call.schema_failed",
-    "agent_graph.agent_call.repair_started",
-    "agent_graph.agent_call.repair_completed",
-    "agent_graph.agent_call.repair_failed",
-    "agent_graph.wave.started",
-    "agent_task.ready",
-    "agent_task.started",
-    "agent_task.completed",
-    "agent_task.blocked",
-    "join.waiting",
-    "join.completed",
-    "resource.deferred",
-    "agent_graph.wave.completed",
-    "planner.input_bundle.created",
-    "round_summary.created",
-    "planner.decision.produced",
-    "final_report.created",
-    "agent_graph.run.completed",
-    "agent_graph.run.blocked",
-    "agent_graph.run.failed"
-  ];
-  for (const type of eventTypes) {
-    source.addEventListener(type, (message) => {
-      onEvent(JSON.parse((message as MessageEvent).data) as RunEvent);
-    });
-  }
-  source.onerror = onError;
-  return source;
+  void input;
+  return Promise.reject(new Error("Patch rollback is not exposed by Rust API v3."));
 }

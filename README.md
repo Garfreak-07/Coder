@@ -1,12 +1,17 @@
 # Coder
 
-Planner-led local coding workbench with a React frontend, a Rust v3 control
-plane, and a Python/FastAPI v2 legacy compatibility path.
+Coder is a Rust v3 control-plane coding workbench with a React frontend.
 
-## Current Product Path
+Current `main` is Rust-only. The supported product path is the Rust API v3
+server, the React workflow canvas, Rust workflow/agent/harness execution, run
+evidence, reports, memory/knowledge/RAG baselines, MCP baselines, provider
+settings, release tooling, and installer tooling.
 
-The default local product path is Rust v3. Start the Rust server, run the React
-frontend, and the app uses `/api/v3/*` unless v2 is explicitly requested:
+The previous Python/FastAPI v2 compatibility implementation was removed from
+`main` after the Rust-only migration. It remains available in git history at
+tag `pre-rust-only-legacy-v2`.
+
+## Product Path
 
 ```text
 User request
@@ -17,23 +22,22 @@ User request
 -> stored events / evidence-backed final_report
 ```
 
-The frontend keeps chat, workflow editing, extensions, and settings separate.
-Planning Chat Discuss mode never starts execution. Work mode can start a Rust
+Planning Chat Discuss mode does not start execution. Work mode can start a Rust
 run only after readiness and confirmation gates pass.
 
-Rust v3 covers the ordinary product surface behind the same React UI:
-health/capabilities, role cards, workflow validation/import/export, library
-workflow storage, Planner Chat sessions and run preview/confirmation, stored
-run inspection, evidence-backed reports, repo/command/patch tools,
-memory/knowledge import with lexical, deterministic dense, and hybrid retrieval,
-skills/extensions/MCP lifecycle
-baselines, and provider settings without secret leakage. Python/FastAPI v2 is
-kept for explicit legacy fallback and compatibility tests.
+Rust v3 covers the ordinary product surface behind the React UI:
+
+- health, capabilities, and role cards
+- workflow validation, import/export, and library storage
+- Planner Chat sessions and run preview/confirmation
+- stored run inspection, events, reports, artifacts, blobs, and repo evidence
+- repo, command, patch, MCP, skills, extensions, provider settings, and memory
+  APIs
+- lexical, deterministic dense, and hybrid knowledge retrieval baselines
 
 ## Install
 
-Requires Rust and Node.js for the default Rust v3 product path. Python 3.12 or
-newer is required only for the quarantined legacy v2 compatibility suite.
+Install Rust and Node.js, then install frontend dependencies:
 
 ```powershell
 git clone https://github.com/Garfreak-07/Coder.git
@@ -42,18 +46,6 @@ cd frontend
 npm install
 cd ..
 ```
-
-Legacy Python compatibility install:
-
-```powershell
-cd legacy-python
-python -m venv .venv
-.\.venv\Scripts\activate
-python -m pip install -e ".[openhands,rag]"
-```
-
-The legacy package lives under `legacy-python/` and is not installed from the
-repository root.
 
 ## Run Locally
 
@@ -71,38 +63,9 @@ npm.cmd run dev
 ```
 
 Open `http://127.0.0.1:5173`. Vite proxies `/api/*` to
-`http://127.0.0.1:8876`. The frontend defaults to Rust API v3.
-
-To force the legacy Python/FastAPI v2 path for one session, start the Python
-server:
-
-```powershell
-cd legacy-python
-.\.venv\Scripts\activate
-.\.venv\Scripts\coder-api.exe --host 127.0.0.1 --port 8876
-```
-
-In another terminal, set one explicit v2 override for the frontend:
-
-```powershell
-cd frontend
-$env:VITE_CODER_API_VERSION="v2"
-npm.cmd run dev
-```
-
-Equivalent v2 overrides are `CODER_USE_RUST_API=0`, query string
-`?coder_api_version=v2`, or browser local storage key `coder_api_version=v2`.
+`http://127.0.0.1:8876`, and the frontend uses Rust API v3 directly.
 
 ## Test
-
-Legacy Python:
-
-```powershell
-cd legacy-python
-python -m pip install -e ".[openhands,rag]"
-python -m unittest discover -s tests
-python -m compileall src tests
-```
 
 Rust:
 
@@ -116,35 +79,34 @@ Frontend:
 
 ```powershell
 cd frontend
+npm.cmd ci
 npm.cmd run test
 npm.cmd run build
 ```
 
-## Rust Track
+Rust v3 smoke test:
 
-The Rust workspace owns the default Coder control plane. The Python tree is
-physically quarantined under `legacy-python/` as an explicit compatibility path
-and is not part of the ordinary local product run path.
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\smoke-rust-v3.ps1 -Store .tmp\smoke-rust-v3
+```
 
-Current Rust stabilization includes:
+Installer dry-runs:
 
-- `coder-openhands` defaults to the documented OpenHands Agent Server contract:
-  `POST /conversations`, `GET/POST /conversations/{conversation_id}/events`,
-  websocket `/conversations/{conversation_id}/events/socket`, and
-  `Authorization: Bearer <session key>`.
-- Legacy SDK-style OpenHands servers remain supported through explicit
-  `openhands.api_paths` and `openhands.run_start_strategy` config.
-- `coder-workflow::WorkflowRunner` dispatches `WorkflowSpec` nodes through a
-  harness backend registry with native/mock and OpenHands-unavailable paths
-  covered by tests.
-- The React workflow adapter has tests for legacy canvas export/import through
-  Rust `WorkflowSpec` data.
-- The React API adapter targets Rust API v3 by default for workflow/library, run
-  inspection, reports/artifacts/blobs, provider settings, skills/extensions,
-  Planner Chat sessions, and run preview/confirmation while preserving explicit
-  v2 fallback.
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -DryRun
+node packaging/npm/bin/coder-rust.js --dry-run
+```
 
-Useful Rust commands:
+POSIX installer dry-run:
+
+```bash
+bash ./scripts/install.sh --dry-run
+```
+
+The Rust CLI/distribution baseline is documented in
+[`docs/distribution.md`](docs/distribution.md).
+
+## Useful Rust Commands
 
 ```powershell
 cargo run -p coder-cli --bin coder-rust -- doctor
@@ -154,17 +116,11 @@ cargo run -p coder-cli --bin coder-rust -- workflow run --mock planner-led "summ
 cargo run -p coder-cli --bin coder-rust -- server --host 127.0.0.1 --port 8766
 ```
 
-The Rust CLI/distribution baseline is documented in
-[`docs/distribution.md`](docs/distribution.md).
-
-Use `VITE_CODER_API_VERSION=v2`, `CODER_USE_RUST_API=0`, or
-`?coder_api_version=v2` only when testing the legacy Python compatibility path.
-
 ## OpenHands
 
-OpenHands is an optional runtime provider. Without credentials or the runtime
-flag, local development can use the internal fallback provider or Rust mock
-workflow path.
+OpenHands remains an optional external backend. Without credentials or the
+runtime flag, local development can use the internal fallback provider or Rust
+mock workflow path.
 
 For local OpenHands smoke tests, prefer environment variables rather than
 committed files:
@@ -181,28 +137,32 @@ $env:CODER_ENABLE_OPENHANDS_RUNTIME="1"
 `examples/coder.yaml` shows the explicit compatibility profile for older
 SDK-style OpenHands servers.
 
-## Migration Guardrails
+## Guardrails
 
-- Keep the ordinary product path Planner-led and AgentGraph-based.
+- Keep the ordinary product path Planner-led and Rust-backed.
 - Keep user interaction in `User <-> Planner`.
 - Executors must not ask the user directly, commit, push, deploy, publish
   externally, or write long-term memory directly.
-- Product live Agent workflows must run through AgentGraph.
-- Current code facts must be grounded in repo evidence: native search/read,
-  tests, logs, or diffs.
-- Rust v3 is the default product path; keep v2/Python available only through
-  the explicit `legacy-python/` compatibility fallback until it is retired.
-- Legacy Python must remain buildable from `legacy-python/` while v2
-  compatibility is supported.
-- License changes are performed separately from runtime changes.
+- Keep OpenHands as an optional external backend.
+- Keep the React workflow canvas, user-defined agents, workflows, harnesses,
+  provider settings, evidence/report systems, memory/knowledge/RAG baselines,
+  MCP baselines, release tooling, and installer tooling.
 
-More detailed design notes live under `docs/`.
+## Historical v2 Path
+
+Users who need the removed Python/FastAPI v2 compatibility implementation can
+check out:
+
+```powershell
+git checkout pre-rust-only-legacy-v2
+```
+
+That tag points to the final pre-Rust-only compatibility state.
 
 ## Secrets
 
-Do not commit API keys or local secrets. Legacy Python provider samples live in
-`legacy-python/.env.example`. `.env`, `.env.local`, and `.local-env.ps1` are
-ignored by Git.
+Do not commit API keys or local secrets. `.env`, `.env.local`, and
+`.local-env.ps1` are ignored by Git.
 
 ## License
 

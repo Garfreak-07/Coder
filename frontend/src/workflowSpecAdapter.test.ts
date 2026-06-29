@@ -1,6 +1,5 @@
 import { defaultPlannerLedAgentWorkflow } from "./examples";
 import type { AgentWorkflowSpec, RustProjectConfig } from "./types";
-import { resolveCoderApiVersion } from "./apiVersion";
 import {
   agentWorkflowToRustLibrarySaveRequest,
   rustDefaultWorkflowToAgentWorkflow,
@@ -124,21 +123,6 @@ test("imports plain Rust ProjectConfig while preserving max rounds and planner",
 
   assert.equal(imported.primary_planner_id, "planner");
   assert.equal(imported.loop_policy.max_auto_rounds, defaultPlannerLedAgentWorkflow.loop_policy.max_auto_rounds);
-});
-
-test("resolves Rust API v3 by default and from env, query string, and local storage values", () => {
-  assert.equal(resolveCoderApiVersion(), "v3");
-  assert.equal(resolveCoderApiVersion({ env: { VITE_CODER_API_VERSION: "v3" } }), "v3");
-  assert.equal(resolveCoderApiVersion({ env: { CODER_USE_RUST_API: "1" } }), "v3");
-  assert.equal(resolveCoderApiVersion({ localStorageValue: "rust" }), "v3");
-  assert.equal(resolveCoderApiVersion({ search: "?coder_api_version=v3" }), "v3");
-});
-
-test("resolves legacy Python v2 only from explicit overrides", () => {
-  assert.equal(resolveCoderApiVersion({ env: { VITE_CODER_API_VERSION: "v2" } }), "v2");
-  assert.equal(resolveCoderApiVersion({ env: { CODER_USE_RUST_API: "0" } }), "v2");
-  assert.equal(resolveCoderApiVersion({ localStorageValue: "legacy" }), "v2");
-  assert.equal(resolveCoderApiVersion({ search: "?coder_api_version=v2", env: { VITE_CODER_API_VERSION: "v3" } }), "v2");
 });
 
 test("maps Rust default workflow response into the legacy canvas model", () => {

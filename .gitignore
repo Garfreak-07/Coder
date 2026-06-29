@@ -23,6 +23,7 @@ outputs/
 .coder_server*.log
 docs/handoff.md
 .npm-cache/
+.tmp/
 
 dist/
 build/

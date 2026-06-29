@@ -7,28 +7,6 @@ on:
       - main
 
 jobs:
-  python-legacy:
-    name: Legacy Python compatibility (${{ matrix.python-version }})
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: legacy-python
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.12"]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install package
-        run: python -m pip install -e ".[openhands,rag]"
-      - name: Run unit tests
-        run: python -m unittest discover -s tests
-      - name: Compile Python sources
-        run: python -m compileall src tests
-
   frontend:
     name: Frontend build
     runs-on: ubuntu-latest
@@ -72,6 +50,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Rust-only main guard
+        run: node scripts/check-rust-only-main.js
       - name: PowerShell installer dry-run
         shell: pwsh
         run: ./scripts/install.ps1 -DryRun

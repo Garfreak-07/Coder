@@ -16,17 +16,14 @@ import {
   getAgentWorkflow,
   getDefaultAgentWorkflow,
   getLibrary,
-  getLiveAgentRun,
   getRun,
   getRunEvents,
   getToolResult,
   rollbackPatch,
   saveAgentWorkflow,
   sendPlannerChatTurn,
-  subscribeRunEvents,
   validateAgentWorkflow
 } from "./api";
-import { shouldUseRustApiV3 } from "./apiVersion";
 import { defaultPlannerLedAgentWorkflow } from "./examples";
 import { AppSidebar, type AppSection } from "./components/AppSidebar";
 import { ProviderSettingsPanel } from "./components/ProviderSettingsPanel";
@@ -213,29 +210,6 @@ export function App() {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
       setEventsLoadingMore(false);
-    }
-  }
-
-  async function openLiveRun(runId: string, attach = false) {
-    setStatus("Loading live run...");
-    try {
-      const detail = await getLiveAgentRun(runId);
-      setSelectedRunKind("live");
-      setSelectedRunDetail(detail);
-      setActiveRunId(detail.id);
-      setEvents(detail.events);
-      setEventCursor(0);
-      setEventHasMore(false);
-      setEventsLoadingMore(false);
-      setRepo(detail.repo_root);
-      setRequest(detail.request);
-      setSubmittedRequest(detail.request);
-      setStatus(`Live run: ${detail.status}`);
-      if (attach || detail.status === "queued" || detail.status === "running") {
-        subscribeToRun(detail.id, liveEventsUrl(detail));
-      }
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -681,20 +655,8 @@ export function App() {
       setSubmittedRequest(requestText);
       setRequest("");
       if (response.run_id) {
-        if (shouldUseRustApiV3()) {
-          await openStoredRun(response.run_id);
-          setStatus(`Run ${response.status}.`);
-        } else {
-          setActiveRunId(response.run_id);
-          setSelectedRunKind("live");
-          setSelectedRunDetail(null);
-          setEvents([]);
-          setEventCursor(0);
-          setEventHasMore(false);
-          setEventsLoadingMore(false);
-          subscribeToRun(response.run_id, `/api/v2/live-agent-runs/${response.run_id}/events`);
-          setStatus(`Run ${response.status}.`);
-        }
+        await openStoredRun(response.run_id);
+        setStatus(`Run ${response.status}.`);
         refreshRuntimeInfo();
       } else {
         setStatus(`Planner ${response.turn.decision.replaceAll("_", " ")}.`);
@@ -743,16 +705,8 @@ export function App() {
       setSubmittedRequest(confirmedRequest);
       setScopesText(confirmedScopes.join("\n"));
       setActiveRunId(run.run_id);
-      if (shouldUseRustApiV3()) {
-        await openStoredRun(run.run_id);
-        setStatus(`Run ${run.status}.`);
-      } else {
-        setSelectedRunKind("live");
-        setSelectedRunDetail(null);
-        setEvents([]);
-        subscribeToRun(run.run_id, `/api/v2/live-agent-runs/${run.run_id}/events`);
-        setStatus(`Run ${run.status}.`);
-      }
+      await openStoredRun(run.run_id);
+      setStatus(`Run ${run.status}.`);
       refreshRuntimeInfo();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
@@ -801,38 +755,6 @@ export function App() {
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
-  }
-
-  function subscribeToRun(runId: string, eventsUrl: string) {
-    const source = subscribeRunEvents(
-      eventsUrl,
-      (event) => {
-        setEvents((current) => {
-          const isDuplicate = Boolean(event.id && current.some((existing) => existing.id === event.id));
-          if (!isDuplicate && isTerminalRunEvent(event.type)) {
-            source.close();
-            getLiveAgentRun(runId)
-              .then((detail) => {
-                setSelectedRunKind("live");
-                setSelectedRunDetail(detail);
-                setActiveRunId(detail.id);
-                setEvents(detail.events);
-                setStatus(`Run ${detail.status}.`);
-              })
-              .catch((error) => setStatus(error instanceof Error ? error.message : String(error)));
-          }
-          return upsertEvent(current, event);
-        });
-      },
-      () => {
-        setStatus("Event stream closed for current run.");
-        source.close();
-      }
-    );
-  }
-
-  function liveEventsUrl(detail: LiveRunDetail) {
-    return `/api/v2/live-agent-runs/${detail.id}/events`;
   }
 
   const chatRunStatus = selectedRunDetail
