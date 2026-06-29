@@ -29,6 +29,11 @@ export function ReviewChangesCard({
       {changeSets.map((changeSet) => {
         const diff = diffByChangeSetId[changeSet.change_set_id];
         const loading = loadingChangeSetId === changeSet.change_set_id;
+        const canAccept = changeSet.status === "pending_review";
+        const canUndo =
+          Boolean(changeSet.reverse_patch_ref) &&
+          (changeSet.status === "pending_review" || changeSet.status === "accepted");
+        const undoConflict = changeSet.status === "failed_to_undo";
         return (
           <article className="change-set-card" key={changeSet.change_set_id}>
             <div className="change-set-title">
@@ -57,14 +62,19 @@ export function ReviewChangesCard({
               </div>
             )}
             {diff && <pre className="review-diff">{diff}</pre>}
+            {undoConflict && (
+              <p className="review-conflict">
+                Undo blocked because the working tree changed after this review was recorded.
+              </p>
+            )}
             <div className="review-actions">
               <button onClick={() => onLoadDiff(changeSet.change_set_id)} disabled={loading}>
                 {loading ? "Loading diff..." : diff ? "Refresh diff" : "View diff"}
               </button>
-              <button onClick={() => onAccept(changeSet.change_set_id)}>
+              <button onClick={() => onAccept(changeSet.change_set_id)} disabled={!canAccept || loading}>
                 Accept
               </button>
-              <button onClick={() => onUndo(changeSet.change_set_id)}>
+              <button onClick={() => onUndo(changeSet.change_set_id)} disabled={!canUndo || loading}>
                 Undo
               </button>
             </div>

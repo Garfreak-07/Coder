@@ -2424,7 +2424,7 @@ async fn list_run_changes(
             run_id.as_str()
         )));
     }
-    let change_set = build_current_change_set(&state.store, &run_id)?;
+    let change_set = current_change_set(&state.store, &run_id)?;
     Ok(Json(RunChangeSetListResponse {
         run_id: run_id.to_string(),
         changes: change_set.into_iter().collect(),
@@ -3732,7 +3732,7 @@ pub struct ChangeSet {
     pub diff_truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeSetStatus {
     PendingReview,
@@ -4247,7 +4247,7 @@ fn build_current_change_set(
         return Ok(None);
     };
     let diff = git_diff(&repo_root, 1024 * 1024)?;
-    if diff.preview.trim().is_empty() && report.changed_files.is_empty() {
+    if diff.preview.trim().is_empty() {
         return Ok(None);
     }
     let change_set_id = "changeset-current".to_owned();
@@ -4284,11 +4284,11 @@ fn build_current_change_set(
         .into_iter()
         .find(|checkpoint| checkpoint.name == "before-run.json")
         .map(|checkpoint| checkpoint.checkpoint_ref);
-    let after_diff_ref = Some(format!(
+    let after_diff_ref = format!(
         "artifact://runs/{}/artifacts/{}.json",
         run_id.as_str(),
         change_set_id
-    ));
+    );
     let change_set = ChangeSet {
         change_set_id,
         run_id: run_id.to_string(),
@@ -4297,8 +4297,8 @@ fn build_current_change_set(
         created_at: now_timestamp_string(),
         base_git_head: run_started_payload_string(&events, "git_head"),
         before_checkpoint_ref,
-        after_diff_ref,
-        reverse_patch_ref: Some("reverse:git-apply-r".to_owned()),
+        after_diff_ref: Some(after_diff_ref.clone()),
+        reverse_patch_ref: Some(format!("{after_diff_ref}#reverse-git-apply")),
         changed_files,
         command_checks,
         evidence_refs: report.evidence_refs,
@@ -4309,22 +4309,49 @@ fn build_current_change_set(
     Ok(Some(change_set))
 }
 
+fn current_change_set(store: &RunStore, run_id: &RunId) -> Result<Option<ChangeSet>, ApiError> {
+    let Some(stored) = read_stored_change_set(store, run_id, "changeset-current")? else {
+        return build_current_change_set(store, run_id);
+    };
+    let current_diff = git_diff(&stored.repo_root, 1024 * 1024)?.preview;
+    if current_diff.trim().is_empty() {
+        return Ok(None);
+    }
+    if current_diff == stored.after_diff || stored.status != ChangeSetStatus::PendingReview {
+        return Ok(Some(stored));
+    }
+    build_current_change_set(store, run_id)
+}
+
+fn read_stored_change_set(
+    store: &RunStore,
+    run_id: &RunId,
+    change_set_id: &str,
+) -> Result<Option<ChangeSet>, ApiError> {
+    match store.read_artifact_json(run_id, &change_set_artifact_name(change_set_id)) {
+        Ok(value) => Ok(Some(serde_json::from_value(value).map_err(|error| {
+            ApiError::internal(format!("stored change set is invalid: {error}"))
+        })?)),
+        Err(StoreError::ArtifactNotFound { .. }) => Ok(None),
+        Err(error) => Err(ApiError::from(error)),
+    }
+}
+
 fn read_change_set(
     store: &RunStore,
     run_id: &RunId,
     change_set_id: &str,
 ) -> Result<ChangeSet, ApiError> {
-    match store.read_artifact_json(run_id, &change_set_artifact_name(change_set_id)) {
-        Ok(value) => Ok(serde_json::from_value(value).map_err(|error| {
-            ApiError::internal(format!("stored change set is invalid: {error}"))
-        })?),
-        Err(StoreError::ArtifactNotFound { .. }) => build_current_change_set(store, run_id)?
-            .filter(|change_set| change_set.change_set_id == change_set_id)
-            .ok_or_else(|| {
-                ApiError::not_found(format!("change set '{change_set_id}' was not found"))
-            }),
-        Err(error) => Err(ApiError::from(error)),
-    }
+    read_stored_change_set(store, run_id, change_set_id)?.map_or_else(
+        || {
+            build_current_change_set(store, run_id)?
+                .filter(|change_set| change_set.change_set_id == change_set_id)
+                .ok_or_else(|| {
+                    ApiError::not_found(format!("change set '{change_set_id}' was not found"))
+                })
+        },
+        Ok,
+    )
 }
 
 fn write_change_set(
@@ -8727,6 +8754,19 @@ diff --git a/tracked.txt b/tracked.txt
             .await
             .unwrap();
         assert_eq!(accept_response.status(), StatusCode::OK);
+        let accepted_list_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/runs/run-1/changes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(accepted_list_response.status(), StatusCode::OK);
+        let accepted_list = response_json(accepted_list_response).await;
+        assert_eq!(accepted_list["changes"][0]["status"], "accepted");
 
         let undo_response = app
             .clone()
@@ -8746,6 +8786,106 @@ diff --git a/tracked.txt b/tracked.txt
                 .replace("\r\n", "\n"),
             "base\n"
         );
+        let undone_list_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/runs/run-1/changes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(undone_list_response.status(), StatusCode::OK);
+        let undone_list = response_json(undone_list_response).await;
+        assert_eq!(undone_list["changes"].as_array().unwrap().len(), 0);
+        let _ = fs::remove_dir_all(repo);
+        let _ = fs::remove_dir_all(store_root);
+    }
+
+    #[tokio::test]
+    async fn changeset_undo_conflicts_when_working_tree_diff_changed() {
+        let repo = temp_root();
+        let store_root = temp_root();
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        run_git(&repo, &["init"]);
+        run_git(&repo, &["config", "user.email", "coder@example.test"]);
+        run_git(&repo, &["config", "user.name", "Coder Test"]);
+        run_git(&repo, &["add", "tracked.txt"]);
+        run_git(&repo, &["commit", "-m", "base"]);
+        fs::write(repo.join("tracked.txt"), "changed\n").unwrap();
+
+        let store = RunStore::new(&store_root);
+        let run_id = RunId::from_string("run-1");
+        store
+            .append_event(
+                &run_id,
+                &coder_events::CoderEvent::new(
+                    run_id.clone(),
+                    1,
+                    "run.started",
+                    json!({"repo_root": repo.display().to_string(), "task": "change file"}),
+                ),
+            )
+            .unwrap();
+        store
+            .write_report(
+                &run_id,
+                &FinalReport {
+                    changed_files: vec!["tracked.txt".to_owned()],
+                    ..FinalReport::completed("Changed tracked.txt")
+                },
+            )
+            .unwrap();
+        let app = router(ApiState::new(store));
+
+        let list_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/runs/run-1/changes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let list_body = response_json(list_response).await;
+        let change_set_id = list_body["changes"][0]["change_set_id"].as_str().unwrap();
+        fs::write(repo.join("tracked.txt"), "user changed\n").unwrap();
+
+        let undo_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v3/runs/run-1/changes/{change_set_id}/undo"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(undo_response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            fs::read_to_string(repo.join("tracked.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "user changed\n"
+        );
+
+        let conflict_list_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/runs/run-1/changes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(conflict_list_response.status(), StatusCode::OK);
+        let conflict_list = response_json(conflict_list_response).await;
+        assert_eq!(conflict_list["changes"][0]["status"], "failed_to_undo");
         let _ = fs::remove_dir_all(repo);
         let _ = fs::remove_dir_all(store_root);
     }

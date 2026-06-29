@@ -1,6 +1,7 @@
 import { defaultPlannerLedAgentWorkflow } from "./examples";
 import { readFileSync } from "node:fs";
 import { PlannerChatPage } from "./features/planner-chat/PlannerChatPage";
+import { ReviewChangesCard } from "./features/review-changes/ReviewChangesCard";
 import { WorkTimeline } from "./features/work-timeline/WorkTimeline";
 import type { AgentWorkflowSpec, RustProjectConfig } from "./types";
 import {
@@ -321,6 +322,49 @@ test("Work timeline renders public ReAct items without raw backend details", () 
   assert.ok(text.includes("repo_find_files"));
   assert.ok(!text.includes("raw_ref"));
   assert.ok(!text.includes("backend.openhands"));
+});
+
+test("Review Changes stays hidden without changes and shows undo conflicts", () => {
+  const empty = ReviewChangesCard({
+    changeSets: [],
+    diffByChangeSetId: {},
+    loadingChangeSetId: null,
+    onAccept: () => undefined,
+    onLoadDiff: () => undefined,
+    onUndo: () => undefined
+  });
+  assert.equal(empty, null);
+
+  const conflicted = ReviewChangesCard({
+    changeSets: [
+      {
+        change_set_id: "changeset-current",
+        run_id: "run-1",
+        repo_root: ".",
+        status: "failed_to_undo",
+        created_at: "2026-01-01T00:00:00Z",
+        base_git_head: null,
+        before_checkpoint_ref: null,
+        after_diff_ref: "artifact://runs/run-1/artifacts/changeset-current.json",
+        reverse_patch_ref: "artifact://runs/run-1/artifacts/changeset-current.json#reverse-git-apply",
+        changed_files: [{ path: "tracked.txt", change_type: "modified" }],
+        command_checks: [],
+        evidence_refs: [],
+        after_diff: "diff --git a/tracked.txt b/tracked.txt",
+        diff_truncated: false
+      }
+    ],
+    diffByChangeSetId: {},
+    loadingChangeSetId: null,
+    onAccept: () => undefined,
+    onLoadDiff: () => undefined,
+    onUndo: () => undefined
+  });
+  const text = collectReactTreeText(conflicted);
+
+  assert.ok(text.includes("Review changes"));
+  assert.ok(text.includes("Undo blocked because the working tree changed"));
+  assert.ok(text.includes("tracked.txt"));
 });
 
 test("Provider Settings exposes DeepSeek preset and exact test result UI", () => {
