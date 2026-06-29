@@ -29,7 +29,10 @@ interface PlannerChatPageProps {
   timelineItems: TimelineItem[];
   plannerSession: PlannerChatSession | null;
   plannerStrength: PlannerStrength;
+  providerSetupRequired: boolean;
+  providerSetupMessage: string;
   onAcceptChangeSet: (changeSetId: string) => void;
+  onOpenProviderSettings: () => void;
   onLoadChangeSetDiff: (changeSetId: string) => void;
   onRepoChange: (value: string) => void;
   onRequestChange: (value: string) => void;
@@ -54,7 +57,10 @@ export function PlannerChatPage({
   timelineItems,
   plannerSession,
   plannerStrength,
+  providerSetupRequired,
+  providerSetupMessage,
   onAcceptChangeSet,
+  onOpenProviderSettings,
   onLoadChangeSetDiff,
   onRepoChange,
   onRequestChange,
@@ -90,11 +96,25 @@ export function PlannerChatPage({
       <section className="chat-thread" aria-label="Planner conversation">
         {!submittedRequest && !runIdForTimeline && !hasSessionMessages ? (
           <div className="chat-empty">
+            {providerSetupRequired && (
+              <div className="provider-setup-card">
+                <strong>Provider setup required</strong>
+                <p>{providerSetupMessage}</p>
+                <button onClick={onOpenProviderSettings}>Open Settings</button>
+              </div>
+            )}
             <h2>What should the Planner work on?</h2>
             <p>Chat with the Planner, then start work when the plan is ready.</p>
           </div>
         ) : (
           <>
+            {providerSetupRequired && (
+              <div className="provider-setup-card">
+                <strong>Provider setup required</strong>
+                <p>{providerSetupMessage}</p>
+                <button onClick={onOpenProviderSettings}>Open Settings</button>
+              </div>
+            )}
             {hasSessionMessages ? (
               sessionMessages.map((message, index) => (
                 <article

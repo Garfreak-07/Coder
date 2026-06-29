@@ -144,8 +144,15 @@ OpenHands remains an optional external backend. Without a running OpenHands
 server, local development can use native Rust fallback capabilities and the
 mock workflow endpoint used by smoke tests.
 
-For local OpenHands smoke tests, prefer environment variables rather than
-committed files:
+## Provider Setup
+
+Use the app `Settings` page for DeepSeek or OpenAI-compatible API keys. The
+normal user path does not require `LLM_BASE_URL`, `LLM_API_KEY`, or
+`SESSION_API_KEY`. See [`docs/PROVIDER_SETUP.md`](docs/PROVIDER_SETUP.md).
+
+For local OpenHands smoke tests and headless development, environment variables
+remain available as fallback. Prefer environment variables rather than committed
+files:
 
 ```powershell
 $env:CODER_LLM_PROVIDER_PROFILE="deepseek-default"

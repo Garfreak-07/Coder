@@ -1032,6 +1032,13 @@ export interface ProviderStatus {
   providers: ProviderStatusItem[];
 }
 
+export interface ProviderTestResult {
+  provider: string;
+  ok: boolean;
+  mode: string;
+  message: string;
+}
+
 export interface ProviderFormState {
   default_provider: string;
   default_model: string;

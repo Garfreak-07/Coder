@@ -1925,15 +1925,24 @@ async fn test_provider_status(
     State(state): State<ApiState>,
     Json(request): Json<ProviderTestRequest>,
 ) -> Json<ProviderTestResponse> {
-    let settings = state.provider_settings.lock().unwrap();
+    let settings = state.provider_settings.lock().unwrap().clone();
     let provider = request
         .provider
         .as_deref()
         .map(normalize_provider)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| settings.default_provider.clone());
+    let test = test_provider_chat_completion(&settings, &provider, request.mock.unwrap_or(false))
+        .await
+        .unwrap_or_else(|message| ProviderTestResult {
+            provider: provider.clone(),
+            ok: false,
+            mode: "live".to_owned(),
+            message,
+        });
     Json(ProviderTestResponse {
         status: provider_status(&settings, Some(vec![provider])),
+        test,
     })
 }
 
@@ -3254,6 +3263,8 @@ pub struct CacheTaskCancelResponse {
 pub struct ProviderKeyState {
     pub configured: bool,
     pub source: String,
+    #[serde(default, skip_serializing, skip_deserializing)]
+    pub secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3268,9 +3279,12 @@ pub struct ProviderSettings {
 impl Default for ProviderSettings {
     fn default() -> Self {
         Self {
-            default_provider: "openai".to_owned(),
-            default_model: "gpt-4.1-mini".to_owned(),
-            base_urls: BTreeMap::new(),
+            default_provider: "openai-compatible".to_owned(),
+            default_model: "deepseek-v4-flash".to_owned(),
+            base_urls: BTreeMap::from([(
+                "openai-compatible".to_owned(),
+                "https://api.deepseek.com".to_owned(),
+            )]),
             api_keys: BTreeMap::new(),
             mock_mode: true,
         }
@@ -3300,11 +3314,21 @@ pub struct ProviderSettingsSaveResponse {
 #[derive(Debug, Deserialize)]
 pub struct ProviderTestRequest {
     pub provider: Option<String>,
+    pub mock: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ProviderTestResponse {
     pub status: ProviderStatus,
+    pub test: ProviderTestResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProviderTestResult {
+    pub provider: String,
+    pub ok: bool,
+    pub mode: String,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -4550,6 +4574,7 @@ fn apply_provider_settings_patch(settings: &mut ProviderSettings, patch: Provide
                 ProviderKeyState {
                     configured: true,
                     source: "settings".to_owned(),
+                    secret: Some(text.to_owned()),
                 },
             );
         }
@@ -4604,36 +4629,90 @@ fn provider_status_item(settings: &ProviderSettings, provider: &str) -> Provider
 }
 
 fn provider_credential_state(settings: &ProviderSettings, provider: &str) -> (bool, String) {
-    let env_keys = provider_env_keys();
-    let env_name = env_keys
-        .get(provider)
-        .map(String::as_str)
-        .unwrap_or("CODER_API_KEY");
-    if env::var_os(env_name).is_some() || env::var_os("CODER_API_KEY").is_some() {
-        return (true, "environment".to_owned());
-    }
     if settings
         .api_keys
         .get(provider)
-        .map(|state| state.configured)
+        .map(|state| state.configured && !state.secret.as_deref().unwrap_or("").trim().is_empty())
         .unwrap_or(false)
     {
         return (true, "settings".to_owned());
+    }
+    if provider_api_key_from_env(provider, None).is_some() {
+        return (true, "environment".to_owned());
     }
     (false, "missing".to_owned())
 }
 
 fn provider_base_url(settings: &ProviderSettings, provider: &str) -> Option<String> {
-    if let Some(value) = env::var_os("CODER_BASE_URL").and_then(|value| value.into_string().ok()) {
-        if !value.trim().is_empty() {
-            return Some(value);
+    if let Some(value) = settings_provider_base_url(settings, provider) {
+        return Some(value);
+    }
+    provider_base_url_from_env(None)
+        .or_else(|| default_provider_base_url(provider).map(str::to_owned))
+}
+
+fn settings_provider_base_url(settings: &ProviderSettings, provider: &str) -> Option<String> {
+    settings.base_urls.get(provider).cloned()
+}
+
+fn provider_base_url_from_env(model_base_url_env: Option<&str>) -> Option<String> {
+    let candidates = [
+        model_base_url_env,
+        Some("CODER_BASE_URL"),
+        Some("LLM_BASE_URL"),
+    ];
+    for env_name in candidates.into_iter().flatten() {
+        if let Some(value) = env::var_os(env_name).and_then(|value| value.into_string().ok()) {
+            if !value.trim().is_empty() {
+                return Some(value);
+            }
         }
     }
+    None
+}
+
+fn provider_api_key(
+    settings: &ProviderSettings,
+    provider: &str,
+    model_api_key_env: Option<&str>,
+) -> Option<(String, String)> {
     settings
-        .base_urls
+        .api_keys
         .get(provider)
-        .cloned()
-        .or_else(|| default_provider_base_url(provider).map(str::to_owned))
+        .and_then(|state| state.secret.as_deref())
+        .map(str::trim)
+        .filter(|secret| !secret.is_empty())
+        .map(|secret| (secret.to_owned(), "settings".to_owned()))
+        .or_else(|| {
+            provider_api_key_from_env(provider, model_api_key_env)
+                .map(|secret| (secret, "environment".to_owned()))
+        })
+}
+
+fn provider_api_key_from_env(provider: &str, model_api_key_env: Option<&str>) -> Option<String> {
+    let env_keys = provider_env_keys();
+    let provider_env_name = env_keys
+        .get(provider)
+        .map(String::as_str)
+        .unwrap_or("CODER_API_KEY");
+    let candidates = [
+        model_api_key_env,
+        Some(provider_env_name),
+        Some("CODER_API_KEY"),
+        Some("LLM_API_KEY"),
+    ];
+    let mut seen = BTreeSet::new();
+    for env_name in candidates.into_iter().flatten() {
+        if !seen.insert(env_name.to_owned()) {
+            continue;
+        }
+        if let Some(value) = env::var_os(env_name).and_then(|value| value.into_string().ok()) {
+            if !value.trim().is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
 }
 
 fn provider_env_keys() -> BTreeMap<String, String> {
@@ -4676,6 +4755,88 @@ fn default_provider_base_url(provider: &str) -> Option<&'static str> {
 
 fn normalize_provider(value: &str) -> String {
     value.trim().to_ascii_lowercase()
+}
+
+async fn test_provider_chat_completion(
+    settings: &ProviderSettings,
+    provider: &str,
+    mock: bool,
+) -> Result<ProviderTestResult, String> {
+    let provider = normalize_provider(provider);
+    if mock {
+        return Ok(ProviderTestResult {
+            provider,
+            ok: true,
+            mode: "mock".to_owned(),
+            message: "Mock provider test passed without a live request.".to_owned(),
+        });
+    }
+    let status = provider_status_item(settings, &provider);
+    if settings.mock_mode && !status.credential_configured {
+        return Ok(ProviderTestResult {
+            provider,
+            ok: true,
+            mode: "mock".to_owned(),
+            message: "Mock mode is enabled; no live provider request was sent.".to_owned(),
+        });
+    }
+    let (api_key, source) = provider_api_key(settings, &provider, None).ok_or_else(|| {
+        "Provider test requires an API key from Provider Settings or developer/headless environment fallback."
+            .to_owned()
+    })?;
+    let base_url = provider_base_url(settings, &provider)
+        .ok_or_else(|| "Provider test requires a base URL.".to_owned())?;
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let client = Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .post(url)
+        .bearer_auth(&api_key)
+        .json(&json!({
+            "model": &settings.default_model,
+            "messages": [
+                {"role": "user", "content": "Reply with OK."}
+            ],
+            "temperature": 0,
+            "max_tokens": 8
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("Provider test request failed: {}", error))?;
+    if !response.status().is_success() {
+        return Ok(ProviderTestResult {
+            provider,
+            ok: false,
+            mode: "live".to_owned(),
+            message: format!("Provider returned HTTP {}.", response.status()),
+        });
+    }
+    let payload: Value = response.json().await.map_err(|error| error.to_string())?;
+    let content = payload
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if content.is_empty() {
+        return Ok(ProviderTestResult {
+            provider,
+            ok: false,
+            mode: "live".to_owned(),
+            message: "Provider response did not include assistant content.".to_owned(),
+        });
+    }
+    Ok(ProviderTestResult {
+        provider,
+        ok: true,
+        mode: "live".to_owned(),
+        message: format!("Live provider test succeeded using {source} credentials."),
+    })
 }
 
 fn normalize_planner_mode(value: Option<&str>) -> String {
@@ -4721,25 +4882,12 @@ impl ModelPlannerConversationEngine {
         }
         let model = planner_model_profile(request);
         let provider = planner_model_provider(request, model);
-        let env_keys = provider_env_keys();
-        let key_env = model
-            .api_key_env
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                env_keys
-                    .get(&provider)
-                    .map(String::as_str)
-                    .filter(|value| !value.trim().is_empty())
-            })
-            .unwrap_or("CODER_API_KEY");
-        let api_key = env::var(key_env)
-            .or_else(|_| env::var("CODER_API_KEY"))
-            .or_else(|_| env::var("LLM_API_KEY"))
-            .map_err(|_| planner_model_config_error())?;
-        if api_key.trim().is_empty() {
-            return Err(planner_model_config_error());
-        }
+        let (api_key, _) = provider_api_key(
+            &request.provider_settings,
+            &provider,
+            model.api_key_env.as_deref(),
+        )
+        .ok_or_else(planner_model_config_error)?;
         let base_url = planner_model_base_url(request, &provider, model)
             .ok_or_else(planner_model_config_error)?;
         let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
@@ -4830,22 +4978,13 @@ fn planner_model_base_url(
     provider: &str,
     model: &ConfigModelSpec,
 ) -> Option<String> {
-    if let Some(env_name) = model
-        .base_url_env
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        if let Ok(value) = env::var(env_name) {
-            if !value.trim().is_empty() {
-                return Some(value);
-            }
-        }
-    }
-    provider_base_url(&request.provider_settings, provider)
+    settings_provider_base_url(&request.provider_settings, provider)
+        .or_else(|| provider_base_url_from_env(model.base_url_env.as_deref()))
+        .or_else(|| default_provider_base_url(provider).map(str::to_owned))
 }
 
 fn planner_model_config_error() -> String {
-    "Planner model provider is not configured. Set LLM_BASE_URL and LLM_API_KEY or configure provider settings.".to_owned()
+    "Planner model provider is not configured. Configure Provider Settings, or set LLM_BASE_URL and LLM_API_KEY for developer/headless fallback.".to_owned()
 }
 
 fn planner_system_prompt(runtime: &PlannerRuntimeContext) -> String {
@@ -6936,7 +7075,14 @@ mod tests {
             .await
             .unwrap();
         let initial_body = response_json(initial).await;
-        assert_eq!(initial_body["settings"]["default_provider"], "openai");
+        assert_eq!(
+            initial_body["settings"]["default_provider"],
+            "openai-compatible"
+        );
+        assert_eq!(
+            initial_body["settings"]["default_model"],
+            "deepseek-v4-flash"
+        );
 
         let save = post_json(
             app.clone(),
@@ -6971,7 +7117,7 @@ mod tests {
         let test = post_json(
             app.clone(),
             "/api/v3/providers/test",
-            json!({"provider": "deepseek"}),
+            json!({"provider": "deepseek", "mock": true}),
         )
         .await;
         let test_body = response_json(test).await;
@@ -6980,6 +7126,9 @@ mod tests {
             test_body["status"]["providers"][0]["credential_configured"],
             true
         );
+        assert_eq!(test_body["test"]["ok"], true);
+        assert_eq!(test_body["test"]["mode"], "mock");
+        assert!(!test_body.to_string().contains("sk-secret-value"));
 
         let remove = post_json(
             app,
@@ -6991,6 +7140,26 @@ mod tests {
         .await;
         let remove_body = response_json(remove).await;
         assert!(remove_body["settings"]["api_keys"]["deepseek"].is_null());
+    }
+
+    #[test]
+    fn provider_key_state_serialization_redacts_secret() {
+        let mut settings = ProviderSettings::default();
+        settings.api_keys.insert(
+            "openai-compatible".to_owned(),
+            ProviderKeyState {
+                configured: true,
+                source: "settings".to_owned(),
+                secret: Some("sk-secret-value".to_owned()),
+            },
+        );
+
+        let serialized = serde_json::to_string(&settings).unwrap();
+
+        assert!(serialized.contains("\"configured\":true"));
+        assert!(serialized.contains("\"source\":\"settings\""));
+        assert!(!serialized.contains("sk-secret-value"));
+        assert!(!serialized.contains("secret"));
     }
 
     #[tokio::test]

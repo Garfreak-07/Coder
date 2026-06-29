@@ -258,6 +258,27 @@ label {
   margin: 0;
 }
 
+.provider-setup-card {
+  background: #151c27;
+  border: 1px solid #713f12;
+  border-radius: 12px;
+  color: #fde68a;
+  display: grid;
+  gap: 10px;
+  margin: 0 auto 18px;
+  max-width: 560px;
+  padding: 12px;
+  text-align: left;
+}
+
+.provider-setup-card strong {
+  color: #fef3c7;
+}
+
+.provider-setup-card p {
+  color: #fbbf24;
+}
+
 .chat-message {
   display: grid;
   gap: 8px;
@@ -1423,6 +1444,33 @@ label {
   border: 1px solid #263244;
   border-radius: 10px;
   padding: 8px;
+}
+
+.provider-test-result {
+  border: 1px solid #263244;
+  border-radius: 10px;
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+}
+
+.provider-test-result strong {
+  color: #f8fafc;
+}
+
+.provider-test-result span,
+.provider-test-result p {
+  color: #cbd5e1;
+  font-size: 12px;
+  margin: 0;
+}
+
+.provider-test-ok {
+  border-color: #166534;
+}
+
+.provider-test-failed {
+  border-color: #7f1d1d;
 }
 
 .status-pill {

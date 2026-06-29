@@ -25,6 +25,7 @@ import type {
   PluginReadResponse,
   ProviderSettings,
   ProviderStatus,
+  ProviderTestResult,
   RunChangeSetListResponse,
   PluginManifest,
   RoleCardSpec,
@@ -346,13 +347,15 @@ export async function saveProviderSettings(input: Record<string, unknown>): Prom
   });
 }
 
-export async function testProvider(provider: string): Promise<ProviderStatus> {
-  const payload = await requestJson<{ status: ProviderStatus }>("/api/v3/providers/test", {
+export async function testProvider(provider: string): Promise<{
+  status: ProviderStatus;
+  test: ProviderTestResult;
+}> {
+  return requestJson<{ status: ProviderStatus; test: ProviderTestResult }>("/api/v3/providers/test", {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify({ provider })
   });
-  return payload.status;
 }
 
 export async function getRuns(): Promise<RunSummaryItem[]> {

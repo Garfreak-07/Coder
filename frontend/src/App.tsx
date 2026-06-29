@@ -113,6 +113,7 @@ export function App() {
   const {
     providerSettings,
     providerStatus,
+    providerTestResult,
     providerForm,
     updateProviderForm,
     refreshProviderInfo,
@@ -738,6 +739,12 @@ export function App() {
     );
   }, []);
   const plannerStrength = plannerStrengthFromTier(primaryPlannerAgent?.model_tier ?? "best");
+  const providerSetupRequired = Boolean(providerStatus) &&
+    providerStatus?.default_status.provider !== "ollama" &&
+    !providerStatus?.default_status.credential_configured;
+  const providerSetupMessage = providerStatus
+    ? `Configure an API key for ${providerStatus.default_provider} (${providerStatus.default_model}) before using live Planner Chat.`
+    : "Provider settings are still loading.";
   const debugEvidence = debugUiEnabled ? (
     <div className="chat-evidence-stack">
       <RunFinalReport detail={selectedRunDetail} events={events} />
@@ -789,8 +796,11 @@ export function App() {
           timelineItems={timelineItems}
           plannerSession={plannerSession}
           plannerStrength={plannerStrength}
+          providerSetupRequired={providerSetupRequired}
+          providerSetupMessage={providerSetupMessage}
           onAcceptChangeSet={acceptReviewedChangeSet}
           onLoadChangeSetDiff={loadChangeSetDiff}
+          onOpenProviderSettings={() => setActiveSection("settings")}
           onRepoChange={setRepo}
           onRequestChange={setRequest}
           onScopesTextChange={setScopesText}
@@ -856,6 +866,7 @@ export function App() {
               form={providerForm}
               settings={providerSettings}
               status={providerStatus}
+              testResult={providerTestResult}
               onChange={updateProviderForm}
               onSave={persistProviderSettings}
               onRefresh={refreshProviderInfo}

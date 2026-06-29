@@ -281,7 +281,37 @@ test("Planner Chat page renders two turns without synthetic status cards", () =>
   assert.ok(!text.includes("Discuss"));
 });
 
-function renderPlannerChat(plannerSession: Parameters<typeof PlannerChatPage>[0]["plannerSession"]): unknown {
+test("Provider Settings exposes DeepSeek preset and exact test result UI", () => {
+  const panelSource = readFileSync("src/components/ProviderSettingsPanel.tsx", "utf8");
+  const hookSource = readFileSync("src/hooks/useProviderSettings.ts", "utf8");
+
+  assert.ok(panelSource.includes("DeepSeek preset"));
+  assert.ok(panelSource.includes("Test Provider"));
+  assert.ok(panelSource.includes("Test succeeded"));
+  assert.ok(panelSource.includes("Test failed"));
+  assert.ok(panelSource.includes("openai-compatible"));
+  assert.ok(panelSource.includes("custom"));
+  assert.ok(hookSource.includes("deepseek-v4-flash"));
+  assert.ok(hookSource.includes("https://api.deepseek.com"));
+  assert.ok(hookSource.includes("mock_mode: false"));
+});
+
+test("Planner Chat shows provider setup before chat when credentials are missing", () => {
+  const tree = renderPlannerChat(null, {
+    providerSetupRequired: true,
+    providerSetupMessage: "Configure an API key for openai-compatible."
+  });
+  const text = collectReactTreeText(tree);
+
+  assert.ok(text.includes("Provider setup required"));
+  assert.ok(text.includes("Configure an API key for openai-compatible."));
+  assert.ok(text.includes("Open Settings"));
+});
+
+function renderPlannerChat(
+  plannerSession: Parameters<typeof PlannerChatPage>[0]["plannerSession"],
+  overrides: Partial<Parameters<typeof PlannerChatPage>[0]> = {}
+): unknown {
   return PlannerChatPage({
     activeRunId: null,
     changeSets: [],
@@ -296,15 +326,19 @@ function renderPlannerChat(plannerSession: Parameters<typeof PlannerChatPage>[0]
     timelineItems: [],
     plannerSession,
     plannerStrength: "balanced",
+    providerSetupRequired: false,
+    providerSetupMessage: "",
     onAcceptChangeSet: () => undefined,
     onLoadChangeSetDiff: () => undefined,
+    onOpenProviderSettings: () => undefined,
     onRepoChange: () => undefined,
     onRequestChange: () => undefined,
     onScopesTextChange: () => undefined,
     onPlannerStrengthChange: () => undefined,
     onStartWork: () => undefined,
     onSubmitRequest: () => undefined,
-    onUndoChangeSet: () => undefined
+    onUndoChangeSet: () => undefined,
+    ...overrides
   });
 }
 

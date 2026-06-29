@@ -1,9 +1,11 @@
-import type { ProviderFormState, ProviderSettings, ProviderStatus } from "../types";
+import { deepSeekProviderPreset } from "../hooks/useProviderSettings";
+import type { ProviderFormState, ProviderSettings, ProviderStatus, ProviderTestResult } from "../types";
 
 interface ProviderSettingsPanelProps {
   form: ProviderFormState;
   settings: ProviderSettings | null;
   status: ProviderStatus | null;
+  testResult: ProviderTestResult | null;
   onChange: (patch: Partial<ProviderFormState>) => void;
   onSave: () => void;
   onRefresh: () => void;
@@ -14,6 +16,7 @@ export function ProviderSettingsPanel({
   form,
   settings,
   status,
+  testResult,
   onChange,
   onSave,
   onRefresh,
@@ -30,7 +33,7 @@ export function ProviderSettingsPanel({
       <label>
         Provider
         <select value={form.default_provider} onChange={(event) => onChange({ default_provider: event.target.value })}>
-          {["openai", "deepseek", "openai-compatible", "qwen", "moonshot", "ollama"].map((providerName) => (
+          {["openai-compatible", "deepseek", "custom"].map((providerName) => (
             <option key={providerName} value={providerName}>
               {providerName}
             </option>
@@ -54,6 +57,7 @@ export function ProviderSettingsPanel({
         <input
           type="password"
           placeholder={keyState?.configured ? `${keyState.source}: configured` : "Leave blank to keep current value"}
+          autoComplete="off"
           value={form.api_key}
           onChange={(event) => onChange({ api_key: event.target.value })}
         />
@@ -74,9 +78,17 @@ export function ProviderSettingsPanel({
           <span>{currentStatus.base_url ?? "default URL"}</span>
         </div>
       )}
+      {testResult && (
+        <div className={`provider-test-result ${testResult.ok ? "provider-test-ok" : "provider-test-failed"}`}>
+          <strong>{testResult.ok ? "Test succeeded" : "Test failed"}</strong>
+          <span>{testResult.mode}</span>
+          <p>{testResult.message}</p>
+        </div>
+      )}
       <div className="button-row">
+        <button onClick={() => onChange(deepSeekProviderPreset)}>DeepSeek preset</button>
         <button onClick={onSave}>Save</button>
-        <button onClick={onTest}>Test</button>
+        <button onClick={onTest}>Test Provider</button>
         <button onClick={onRefresh}>Refresh</button>
       </div>
     </div>
