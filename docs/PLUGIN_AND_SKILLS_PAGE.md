@@ -3,7 +3,10 @@
 The React Plugins & Skills page is deferred from the core Planner/Executor
 product path. It is not shown in the main sidebar by default; the existing
 React page is only reachable through the developer debug UI while the core loop
-is the release focus.
+is the release focus: `Planner Chat -> Start Work -> Timeline -> Review`.
+
+Developer debug UI is enabled only with `?debug=1` or
+`localStorage.coder_debug_ui=1`.
 
 Frontend files:
 
@@ -17,9 +20,9 @@ frontend/src/features/plugins/HooksPanel.tsx
 frontend/src/features/plugins/PluginSettingsPanel.tsx
 ```
 
-Backend surfaces remain available as experimental/developer APIs for local
-skill and plugin validation, harness loading, and future Codex-inspired plugin
-work:
+Backend surfaces remain available as non-core experimental/developer APIs for
+local skill and plugin validation, harness loading, and future Codex-inspired
+plugin work:
 
 ```text
 GET  /api/v3/plugins/marketplaces

@@ -299,10 +299,14 @@ test("App navigation hides Plugins & Skills outside debug UI", () => {
   const appSource = readFileSync("src/App.tsx", "utf8");
 
   assert.ok(collectReactTreeText(defaultTree).includes("Planner Chat"));
+  assert.ok(collectReactTreeText(defaultTree).includes("Agent Workflow"));
+  assert.ok(collectReactTreeText(defaultTree).includes("Settings"));
   assert.ok(!collectReactTreeText(defaultTree).includes("Plugins & Skills"));
   assert.ok(collectReactTreeText(debugTree).includes("Plugins & Skills"));
   assert.ok(appSource.includes("showExtensions={debugUiEnabled}"));
   assert.ok(appSource.includes('activeSection === "extensions" && debugUiEnabled'));
+  assert.ok(appSource.includes('get("debug") === "1"'));
+  assert.ok(appSource.includes('window.localStorage.getItem("coder_debug_ui") === "1"'));
 });
 
 test("Work timeline renders public ReAct items without raw backend details", () => {
