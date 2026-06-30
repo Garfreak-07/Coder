@@ -284,6 +284,17 @@ test("Planner Chat page renders two turns without synthetic status cards", () =>
   assert.ok(!text.includes("Ready"));
   assert.ok(!text.includes(["Draft", "Plan"].join(" ")));
   assert.ok(!text.includes("Discuss"));
+  assert.ok(!text.includes(["Work", "mode"].join(" ")));
+});
+
+test("Planner Chat composer disables input only while a request is in flight", () => {
+  const idleTree = renderPlannerChat(null, { request: "hello", runLoading: false });
+  const busyTree = renderPlannerChat(null, { request: "hello", runLoading: true });
+  const idleComposer = findElementByPlaceholder(idleTree, "Message the Planner...");
+  const busyComposer = findElementByPlaceholder(busyTree, "Message the Planner...");
+
+  assert.equal(Boolean(idleComposer?.props?.disabled), false);
+  assert.equal(Boolean(busyComposer?.props?.disabled), true);
 });
 
 test("App navigation hides Plugins & Skills outside debug UI", () => {
@@ -490,4 +501,25 @@ function collectReactTreeClassNames(node: unknown): string {
     typeof props?.className === "string" ? props.className : "",
     collectReactTreeClassNames(props?.children)
   ].filter(Boolean).join(" ");
+}
+
+function findElementByPlaceholder(
+  node: unknown,
+  placeholder: string
+): { props?: { children?: unknown; placeholder?: unknown; disabled?: unknown } } | null {
+  if (node === null || typeof node === "undefined" || typeof node === "boolean") return null;
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const found = findElementByPlaceholder(item, placeholder);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof node !== "object") return null;
+  const element = node as { type?: unknown; props?: { children?: unknown; placeholder?: unknown; disabled?: unknown } };
+  if (typeof element.type === "function") {
+    return findElementByPlaceholder(element.type(element.props ?? {}), placeholder);
+  }
+  if (element.props?.placeholder === placeholder) return element;
+  return findElementByPlaceholder(element.props?.children, placeholder);
 }
