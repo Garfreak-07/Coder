@@ -593,15 +593,12 @@ export function App() {
           scopes,
           skill_pack_ids: plannerChatWorkflowSummary.skillPackIds,
           knowledge_pack_ids: plannerChatWorkflowSummary.knowledgePackIds,
-          memory_pack_ids: plannerChatWorkflowSummary.memoryPackIds,
-          interaction_mode: "discuss"
+          memory_pack_ids: plannerChatWorkflowSummary.memoryPackIds
         });
       }
       const response = await sendPlannerChatTurn({
         session_id: session.session_id,
         message: requestText,
-        interaction_mode: "discuss",
-        start_if_ready: false,
         repo,
         workflow_id: workflow.id,
         planner_agent_id: workflow.primary_planner_id,

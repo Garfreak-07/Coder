@@ -639,13 +639,6 @@ fn planner_turn_events(
         "session_id": session.session_id,
         "readiness": response.readiness
     }));
-    if session.mode == "work" && session.ready && !response.should_start_workflow {
-        events.push(json!({
-            "type": "work.confirmation.requested",
-            "session_id": session.session_id,
-            "workflow_id": session.workflow_id
-        }));
-    }
     events
 }
 
@@ -904,21 +897,6 @@ async fn planner_chat_turn(
     session.open_questions = planner_response.open_questions.clone();
     session.acceptance_criteria = planner_response.acceptance_criteria.clone();
     session.risks = planner_response.risks.clone();
-    let execution_allowed = planner_response.should_start_workflow;
-    let run_preview = if session.mode == "work" {
-        Some(json!({
-            "status": if session.ready { "ready" } else { "blocked" },
-            "requires_confirmation": session.ready,
-            "workflow_id": session.workflow_id,
-            "readiness": session.readiness,
-            "open_questions": session.open_questions,
-            "acceptance_criteria": session.acceptance_criteria,
-            "risks": session.risks,
-            "plan_draft": session.plan_draft
-        }))
-    } else {
-        None
-    };
     let events = planner_turn_events(session, &planner_response);
     Ok(Json(PlannerChatTurnResponse {
         session: session.clone(),
@@ -929,10 +907,10 @@ async fn planner_chat_turn(
         acceptance_criteria: planner_response.acceptance_criteria,
         risks: planner_response.risks,
         suggested_mode: planner_response.suggested_mode,
-        should_start_workflow: planner_response.should_start_workflow,
+        should_start_workflow: false,
         ready: session.ready,
-        execution_allowed,
-        run_preview,
+        execution_allowed: false,
+        run_preview: None,
         events,
     }))
 }
@@ -5272,7 +5250,7 @@ fn deterministic_planner_response(
     let work_like = message_looks_like_work(&request.message) || request.current_plan.is_some();
     if mode == "discuss" && !work_like {
         let assistant_message = model_message.unwrap_or_else(|| {
-            "I can discuss that. If you want repository work later, I will first turn it into a scoped plan and keep execution in Work mode.".to_owned()
+            "I can discuss that. If you want repository work later, I will first turn it into a scoped plan and keep execution behind Start Work.".to_owned()
         });
         return PlannerConversationResponse {
             assistant_message,
@@ -5292,8 +5270,6 @@ fn deterministic_planner_response(
     } else {
         PlannerReadiness::NeedsClarification
     };
-    let should_start_workflow =
-        mode == "work" && readiness == PlannerReadiness::Ready && request.confirmed;
     let assistant_message = model_message.unwrap_or_else(|| {
         deterministic_planner_message(&mode, &plan, readiness, request.confirmed)
     });
@@ -5308,7 +5284,7 @@ fn deterministic_planner_response(
         } else {
             "discuss".to_owned()
         },
-        should_start_workflow,
+        should_start_workflow: false,
         readiness,
         plan_draft: Some(plan),
     }
@@ -5322,25 +5298,25 @@ fn deterministic_planner_message(
 ) -> String {
     if readiness == PlannerReadiness::NeedsClarification {
         return format!(
-            "I can plan this, but I need clarification before Work mode can run:\n{}",
+            "I can plan this, but I need clarification before Start Work can run:\n{}",
             numbered_lines(&plan.open_questions)
         );
     }
     if mode == "work" && confirmed {
         return format!(
-            "Work mode is confirmed. I will run workflow '{}' with the current plan and report back with evidence against the acceptance criteria.",
+            "The plan is ready for workflow '{}'. Use Start Work to run it and get evidence against the acceptance criteria.",
             plan.selected_workflow_id
         );
     }
     if mode == "work" {
         return format!(
-            "The plan is ready, but I need explicit confirmation before starting workflow '{}'. Acceptance criteria:\n{}",
+            "The plan is ready for workflow '{}'. Use Start Work when you want me to execute it. Acceptance criteria:\n{}",
             plan.selected_workflow_id,
             numbered_lines(&plan.acceptance_criteria)
         );
     }
     format!(
-        "I have enough information to draft a plan. Goal: {}\nAcceptance criteria:\n{}\nSwitch to Work mode when you want me to execute it.",
+        "I have enough information to plan this. Goal: {}\nAcceptance criteria:\n{}\nUse Start Work when you want me to execute it.",
         plan.goal,
         numbered_lines(&plan.acceptance_criteria)
     )
@@ -6287,7 +6263,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn planner_chat_work_mode_requires_ready_and_confirmation() {
+    async fn planner_chat_turn_never_allows_execution() {
         let app = test_router();
         let create_response = post_json(
             app.clone(),
@@ -6315,7 +6291,7 @@ mod tests {
         let unready = response_json(unready_response).await;
         assert_eq!(unready["execution_allowed"], false);
         assert_eq!(unready["should_start_workflow"], false);
-        assert_eq!(unready["run_preview"]["status"], "blocked");
+        assert_eq!(unready["run_preview"], Value::Null);
         assert!(!unready["open_questions"].as_array().unwrap().is_empty());
 
         let unconfirmed_response = post_json(
@@ -6332,12 +6308,13 @@ mod tests {
         assert_eq!(unconfirmed["readiness"], "ready");
         assert_eq!(unconfirmed["execution_allowed"], false);
         assert_eq!(unconfirmed["should_start_workflow"], false);
-        assert_eq!(unconfirmed["run_preview"]["requires_confirmation"], true);
-        assert!(unconfirmed["events"]
+        assert_eq!(unconfirmed["run_preview"], Value::Null);
+        let deprecated_confirmation_event = ["work", "confirmation", "requested"].join(".");
+        assert!(!unconfirmed["events"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|event| event["type"] == "work.confirmation.requested"));
+            .any(|event| event["type"] == deprecated_confirmation_event));
 
         let confirmed_response = post_json(
             app,
@@ -6349,8 +6326,10 @@ mod tests {
         )
         .await;
         let confirmed = response_json(confirmed_response).await;
-        assert_eq!(confirmed["execution_allowed"], true);
-        assert_eq!(confirmed["should_start_workflow"], true);
+        assert_eq!(confirmed["ready"], true);
+        assert_eq!(confirmed["execution_allowed"], false);
+        assert_eq!(confirmed["should_start_workflow"], false);
+        assert_eq!(confirmed["run_preview"], Value::Null);
         assert_eq!(
             confirmed["plan_draft"]["affected_paths"][0],
             "crates/coder-server/src/lib.rs"

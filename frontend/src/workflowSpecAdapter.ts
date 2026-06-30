@@ -258,7 +258,7 @@ export function validateWorkflowSpec(config: RustProjectConfig, workflowId: stri
 
   for (const [harnessId, harness] of Object.entries(config.harnesses)) {
     if (harness.backend === "openhands" && !harness.openhands) {
-      issues.push(issue("error", "openhands_config_missing", `OpenHands work mode '${harnessId}' needs server config.`, "harness", harnessId));
+      issues.push(issue("error", "openhands_config_missing", `OpenHands harness '${harnessId}' needs server config.`, "harness", harnessId));
     }
   }
 

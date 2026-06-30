@@ -233,6 +233,9 @@ test("Planner Chat page uses Start Work timeline and hides legacy draft controls
   assert.ok(!source.includes(legacyDraftLabel));
   assert.ok(!source.includes("Discuss"));
   assert.ok(!source.includes("plannerInteractionMode"));
+  const appSource = readFileSync("src/App.tsx", "utf8");
+  assert.ok(!appSource.includes(["start", "if", "ready"].join("_")));
+  assert.ok(!appSource.includes(["interaction_mode:", '"discuss"'].join(" ")));
 });
 
 test("Planner Chat page renders two turns without synthetic status cards", () => {

@@ -179,7 +179,6 @@ interface PlannerSessionContext {
   knowledgePackIds: string[];
   skillPackIds: string[];
   memoryPackIds: string[];
-  interactionMode: PlannerInteractionMode;
 }
 
 const rustPlannerSessionContexts = new Map<string, PlannerSessionContext>();
@@ -762,7 +761,6 @@ export function createPlannerChatSession(input: {
   knowledge_pack_ids?: string[];
   skill_pack_ids?: string[];
   memory_pack_ids?: string[];
-  interaction_mode: PlannerInteractionMode;
 }): Promise<PlannerChatSession> {
   return createRustPlannerChatSession(input);
 }
@@ -770,8 +768,6 @@ export function createPlannerChatSession(input: {
 export function sendPlannerChatTurn(input: {
   session_id: string;
   message: string;
-  interaction_mode?: PlannerInteractionMode;
-  start_if_ready?: boolean;
   repo?: string;
   workflow_id?: string;
   planner_agent_id?: string;
@@ -838,7 +834,6 @@ async function createRustPlannerChatSession(input: {
   knowledge_pack_ids?: string[];
   skill_pack_ids?: string[];
   memory_pack_ids?: string[];
-  interaction_mode: PlannerInteractionMode;
 }): Promise<PlannerChatSession> {
   const payload = await requestJson<RustPlannerChatSessionResponse>("/api/v3/planner-chat/sessions", {
     method: "POST",
@@ -847,7 +842,7 @@ async function createRustPlannerChatSession(input: {
       workflow_id: input.workflow_id,
       planner_agent_id: input.planner_agent_id,
       config: legacyCanvasToWorkflowSpec(input.agent_workflow),
-      mode: input.interaction_mode
+      mode: "discuss"
     })
   });
   const context = plannerSessionContextFromCreateInput(input);
@@ -865,8 +860,6 @@ async function getRustPlannerChatSession(sessionId: string): Promise<PlannerChat
 async function sendRustPlannerChatTurn(input: {
   session_id: string;
   message: string;
-  interaction_mode?: PlannerInteractionMode;
-  start_if_ready?: boolean;
   repo?: string;
   workflow_id?: string;
   planner_agent_id?: string;
@@ -888,7 +881,7 @@ async function sendRustPlannerChatTurn(input: {
       body: JSON.stringify({
         message: input.message,
         confirmed: false,
-        mode: input.interaction_mode ?? "discuss",
+        mode: "discuss",
         planner_agent_id: input.planner_agent_id,
         config: input.agent_workflow ? legacyCanvasToWorkflowSpec(input.agent_workflow) : undefined
       })
@@ -954,7 +947,6 @@ function plannerSessionContextFromCreateInput(input: {
   knowledge_pack_ids?: string[];
   skill_pack_ids?: string[];
   memory_pack_ids?: string[];
-  interaction_mode: PlannerInteractionMode;
 }): PlannerSessionContext {
   return {
     repo: input.repo,
@@ -964,8 +956,7 @@ function plannerSessionContextFromCreateInput(input: {
     scopes: input.scopes,
     knowledgePackIds: input.knowledge_pack_ids ?? [],
     skillPackIds: input.skill_pack_ids ?? [],
-    memoryPackIds: input.memory_pack_ids ?? [],
-    interactionMode: input.interaction_mode
+    memoryPackIds: input.memory_pack_ids ?? []
   };
 }
 
@@ -978,7 +969,6 @@ function plannerSessionContextFromTurnInput(input: {
   knowledge_pack_ids?: string[];
   skill_pack_ids?: string[];
   memory_pack_ids?: string[];
-  interaction_mode?: PlannerInteractionMode;
 }): PlannerSessionContext | null {
   if (!input.workflow_id || !input.planner_agent_id || !input.agent_workflow) {
     return null;
@@ -991,8 +981,7 @@ function plannerSessionContextFromTurnInput(input: {
     scopes: input.scopes ?? [],
     knowledgePackIds: input.knowledge_pack_ids ?? [],
     skillPackIds: input.skill_pack_ids ?? [],
-    memoryPackIds: input.memory_pack_ids ?? [],
-    interactionMode: input.interaction_mode ?? "discuss"
+    memoryPackIds: input.memory_pack_ids ?? []
   };
 }
 
@@ -1070,21 +1059,13 @@ function mapRustPlannerTurn(
     artifact_type: "planner_chat_turn",
     assistant_message: response.assistant_message,
     interaction_mode: mode,
-    decision: response.should_start_workflow || response.execution_allowed
-      ? "start_workflow"
-      : ready
-        ? "produce_plan"
-        : response.readiness === "casual"
-          ? "answer_without_workflow"
+    decision: ready
+      ? "produce_plan"
+      : response.readiness === "casual"
+        ? "answer_without_workflow"
         : "continue_chat",
     visible_thinking: {
-      phase: response.should_start_workflow || response.execution_allowed
-        ? "ready_to_start"
-        : ready
-          ? "checking_readiness"
-          : response.readiness === "casual"
-            ? "understanding"
-          : "understanding",
+      phase: ready ? "checking_readiness" : response.readiness === "casual" ? "understanding" : "understanding",
       summary: response.assistant_message
     },
     task_state: taskState,
