@@ -5143,17 +5143,11 @@ async fn test_provider_chat_completion(
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|error| redact_provider_error(&error.to_string(), &[&api_key, &base_url]))?;
+    let request_body = provider_test_chat_completion_body(&provider, &settings.default_model);
     let response = client
         .post(&url)
         .bearer_auth(&api_key)
-        .json(&json!({
-            "model": &settings.default_model,
-            "messages": [
-                {"role": "user", "content": "Reply with OK."}
-            ],
-            "temperature": 0,
-            "max_tokens": 8
-        }))
+        .json(&request_body)
         .send()
         .await
         .map_err(|error| {
@@ -5203,6 +5197,21 @@ async fn test_provider_chat_completion(
         endpoint: Some(endpoint),
         message: format!("Live provider test succeeded using {source} credentials."),
     })
+}
+
+fn provider_test_chat_completion_body(provider: &str, model: &str) -> Value {
+    let mut body = json!({
+        "model": model,
+        "messages": [
+            {"role": "user", "content": "Reply with OK."}
+        ],
+        "temperature": 0,
+        "max_tokens": 32
+    });
+    if normalize_provider(provider) == "deepseek" {
+        body["thinking"] = json!({"type": "disabled"});
+    }
+    body
 }
 
 fn provider_chat_completions_endpoint(base_url: &str) -> String {
@@ -7888,6 +7897,19 @@ mod tests {
             ),
             "https://api.deepseek.com/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn provider_test_body_disables_deepseek_thinking_for_short_probe() {
+        let deepseek = provider_test_chat_completion_body("deepseek", "deepseek-v4-flash");
+        assert_eq!(deepseek["model"], "deepseek-v4-flash");
+        assert_eq!(deepseek["max_tokens"], 32);
+        assert_eq!(deepseek["thinking"]["type"], "disabled");
+
+        let generic =
+            provider_test_chat_completion_body("openai-compatible", "gpt-compatible-test");
+        assert_eq!(generic["model"], "gpt-compatible-test");
+        assert!(generic.get("thinking").is_none());
     }
 
     #[tokio::test]
