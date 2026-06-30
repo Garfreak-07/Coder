@@ -65,6 +65,9 @@
 - [x] `cargo clippy --workspace --all-targets -- -D warnings`
 - [x] `frontend: npm.cmd ci`
 - [x] `powershell -ExecutionPolicy Bypass -File .\scripts\smoke-rust-v3.ps1 -Store .tmp\smoke-rust-v3`
+- [x] `powershell -ExecutionPolicy Bypass -File .\scripts\live-llm-smoke.ps1 -SkipIfMissingProvider`
+  is opt-in through `CODER_LIVE_LLM_SMOKE=1`; without live credentials it
+  reports `skipped` and does not call a paid provider.
 - [x] Local Planner loop API smoke against `coder-rust server`: Planner Chat,
   Start Work, run events, and report preview plan-context check.
 - [x] `powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -DryRun`

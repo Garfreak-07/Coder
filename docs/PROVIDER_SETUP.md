@@ -88,13 +88,17 @@ Planner path can call a real OpenAI-compatible provider without making CI
 depend on paid credentials:
 
 ```powershell
+$env:CODER_LIVE_LLM_SMOKE="1"
 powershell -ExecutionPolicy Bypass -File .\scripts\live-llm-smoke.ps1 -SkipIfMissingProvider
 ```
 
 The script starts a temporary Rust API v3 server, configures Provider Settings
 in server memory, sends two Planner Chat turns, verifies chat turns do not
 start execution, and calls Start Work. It returns `skipped` when no provider key
-is available and `-SkipIfMissingProvider` is set.
+is available and `-SkipIfMissingProvider` is set. Without
+`CODER_LIVE_LLM_SMOKE=1`, it also returns `skipped` with
+`-SkipIfMissingProvider` so ordinary CI cannot accidentally call a paid
+provider.
 
 For DeepSeek, set one of these first:
 

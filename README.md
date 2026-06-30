@@ -144,6 +144,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\smoke-rust-v3.ps1 -Store .tmp
 Optional live LLM smoke, skipped when no provider key is configured:
 
 ```powershell
+$env:CODER_LIVE_LLM_SMOKE="1"
 powershell -ExecutionPolicy Bypass -File .\scripts\live-llm-smoke.ps1 -SkipIfMissingProvider
 ```
 

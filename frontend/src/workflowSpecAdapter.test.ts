@@ -650,6 +650,8 @@ test("Review and Undo docs cover binary and untracked file handling", () => {
 test("Provider Settings exposes DeepSeek preset and exact test result UI", () => {
   const panelSource = readFileSync("src/components/ProviderSettingsPanel.tsx", "utf8");
   const hookSource = readFileSync("src/hooks/useProviderSettings.ts", "utf8");
+  const liveSmokeScript = readFileSync("../scripts/live-llm-smoke.ps1", "utf8");
+  const providerDocs = readFileSync("../docs/PROVIDER_SETUP.md", "utf8");
 
   assert.ok(panelSource.includes("DeepSeek preset"));
   assert.ok(panelSource.includes("Test Provider"));
@@ -670,6 +672,12 @@ test("Provider Settings exposes DeepSeek preset and exact test result UI", () =>
   assert.ok(hookSource.includes("api_keys: { [provider]: null }"));
   assert.ok(hookSource.includes("mock_mode: false"));
   assert.ok(readFileSync("src/App.tsx", "utf8").includes("showMockMode={debugUiEnabled}"));
+  assert.ok(liveSmokeScript.includes("CODER_LIVE_LLM_SMOKE"));
+  assert.ok(liveSmokeScript.includes("should_start_workflow"));
+  assert.ok(liveSmokeScript.includes("Start Work returned neither a run_id nor a Planner clarification."));
+  assert.ok(providerDocs.includes("$env:CODER_LIVE_LLM_SMOKE=\"1\""));
+  assert.ok(providerDocs.includes("does not write plaintext"));
+  assert.ok(providerDocs.includes("or print them"));
 });
 
 test("Planner Chat shows provider setup before chat when credentials are missing", () => {

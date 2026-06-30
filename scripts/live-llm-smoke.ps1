@@ -14,6 +14,19 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 Set-Location -LiteralPath $repoRoot
 
+$liveSmokeFlag = [Environment]::GetEnvironmentVariable("CODER_LIVE_LLM_SMOKE", "Process")
+if ($liveSmokeFlag -ne "1") {
+  $reason = "Set CODER_LIVE_LLM_SMOKE=1 to run the live provider smoke."
+  if ($SkipIfMissingProvider) {
+    [pscustomobject]@{
+      status = "skipped"
+      reason = $reason
+    } | ConvertTo-Json -Depth 4
+    exit 0
+  }
+  throw $reason
+}
+
 function Get-FirstEnvValue {
   param([string[]]$Names)
   foreach ($name in $Names) {
