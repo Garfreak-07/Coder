@@ -3111,6 +3111,28 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| event.kind == "executor.completed"));
+        for event in events.iter().filter(|event| {
+            matches!(
+                event.kind.as_str(),
+                "executor.reasoning_summary"
+                    | "executor.action_selected"
+                    | "tool.started"
+                    | "tool.completed"
+                    | "observation.recorded"
+                    | "executor.next_step"
+                    | "executor.completed"
+                    | "executor.blocked"
+                    | "executor.failed"
+            )
+        }) {
+            assert_eq!(event.payload["run_id"], output.run_id.as_str());
+            assert_eq!(event.payload["workflow_id"], "planner-led");
+            assert_eq!(event.payload["node_id"], "review");
+            assert_eq!(event.payload["agent_id"], "executor");
+            assert_eq!(event.payload["harness_id"], "review-only");
+            assert_eq!(event.payload["backend"], "native-rust");
+            assert!(event.payload["step"].as_u64().is_some());
+        }
         assert!(output
             .report
             .evidence_refs
