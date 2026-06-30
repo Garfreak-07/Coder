@@ -169,6 +169,9 @@ POSIX installer dry-run:
 bash ./scripts/install.sh --dry-run
 ```
 
+The full v1 release validation checklist is
+[`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md).
+
 The Rust CLI/distribution baseline is documented in
 [`docs/distribution.md`](docs/distribution.md).
 
