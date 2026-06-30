@@ -5552,7 +5552,7 @@ fn is_planner_model_config_error(error: &str) -> bool {
 
 fn planner_system_prompt(runtime: &PlannerRuntimeContext) -> String {
     format!(
-        "{}\n\nRuntime boundary:\n- workflow_id: {}\n- workflow_name: {}\n- node_id: {}\n- agent_id: {}\n- harness_id: {}\n- tools: {}\n- side effects: denied\n\nDiscuss, clarify, remember only through explicit proposals, draft concise plans, and never claim execution happened in Discuss mode.",
+        "{}\n\nRuntime boundary:\n- workflow_id: {}\n- workflow_name: {}\n- node_id: {}\n- agent_id: {}\n- harness_id: {}\n- tools: {}\n- side effects: denied\n\nChat, clarify, remember only through explicit proposals, draft concise plans, and never claim execution happened during Planner Chat.",
         runtime.agent.system,
         runtime.workflow_id,
         runtime.workflow_name,
@@ -6558,7 +6558,7 @@ mod tests {
         let turn_body = response_json(turn_response).await;
         assert_ne!(
             turn_body["assistant_message"],
-            "Discuss mode recorded the turn without starting execution."
+            "Planner Chat recorded the turn without starting execution."
         );
         assert_eq!(turn_body["ready"], false);
         assert_eq!(turn_body["readiness"], "needs_clarification");
@@ -7072,7 +7072,7 @@ mod tests {
                     "key": "rust-api",
                     "content": "Rust API v3 is the primary product path.",
                     "tags": ["rust"],
-                    "evidence_refs": [{"kind": "doc", "reference": "docs/rust-migration-map.md"}],
+                    "evidence_refs": [{"kind": "doc", "reference": "docs/current-feature-inventory.md"}],
                     "source_ref": "memory://project/rust-api"
                 }
             }),

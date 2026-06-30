@@ -1390,7 +1390,7 @@ mod tests {
                   "key": "architecture",
                   "content": "Rust owns the control plane.",
                   "tags": ["rust"],
-                  "evidence_refs": [{"kind": "doc", "reference": "docs/rust-migration-map.md"}],
+                  "evidence_refs": [{"kind": "doc", "reference": "docs/current-feature-inventory.md"}],
                   "source_ref": "memory://project/architecture"
                 }
               ]
@@ -1750,7 +1750,7 @@ mod tests {
             tags: vec!["rust".to_owned()],
             evidence_refs: vec![EvidenceRef {
                 kind: "doc".to_owned(),
-                reference: "docs/rust-migration-map.md".to_owned(),
+                reference: "docs/current-feature-inventory.md".to_owned(),
             }],
             source_ref: Some("memory://project/architecture".to_owned()),
             trust_level: "local".to_owned(),

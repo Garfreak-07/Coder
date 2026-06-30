@@ -42,12 +42,9 @@ Primary Rust API groups:
 
 ## Historical Note
 
-The previous Python/FastAPI v2 compatibility implementation was removed from
-current `main`. It remains available in git history at tag
-`pre-rust-only-legacy-v2`.
-
-Current `main` does not maintain a Python/FastAPI v2 package, CI job, or
-frontend API selector.
+The removed pre-Rust compatibility implementation is available only in git
+history at tag `pre-rust-only-legacy-v2`. Current `main` does not maintain a
+Python package, compatibility CI job, or frontend API selector for that path.
 
 ## Mock And Development Surfaces
 

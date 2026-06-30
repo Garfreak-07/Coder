@@ -16,6 +16,18 @@ function assertMissing(relativePath, label) {
   }
 }
 
+function assertContains(relativePath, pattern, label) {
+  const absolute = rel(relativePath);
+  if (!fs.existsSync(absolute)) {
+    failures.push(`${label} file is missing: ${relativePath}`);
+    return;
+  }
+  const text = fs.readFileSync(absolute, "utf8");
+  if (!text.includes(pattern)) {
+    failures.push(`${label} must include ${JSON.stringify(pattern)}`);
+  }
+}
+
 function walkFiles(directory) {
   if (!fs.existsSync(directory)) return [];
   const entries = fs.readdirSync(directory, { withFileTypes: true });
@@ -45,6 +57,7 @@ function assertNoPatterns(files, patterns) {
 }
 
 assertMissing(["legacy", "python"].join("-"), "Removed compatibility implementation");
+assertMissing(path.join("docs", "legacy-python.md"), "Removed legacy documentation page");
 assertMissing("pyproject.toml", "Root Python package metadata");
 
 assertNoPatterns(walkFiles(rel("frontend")), [
@@ -55,6 +68,30 @@ assertNoPatterns(walkFiles(rel("frontend")), [
   "api_" + "version=v2",
   "rust_" + "api"
 ]);
+
+assertNoPatterns([
+  rel("frontend", "src", "App.tsx"),
+  rel("frontend", "src", "components", "AppSidebar.tsx"),
+  rel("frontend", "src", "features", "planner-chat", "PlannerChatPage.tsx")
+], [
+  "Draft Plan",
+  "plannerDraft",
+  "Ready card",
+  "Discuss/Work",
+  "Discuss mode",
+  "Work mode"
+]);
+
+assertContains(
+  path.join("frontend", "src", "App.tsx"),
+  "showExtensions={debugUiEnabled}",
+  "Plugins and Skills main navigation guard"
+);
+assertContains(
+  path.join("frontend", "src", "App.tsx"),
+  'activeSection === "extensions" && debugUiEnabled',
+  "Plugins and Skills route guard"
+);
 
 assertNoPatterns([rel(".github", "workflows", "ci.yml")], [
   "Legacy " + "Python compatibility",

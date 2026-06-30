@@ -8,9 +8,8 @@ server, the React Planner UI, Provider Settings, Rust workflow/agent/harness
 execution, run evidence, reports, memory/knowledge/RAG baselines, MCP
 baselines, release tooling, and installer tooling.
 
-The previous Python/FastAPI v2 compatibility implementation was removed from
-`main` after the Rust-only migration. It remains available in git history at
-tag `pre-rust-only-legacy-v2`.
+The removed pre-Rust compatibility implementation remains available only in git
+history at tag `pre-rust-only-legacy-v2`.
 
 ## Product Path
 
@@ -240,17 +239,6 @@ SDK-style OpenHands servers.
 - Keep the Advanced React workflow canvas, user-defined agents, workflows, harnesses,
   provider settings, evidence/report systems, memory/knowledge/RAG baselines,
   MCP baselines, release tooling, and installer tooling.
-
-## Historical v2 Path
-
-Users who need the removed Python/FastAPI v2 compatibility implementation can
-check out:
-
-```powershell
-git checkout pre-rust-only-legacy-v2
-```
-
-That tag points to the final pre-Rust-only compatibility state.
 
 ## Secrets
 
