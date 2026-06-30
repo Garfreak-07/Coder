@@ -969,6 +969,7 @@ export interface ChangeSet {
   evidence_refs: RustEvidenceRef[];
   after_diff: string;
   diff_truncated: boolean;
+  undo_conflict?: string | null;
 }
 
 export interface RunChangeSetListResponse {

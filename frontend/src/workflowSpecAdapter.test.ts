@@ -543,7 +543,8 @@ test("Review Changes stays hidden without changes and shows undo conflicts", () 
         command_checks: [],
         evidence_refs: [],
         after_diff: "diff --git a/tracked.txt b/tracked.txt",
-        diff_truncated: false
+        diff_truncated: false,
+        undo_conflict: "Undo refused because diff content changed for: tracked.txt."
       }
     ],
     diffByChangeSetId: {},
@@ -555,8 +556,16 @@ test("Review Changes stays hidden without changes and shows undo conflicts", () 
   const text = collectReactTreeText(conflicted);
 
   assert.ok(text.includes("Review changes"));
-  assert.ok(text.includes("Undo blocked because the working tree changed"));
+  assert.ok(text.includes("diff content changed for: tracked.txt"));
   assert.ok(text.includes("tracked.txt"));
+});
+
+test("Review and Undo docs cover binary and untracked file handling", () => {
+  const docs = readFileSync("../docs/REVIEW_AND_UNDO.md", "utf8");
+
+  assert.ok(docs.includes("Binary changes"));
+  assert.ok(docs.includes("Untracked files"));
+  assert.ok(docs.includes("git reset --hard"));
 });
 
 test("Provider Settings exposes DeepSeek preset and exact test result UI", () => {

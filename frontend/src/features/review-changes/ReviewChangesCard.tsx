@@ -64,7 +64,8 @@ export function ReviewChangesCard({
             {diff && <pre className="review-diff">{diff}</pre>}
             {undoConflict && (
               <p className="review-conflict">
-                Undo blocked because the working tree changed after this review was recorded.
+                {changeSet.undo_conflict ??
+                  "Undo blocked because the working tree changed after this review was recorded."}
               </p>
             )}
             <div className="review-actions">

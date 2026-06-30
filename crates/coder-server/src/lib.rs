@@ -2549,18 +2549,18 @@ async fn undo_change_set(
     )?;
     let current_diff = git_diff(&change_set.repo_root, usize::MAX)?.preview;
     if current_diff != change_set.after_diff {
+        let conflict_reason = undo_conflict_summary(&change_set.after_diff, &current_diff);
         change_set.status = ChangeSetStatus::FailedToUndo;
+        change_set.undo_conflict = Some(conflict_reason.clone());
         write_change_set(&state.store, &run_id, &change_set)?;
         append_change_set_event(
             &state.store,
             &run_id,
             "changeset.undo.failed",
             &change_set.change_set_id,
-            json!({"reason": "current diff differs from recorded review diff"}),
+            json!({"reason": conflict_reason}),
         )?;
-        return Err(ApiError::conflict(
-            "current working tree diff differs from the recorded change set; refusing to undo",
-        ));
+        return Err(ApiError::conflict(conflict_reason));
     }
     apply_reverse_diff(&change_set.repo_root, &change_set.after_diff)?;
     change_set.status = ChangeSetStatus::Undone;
@@ -3801,6 +3801,8 @@ pub struct ChangeSet {
     pub evidence_refs: Vec<coder_core::EvidenceRef>,
     pub after_diff: String,
     pub diff_truncated: bool,
+    #[serde(default)]
+    pub undo_conflict: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -4388,6 +4390,7 @@ fn build_current_change_set(
         evidence_refs: report.evidence_refs,
         after_diff: diff.preview,
         diff_truncated: diff.truncated,
+        undo_conflict: None,
     };
     write_change_set(store, run_id, &change_set)?;
     Ok(Some(change_set))
@@ -4405,6 +4408,67 @@ fn current_change_set(store: &RunStore, run_id: &RunId) -> Result<Option<ChangeS
         return Ok(Some(stored));
     }
     build_current_change_set(store, run_id)
+}
+
+fn undo_conflict_summary(recorded_diff: &str, current_diff: &str) -> String {
+    let recorded_files = diff_file_set(recorded_diff);
+    let current_files = diff_file_set(current_diff);
+    let added = current_files
+        .difference(&recorded_files)
+        .cloned()
+        .collect::<Vec<_>>();
+    let removed = recorded_files
+        .difference(&current_files)
+        .cloned()
+        .collect::<Vec<_>>();
+    let common = recorded_files
+        .intersection(&current_files)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut details = Vec::new();
+    if !added.is_empty() {
+        details.push(format!(
+            "new current diff file(s): {}",
+            format_file_set(&added)
+        ));
+    }
+    if !removed.is_empty() {
+        details.push(format!(
+            "recorded diff file(s) no longer present: {}",
+            format_file_set(&removed)
+        ));
+    }
+    if details.is_empty() {
+        if !common.is_empty() {
+            details.push(format!(
+                "diff content changed for: {}",
+                format_file_set(&common)
+            ));
+        } else if current_diff.trim().is_empty() {
+            details.push("current diff is empty".to_owned());
+        } else {
+            details.push("current diff changed shape".to_owned());
+        }
+    }
+    format!(
+        "Undo refused because current working-tree diff differs from the recorded review diff; {}.",
+        details.join("; ")
+    )
+}
+
+fn diff_file_set(diff: &str) -> BTreeSet<String> {
+    changed_files_from_diff(diff)
+        .into_iter()
+        .map(|file| file.path)
+        .collect()
+}
+
+fn format_file_set(files: &[String]) -> String {
+    let mut preview = files.iter().take(6).cloned().collect::<Vec<_>>();
+    if files.len() > 6 {
+        preview.push(format!("+{} more", files.len() - 6));
+    }
+    preview.join(", ")
 }
 
 fn read_stored_change_set(
@@ -4566,9 +4630,12 @@ fn changed_files_from_payload(payload: &Value) -> Vec<ChangedFileSummary> {
 fn changed_files_from_diff(diff: &str) -> Vec<ChangedFileSummary> {
     let mut files = Vec::new();
     for line in diff.lines() {
-        let Some(path) = line.strip_prefix("+++ b/") else {
-            continue;
-        };
+        let path = line.strip_prefix("+++ b/").or_else(|| {
+            line.strip_prefix("diff --git ")
+                .and_then(|rest| rest.split_whitespace().nth(1))
+                .and_then(|path| path.strip_prefix("b/"))
+        });
+        let Some(path) = path else { continue };
         if path == "/dev/null" {
             continue;
         }
@@ -8935,6 +9002,12 @@ diff --git a/tracked.txt b/tracked.txt
         assert_eq!(accepted_list_response.status(), StatusCode::OK);
         let accepted_list = response_json(accepted_list_response).await;
         assert_eq!(accepted_list["changes"][0]["status"], "accepted");
+        assert_eq!(
+            fs::read_to_string(repo.join("tracked.txt"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "changed\n"
+        );
 
         let undo_response = app
             .clone()
@@ -8967,6 +9040,52 @@ diff --git a/tracked.txt b/tracked.txt
         assert_eq!(undone_list_response.status(), StatusCode::OK);
         let undone_list = response_json(undone_list_response).await;
         assert_eq!(undone_list["changes"].as_array().unwrap().len(), 0);
+        let _ = fs::remove_dir_all(repo);
+        let _ = fs::remove_dir_all(store_root);
+    }
+
+    #[tokio::test]
+    async fn changeset_list_is_empty_without_working_tree_changes() {
+        let repo = temp_root();
+        let store_root = temp_root();
+        fs::create_dir_all(&repo).unwrap();
+        fs::write(repo.join("tracked.txt"), "base\n").unwrap();
+        run_git(&repo, &["init"]);
+        run_git(&repo, &["config", "user.email", "coder@example.test"]);
+        run_git(&repo, &["config", "user.name", "Coder Test"]);
+        run_git(&repo, &["add", "tracked.txt"]);
+        run_git(&repo, &["commit", "-m", "base"]);
+
+        let store = RunStore::new(&store_root);
+        let run_id = RunId::from_string("run-1");
+        store
+            .append_event(
+                &run_id,
+                &coder_events::CoderEvent::new(
+                    run_id.clone(),
+                    1,
+                    "run.started",
+                    json!({"repo_root": repo.display().to_string(), "task": "inspect only"}),
+                ),
+            )
+            .unwrap();
+        store
+            .write_report(&run_id, &FinalReport::completed("No changes"))
+            .unwrap();
+        let app = router(ApiState::new(store));
+
+        let list_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v3/runs/run-1/changes")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body = response_json(list_response).await;
+        assert_eq!(list_body["changes"].as_array().unwrap().len(), 0);
         let _ = fs::remove_dir_all(repo);
         let _ = fs::remove_dir_all(store_root);
     }
@@ -9034,6 +9153,12 @@ diff --git a/tracked.txt b/tracked.txt
             .await
             .unwrap();
         assert_eq!(undo_response.status(), StatusCode::CONFLICT);
+        let undo_body = response_json(undo_response).await;
+        assert!(undo_body["error"].as_str().unwrap().contains("tracked.txt"));
+        assert!(undo_body["error"]
+            .as_str()
+            .unwrap()
+            .contains("diff content changed"));
         assert_eq!(
             fs::read_to_string(repo.join("tracked.txt"))
                 .unwrap()
@@ -9054,6 +9179,10 @@ diff --git a/tracked.txt b/tracked.txt
         assert_eq!(conflict_list_response.status(), StatusCode::OK);
         let conflict_list = response_json(conflict_list_response).await;
         assert_eq!(conflict_list["changes"][0]["status"], "failed_to_undo");
+        assert!(conflict_list["changes"][0]["undo_conflict"]
+            .as_str()
+            .unwrap()
+            .contains("tracked.txt"));
         let _ = fs::remove_dir_all(repo);
         let _ = fs::remove_dir_all(store_root);
     }
