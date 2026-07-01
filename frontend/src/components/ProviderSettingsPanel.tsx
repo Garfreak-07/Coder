@@ -141,22 +141,10 @@ export function ProviderSettingsPanel({
 
       <div className="settings-section">
         <div className="panel-subtitle">Execution Backend / OpenHands</div>
-        <label className="checkbox-row">
-          <input
-            type="checkbox"
-            checked={openHandsForm.enabled}
-            onChange={(event) => onOpenHandsChange({ enabled: event.target.checked })}
-          />
-          OpenHands enabled
-        </label>
-        <label className="checkbox-row">
-          <input
-            type="checkbox"
-            checked={openHandsForm.allow_native_fallback}
-            onChange={(event) => onOpenHandsChange({ allow_native_fallback: event.target.checked })}
-          />
-          Allow native fallback when OpenHands is unavailable
-        </label>
+        <p className="muted">
+          OpenHands is the required execution backend for Start Work. If it is unavailable, Planner will block and
+          explain what needs to be fixed.
+        </p>
         <label>
           Server URL
           <input
@@ -192,8 +180,7 @@ export function ProviderSettingsPanel({
         {openHandsStatus && (
           <div className={`provider-test-result openhands-status-${openHandsStatus.status}`}>
             <strong>OpenHands {openHandsStatus.status}</strong>
-            <span>{openHandsStatus.enabled ? "enabled" : "disabled"}</span>
-            <span>{openHandsStatus.allow_native_fallback ? "native fallback allowed" : "native fallback off"}</span>
+            <span>required executor</span>
             <span>{openHandsStatus.credential_source}</span>
             <span>{openHandsStatus.server_url}</span>
             <span>Workspace: {openHandsStatus.workspace_mode}</span>

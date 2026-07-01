@@ -89,8 +89,8 @@ the payload carries `workflow_id`, `node_id`, `agent_id`, `harness_id`,
 `backend`, `step`, `summary`, status, action/tool names when applicable, and
 evidence refs when available.
 
-OpenHands remains the preferred backend for full coding-agent tool loops.
-Native Rust events are limited deterministic fallback for tests, local smoke
-checks, or explicit user-enabled fallback. If OpenHands is unavailable and
-fallback is not enabled, the timeline must show `Executor backend: blocked -
-OpenHands not reachable` rather than silently switching runtimes.
+OpenHands is the required backend for full coding-agent Start Work tool loops.
+Native Rust events are limited deterministic scaffolding for tests and local
+smoke checks. If OpenHands is unavailable, the timeline must show `Executor
+backend: blocked - OpenHands not reachable` rather than silently switching
+runtimes.

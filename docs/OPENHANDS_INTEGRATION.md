@@ -1,8 +1,7 @@
 # OpenHands Integration
 
-OpenHands is the preferred backend for full executor tool loops when an
-OpenHands harness is configured. Coder owns the workflow boundary around that
-backend:
+OpenHands is the required backend for Start Work executor tool loops in the
+default product workflow. Coder owns the workflow boundary around that backend:
 
 - build the OpenHands conversation payload from Coder workflow, agent, harness,
   model, permission, memory, verification, and plan context
@@ -31,11 +30,14 @@ GET  /api/v3/openhands/status
 
 Settings include:
 
-- `enabled`
 - `server_url`, defaulting to `http://127.0.0.1:8000`
 - masked `session_api_key`
 - `workspace_mode`, currently `local` or `ephemeral`
-- `allow_native_fallback`, defaulting to `false`
+
+OpenHands is always enabled for Start Work. The settings API keeps legacy
+`enabled` and `allow_native_fallback` fields for response compatibility, but
+the server forces `enabled=true` and `allow_native_fallback=false`. Normal users
+should not see controls that disable OpenHands or route work to native fallback.
 
 The session key is stored only in the Rust server's in-memory settings or read
 from `OPENHANDS_SESSION_API_KEY` as a headless fallback. Settings responses
@@ -48,10 +50,10 @@ system proxy.
 
 When an `openhands` executor harness runs, Coder emits a public
 `backend.selected` event before execution. If OpenHands is not reachable, Coder
-emits `backend.blocked`. Native Rust fallback is only used when
-`allow_native_fallback` is explicitly enabled; otherwise the run remains
-blocked and the timeline shows `Executor backend: blocked - OpenHands not
-reachable`.
+emits `backend.blocked`. Native Rust fallback is not used for product Start
+Work. The run remains blocked, the timeline shows `Executor backend: blocked -
+OpenHands not reachable`, and Planner/Start Work returns a user-facing message
+that OpenHands is required and what should be checked.
 
 ## Raw Events
 
@@ -65,7 +67,7 @@ the normal chat and timeline UI while still preserving replay/debug evidence.
 ## Public ReAct Events
 
 `OpenHandsHarnessBackend` maps raw events into the same public executor event
-contract used by the native fallback:
+contract used by deterministic executor tests:
 
 - `executor.reasoning_summary`
 - `executor.action_selected`
@@ -96,7 +98,8 @@ OpenHands file or patch-shaped events emit `patch.applied` with a sanitized
 Backend selection events are projected as public `executor_step` items:
 
 - `Executor backend: OpenHands`
-- `Executor backend: native fallback`
+- `Executor backend: native fallback` for legacy/test-only traces, not product
+  Start Work
 - `Executor backend: blocked - OpenHands not reachable`
 
 ## Test Boundary

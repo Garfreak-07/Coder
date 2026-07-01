@@ -18,8 +18,9 @@ The desktop app should keep the existing product architecture:
   directory.
 - Provider API keys move from the current in-memory development store to OS
   keychain or an equivalent local secret store before public desktop release.
-- OpenHands remains optional and is configured as a local or remote executor
-  connection, not bundled as a required dependency.
+- OpenHands remains the required Start Work executor. Desktop may connect to an
+  already-running local or remote OpenHands Agent Server first, then later add a
+  managed helper that launches it for the user.
 
 Normal users should not run `cargo`, run `npm`, or set environment variables.
 Opening the desktop app should start the Rust runtime automatically, load the
@@ -29,7 +30,7 @@ React UI, and keep the same core flow:
 Provider Settings
 -> LLM-backed Planner Chat
 -> Start Work
--> Executor ReAct loop through harness/OpenHands or native fallback
+-> Executor ReAct loop through OpenHands
 -> Work Timeline
 -> Review Changes / Undo
 -> Final Summary
@@ -81,15 +82,14 @@ commands when there is a clear reliability or packaging benefit.
 
 Desktop should expose the same OpenHands boundary as the web app:
 
-- No OpenHands configured: use native Rust fallback only for deterministic
-  plumbing and local smoke workflows.
 - External OpenHands server: connect to a user-provided local or remote URL.
-- Later managed OpenHands helper: optionally launch or discover a local
-  OpenHands service, but only after the external-server path is stable.
+- Later managed OpenHands helper: launch or discover a local OpenHands service
+  automatically, but only after the external-server path is stable.
 
-OpenHands should remain optional. Desktop packaging must not make live
-OpenHands, provider credentials, GPU support, or network access a normal CI
-requirement.
+OpenHands should not look optional in the product UI. CI can still use fake
+OpenHands event shapes and native Rust scaffolding for deterministic plumbing,
+but product Start Work must block with a clear message when OpenHands is not
+reachable.
 
 ## Local Data
 
@@ -169,7 +169,7 @@ In scope for the first desktop path:
 
 - start and stop local Rust runtime automatically
 - load bundled React assets
-- configure provider and optional OpenHands connection
+- configure provider and OpenHands connection
 - store Planner sessions and runs under `.coder/`
 - preserve current localhost web dev mode
 
@@ -182,9 +182,9 @@ Out of scope for the first desktop path:
 - requiring GPU or local model acceleration
 - changing the Planner-led product flow
 - making desktop packaging the only supported development workflow
-- bundling a live OpenHands runtime as a required dependency
+- silently replacing OpenHands with native fallback for product Start Work
 - storing plaintext provider keys in app config, `.coder/`, logs, or reports
 
 Mock workflows and native fallback are useful for deterministic plumbing tests.
-Desktop product confidence still requires the optional live LLM smoke path when
-provider credentials are available.
+Desktop product confidence still requires live LLM and OpenHands smoke paths
+when provider credentials and an OpenHands Agent Server are available.

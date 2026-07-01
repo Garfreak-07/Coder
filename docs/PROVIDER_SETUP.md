@@ -67,10 +67,10 @@ before public desktop release.
   `https://api.deepseek.com`. If this machine uses the local proxy, set
   Provider Proxy URL to `http://127.0.0.1:7890`.
 - OpenHands unavailable vs Planner provider unavailable: OpenHands is the
-  optional coding-agent executor backend. Planner provider errors mean the chat
-  model itself is not configured or reachable. Fix Provider Settings first when
-  Planner Chat cannot answer; fix OpenHands settings only when Start Work needs
-  an OpenHands executor and that backend is unavailable.
+  required coding-agent executor backend for Start Work. Planner provider errors
+  mean the chat model itself is not configured or reachable. Fix Provider
+  Settings first when Planner Chat cannot answer; fix OpenHands settings when
+  Start Work reports that the required OpenHands executor is unavailable.
 
 OpenHands is configured from the same Settings page in the
 `Execution Backend / OpenHands` section. The OpenHands token is masked and is

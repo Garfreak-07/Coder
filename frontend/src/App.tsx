@@ -680,7 +680,7 @@ export function App() {
       if (response.run_id) {
         setActiveRunId(response.run_id);
         await openStoredRun(response.run_id);
-        setStatus(`Work ${response.status}.`);
+        setStatus(response.assistant_message ?? `Work ${response.status}.`);
         refreshRuntimeInfo();
       } else {
         setStatus(response.assistant_message ?? "Planner needs more information.");

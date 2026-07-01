@@ -74,11 +74,12 @@ export function PlannerChatPage({
 }: PlannerChatPageProps) {
   const inputDisabled = runLoading || providerSetupRequired;
   const canSend = request.trim().length > 0 && !inputDisabled;
+  const plannerTaskState = plannerSession?.task_state ?? null;
   const canStartWork =
     Boolean(plannerSession) &&
     !runLoading &&
     !providerSetupRequired &&
-    plannerSession?.task_state.readiness === "ready_to_execute" &&
+    plannerTaskState?.readiness === "ready_to_execute" &&
     !activeRunId;
   const sessionMessages = plannerSession?.messages ?? [];
   const hasSessionMessages = sessionMessages.length > 0;

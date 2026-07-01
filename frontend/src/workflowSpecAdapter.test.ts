@@ -334,6 +334,20 @@ test("Planner Chat shell exposes polished empty, loading, and Start Work states"
   assert.ok(loadingClasses.includes("chat-loading-row"));
 });
 
+test("Planner Chat renders legacy sessions without task state", () => {
+  const legacySession = {
+    ...plannerSessionFixture(),
+    task_state: undefined
+  } as unknown as PlannerChatSession;
+  const tree = renderPlannerChat(legacySession);
+  const text = collectReactTreeText(tree);
+  const classNames = collectReactTreeClassNames(tree);
+
+  assert.ok(text.includes("Please plan the change."));
+  assert.ok(text.includes("The plan is ready."));
+  assert.ok(!classNames.includes("start-work-action primary-action"));
+});
+
 test("Planner Chat composer disables input only while a request is in flight", () => {
   const idleTree = renderPlannerChat(null, { request: "hello", runLoading: false });
   const busyTree = renderPlannerChat(null, { request: "hello", runLoading: true });
@@ -792,9 +806,11 @@ test("Provider Settings exposes DeepSeek preset and exact test result UI", () =>
   assert.ok(panelSource.includes("openai-compatible"));
   assert.ok(panelSource.includes("custom"));
   assert.ok(panelSource.includes("Execution Backend / OpenHands"));
-  assert.ok(panelSource.includes("OpenHands enabled"));
-  assert.ok(panelSource.includes("Allow native fallback when OpenHands is unavailable"));
-  assert.ok(panelSource.includes("native fallback allowed"));
+  assert.ok(panelSource.includes("OpenHands is the required execution backend"));
+  assert.ok(panelSource.includes("required executor"));
+  assert.ok(!panelSource.includes("OpenHands enabled"));
+  assert.ok(!panelSource.includes("Allow native fallback when OpenHands is unavailable"));
+  assert.ok(!panelSource.includes("native fallback allowed"));
   assert.ok(panelSource.includes("Session API key / token"));
   assert.ok(panelSource.includes("Workspace mode"));
   assert.ok(panelSource.includes("Test OpenHands"));
@@ -810,7 +826,7 @@ test("Provider Settings exposes DeepSeek preset and exact test result UI", () =>
   assert.ok(hookSource.includes("Saving provider ${provider} before test"));
   assert.ok(openHandsHookSource.includes("http://127.0.0.1:8000"));
   assert.ok(openHandsHookSource.includes("allow_native_fallback: false"));
-  assert.ok(openHandsHookSource.includes("allow_native_fallback: form.allow_native_fallback"));
+  assert.ok(!openHandsHookSource.includes("allow_native_fallback: form.allow_native_fallback"));
   assert.ok(openHandsHookSource.includes("session_api_key: null"));
   assert.ok(apiSource.includes("/api/v3/openhands/settings"));
   assert.ok(apiSource.includes("/api/v3/openhands/status"));

@@ -177,16 +177,19 @@ secrets_check: passed
 Latest local full path live result:
 
 ```text
-timestamp: 2026-07-01 23:27:48 +08:00
+timestamp: 2026-07-02 00:52:20 +08:00
 server_url: http://127.0.0.1:8000
 provider: deepseek
 model: deepseek-v4-flash
-session_id: pcs_c7bc9624-ea17-4bd1-8c0b-c8c280a4d445
-run_id: b4a4b08a-eea9-4409-9e9f-4604add1266f
+openhands_status: connected
+session_id: pcs_e10d554e-90b8-4aed-8805-894bf31af9df
+run_id: 657c6116-758b-4859-9ea7-2fcfd673a4a3
 status: ok
 start_work_status: completed
-timeline_items: 199
-timeline_react_items: 137
+events: 127
+timeline_items: 87
+timeline_backend_items: 1
+timeline_react_items: 58
 final_summary_items: 1
 review_changes: 1
 undo_status: undone

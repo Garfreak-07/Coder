@@ -8,7 +8,7 @@ import {
 import type { OpenHandsFormState, OpenHandsSettings, OpenHandsStatus } from "../types";
 
 export const defaultOpenHandsForm: OpenHandsFormState = {
-  enabled: false,
+  enabled: true,
   server_url: "http://127.0.0.1:8000",
   session_api_key: "",
   workspace_mode: "local",
@@ -111,10 +111,9 @@ export function useOpenHandsSettings(onStatus: (status: string) => void) {
 
 function buildOpenHandsSettingsPayload(form: OpenHandsFormState): Record<string, unknown> {
   const payload: Record<string, unknown> = {
-    enabled: form.enabled,
     server_url: form.server_url.trim() || defaultOpenHandsForm.server_url,
     workspace_mode: form.workspace_mode.trim() || defaultOpenHandsForm.workspace_mode,
-    allow_native_fallback: form.allow_native_fallback
+    allow_native_fallback: false
   };
   if (form.session_api_key.trim()) {
     payload.session_api_key = form.session_api_key.trim();

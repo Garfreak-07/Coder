@@ -26,7 +26,7 @@ use coder_config::{
     PermissionDecision as ConfigPermissionDecision, ProjectConfig, ValidationIssue,
     ValidationLevel, ValidationReport, WorkflowNodeSpec as ConfigWorkflowNodeSpec,
 };
-use coder_core::{FinalReport, RunId, RunState, RunStatus};
+use coder_core::{FinalReport, ReportStatus, RunId, RunState, RunStatus};
 use coder_extensions::{
     builtin_plugin_manifests, builtin_remote_skill_entries, discover_skills_payload,
     extension_search, installed_skills_payload, remote_skill_summary, validate_plugin_manifest,
@@ -1085,7 +1085,7 @@ async fn start_planner_chat_work(
     let mut options = WorkflowRunOptions::new(&workflow_id, &task);
     options.repo_root = PathBuf::from(&repo_root);
     options.plan_context = Some(plan_context);
-    options.allow_native_fallback_for_openhands = openhands_settings.allow_native_fallback;
+    options.allow_native_fallback_for_openhands = false;
     let runner = WorkflowRunner::new(config, state.store.clone());
     let mut output = runner.run(options).await?;
     maybe_polish_final_summary(
@@ -1099,10 +1099,11 @@ async fn start_planner_chat_work(
     )
     .await;
     let run_id = output.run_id.to_string();
+    let assistant_message = start_work_result_message(&workflow_id, &output.report);
     session.ready = false;
     session.turns.push(PlannerChatTurn {
         role: "assistant".to_owned(),
-        content: format!("Work started for workflow '{workflow_id}'."),
+        content: assistant_message.clone(),
     });
     state
         .planner_sessions
@@ -1111,7 +1112,11 @@ async fn start_planner_chat_work(
         .insert(session_id, session.clone());
     let response = PlannerStartWorkResponse {
         session: session.clone(),
-        assistant_message: None,
+        assistant_message: if output.report.status == ReportStatus::Blocked {
+            Some(assistant_message)
+        } else {
+            None
+        },
         run_id: Some(run_id.clone()),
         status: format!("{:?}", output.report.status).to_lowercase(),
         events_url: Some(format!("/api/v3/runs/{run_id}/events")),
@@ -1165,6 +1170,29 @@ async fn maybe_polish_final_summary(
     }
     report.summary = public_preview(&summary, 1200);
     let _ = state.store.write_report(run_id, report);
+}
+
+fn start_work_result_message(workflow_id: &str, report: &FinalReport) -> String {
+    if report.status != ReportStatus::Blocked {
+        return format!("Work started for workflow '{workflow_id}'.");
+    }
+    let reason = report
+        .blockers
+        .first()
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("the executor reported a blocked status");
+    let openhands_blocked = report
+        .blockers
+        .iter()
+        .chain(report.checks.iter())
+        .any(|item| item.to_ascii_lowercase().contains("openhands"));
+    if openhands_blocked {
+        return format!(
+            "Start Work is blocked because OpenHands is the required execution backend and it is not available: {reason}. Check that the OpenHands Agent Server is running, the server URL/token are correct, and local traffic bypasses the proxy with NO_PROXY=127.0.0.1,localhost,::1."
+        );
+    }
+    format!("Start Work is blocked: {reason}.")
 }
 
 fn final_summary_polish_prompt(report: &FinalReport) -> String {
@@ -2202,7 +2230,7 @@ async fn run_workflow(
         options.repo_root = PathBuf::from(repo_root);
     }
     options.plan_context = request.plan_context.clone();
-    options.allow_native_fallback_for_openhands = openhands_settings.allow_native_fallback;
+    options.allow_native_fallback_for_openhands = false;
     let runner = WorkflowRunner::new(config, state.store);
     let output = runner.run(options).await?;
     Ok(Json(MockRunResponse {
@@ -3590,10 +3618,7 @@ impl Default for OpenHandsSettings {
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false);
         Self {
-            enabled: env::var("OPENHANDS_ENABLED")
-                .ok()
-                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
-                .unwrap_or(false),
+            enabled: true,
             server_url: env::var("OPENHANDS_AGENT_SERVER_URL")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
@@ -3602,10 +3627,7 @@ impl Default for OpenHandsSettings {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "local".to_owned()),
-            allow_native_fallback: env::var("OPENHANDS_ALLOW_NATIVE_FALLBACK")
-                .ok()
-                .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
-                .unwrap_or(false),
+            allow_native_fallback: false,
             session_api_key: OpenHandsKeyState {
                 configured: env_token_configured,
                 source: if env_token_configured { "env" } else { "none" }.to_owned(),
@@ -5104,12 +5126,6 @@ fn apply_provider_settings_patch(settings: &mut ProviderSettings, patch: Provide
 }
 
 fn apply_openhands_settings_patch(settings: &mut OpenHandsSettings, patch: OpenHandsSettingsPatch) {
-    if let Some(enabled) = patch.enabled {
-        settings.enabled = enabled;
-    }
-    if let Some(allow_native_fallback) = patch.allow_native_fallback {
-        settings.allow_native_fallback = allow_native_fallback;
-    }
     if let Some(server_url) = patch.server_url {
         let server_url = server_url.trim();
         if !server_url.is_empty() {
@@ -5136,15 +5152,14 @@ fn apply_openhands_settings_patch(settings: &mut OpenHandsSettings, patch: OpenH
             }
         }
     }
+    settings.enabled = true;
+    settings.allow_native_fallback = false;
 }
 
 fn apply_openhands_settings_to_project_config(
     config: &mut ProjectConfig,
     settings: &OpenHandsSettings,
 ) {
-    if !settings.enabled {
-        return;
-    }
     let (_, _, token) = openhands_credential(settings);
     for harness in config.harnesses.values_mut() {
         if harness.backend != "openhands" {
@@ -5215,13 +5230,6 @@ async fn openhands_status_for_settings(settings: &OpenHandsSettings) -> OpenHand
         capabilities: Vec::new(),
     };
 
-    if !settings.enabled {
-        return base_status(
-            "not_configured",
-            false,
-            "OpenHands is disabled in Settings.".to_owned(),
-        );
-    }
     if settings.server_url.trim().is_empty() {
         return base_status(
             "not_configured",
@@ -8416,13 +8424,14 @@ mod tests {
             initial_body["settings"]["session_api_key"]["configured"],
             false
         );
+        assert_eq!(initial_body["settings"]["enabled"], true);
         assert_eq!(initial_body["settings"]["allow_native_fallback"], false);
 
         let save = post_json(
             app.clone(),
             "/api/v3/openhands/settings",
             json!({
-                "enabled": true,
+                "enabled": false,
                 "server_url": server_url,
                 "workspace_mode": "local",
                 "allow_native_fallback": true,
@@ -8433,14 +8442,15 @@ mod tests {
         assert_eq!(save.status(), StatusCode::OK);
         let save_body = response_json(save).await;
         assert_eq!(save_body["settings"]["enabled"], true);
-        assert_eq!(save_body["settings"]["allow_native_fallback"], true);
+        assert_eq!(save_body["settings"]["allow_native_fallback"], false);
         assert_eq!(save_body["settings"]["session_api_key"]["configured"], true);
         assert_eq!(
             save_body["settings"]["session_api_key"]["source"],
             "settings"
         );
         assert_eq!(save_body["status"]["status"], "connected");
-        assert_eq!(save_body["status"]["allow_native_fallback"], true);
+        assert_eq!(save_body["status"]["enabled"], true);
+        assert_eq!(save_body["status"]["allow_native_fallback"], false);
         assert_eq!(save_body["status"]["version"], "test-openhands");
         assert_eq!(save_body["status"]["capabilities"][0], "conversations");
         assert!(!save_body.to_string().contains("session-secret"));
