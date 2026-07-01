@@ -25,6 +25,8 @@
 - Raw run event replay is hidden behind debug UI.
 - Plugins & Skills marketplace UI is hidden from core navigation and remains a
   developer/debug surface.
+- Obsolete Python/FastAPI compatibility remnants are absent from the main path;
+  the audit is recorded in `docs/PYTHON_COMPATIBILITY_REMNANTS_AUDIT.md`.
 
 ## Still Different From Codex
 
