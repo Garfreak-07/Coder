@@ -1,7 +1,7 @@
 import type { ChangeSet } from "./changeSetTypes";
 
 interface ReviewChangesCardProps {
-  changeSets: ChangeSet[];
+  changeSets?: ChangeSet[] | null;
   diffByChangeSetId: Record<string, string>;
   loadingChangeSetId: string | null;
   onAccept: (changeSetId: string) => void;
@@ -17,16 +17,17 @@ export function ReviewChangesCard({
   onLoadDiff,
   onUndo
 }: ReviewChangesCardProps) {
-  if (changeSets.length === 0) return null;
+  const safeChangeSets = Array.isArray(changeSets) ? changeSets.filter(isChangeSet) : [];
+  if (safeChangeSets.length === 0) return null;
   return (
     <section className="review-changes-card" aria-label="Review changes">
       <div className="review-header">
         <div>
           <span>Review changes</span>
-          <strong>{changeSets.length} change set{changeSets.length === 1 ? "" : "s"}</strong>
+          <strong>{safeChangeSets.length} change set{safeChangeSets.length === 1 ? "" : "s"}</strong>
         </div>
       </div>
-      {changeSets.map((changeSet) => {
+      {safeChangeSets.map((changeSet) => {
         const diff = diffByChangeSetId[changeSet.change_set_id];
         const loading = loadingChangeSetId === changeSet.change_set_id;
         const canAccept = changeSet.status === "pending_review";
@@ -48,9 +49,9 @@ export function ReviewChangesCard({
               <span>{changeSet.repo_root}</span>
               {changeSet.reverse_patch_ref && <span>undo available</span>}
             </div>
-            {changeSet.changed_files.length > 0 && (
+            {safeArray(changeSet.changed_files).length > 0 && (
               <div className="change-file-list">
-                {changeSet.changed_files.map((file) => (
+                {safeArray(changeSet.changed_files).map((file) => (
                   <span key={file.path}>
                     {file.path}
                     <small>{file.change_type}</small>
@@ -58,9 +59,9 @@ export function ReviewChangesCard({
                 ))}
               </div>
             )}
-            {changeSet.command_checks.length > 0 && (
+            {safeArray(changeSet.command_checks).length > 0 && (
               <div className="change-check-list">
-                {changeSet.command_checks.map((check) => (
+                {safeArray(changeSet.command_checks).map((check) => (
                   <code key={check.command}>{check.command}</code>
                 ))}
               </div>
@@ -93,5 +94,17 @@ export function ReviewChangesCard({
         );
       })}
     </section>
+  );
+}
+
+function safeArray<T>(values: T[] | null | undefined): T[] {
+  return Array.isArray(values) ? values : [];
+}
+
+function isChangeSet(changeSet: unknown): changeSet is ChangeSet {
+  return Boolean(
+    changeSet &&
+      typeof changeSet === "object" &&
+      typeof (changeSet as { change_set_id?: unknown }).change_set_id === "string"
   );
 }

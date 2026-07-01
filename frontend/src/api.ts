@@ -410,12 +410,14 @@ export async function getRunEvents(runId: string, cursor = 0, limit = 200): Prom
   return rustRunEventsToRunEventsPage(payload, cursor, limit);
 }
 
-export function getRunTimeline(runId: string): Promise<RunTimelineResponse> {
-  return requestJson<RunTimelineResponse>(`/api/v3/runs/${encodeURIComponent(runId)}/timeline`);
+export async function getRunTimeline(runId: string): Promise<RunTimelineResponse> {
+  const payload = await requestJson<Partial<RunTimelineResponse>>(`/api/v3/runs/${encodeURIComponent(runId)}/timeline`);
+  return normalizeRunTimelineResponse(runId, payload);
 }
 
-export function getRunChangeSets(runId: string): Promise<RunChangeSetListResponse> {
-  return requestJson<RunChangeSetListResponse>(`/api/v3/runs/${encodeURIComponent(runId)}/changes`);
+export async function getRunChangeSets(runId: string): Promise<RunChangeSetListResponse> {
+  const payload = await requestJson<Partial<RunChangeSetListResponse>>(`/api/v3/runs/${encodeURIComponent(runId)}/changes`);
+  return normalizeRunChangeSetsResponse(runId, payload);
 }
 
 export function getChangeSetDiff(runId: string, changeSetId: string): Promise<ChangeSetDiffResponse> {
@@ -442,6 +444,26 @@ export function undoChangeSet(runId: string, changeSetId: string): Promise<Chang
       headers: jsonHeaders
     }
   );
+}
+
+export function normalizeRunTimelineResponse(
+  fallbackRunId: string,
+  payload: Partial<RunTimelineResponse> | null | undefined
+): RunTimelineResponse {
+  return {
+    run_id: typeof payload?.run_id === "string" ? payload.run_id : fallbackRunId,
+    items: Array.isArray(payload?.items) ? payload.items : []
+  };
+}
+
+export function normalizeRunChangeSetsResponse(
+  fallbackRunId: string,
+  payload: Partial<RunChangeSetListResponse> | null | undefined
+): RunChangeSetListResponse {
+  return {
+    run_id: typeof payload?.run_id === "string" ? payload.run_id : fallbackRunId,
+    changes: Array.isArray(payload?.changes) ? payload.changes : []
+  };
 }
 
 export function getPluginMarketplaces(): Promise<PluginMarketplaceListResponse> {

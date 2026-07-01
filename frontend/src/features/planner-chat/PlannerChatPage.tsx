@@ -31,6 +31,7 @@ interface PlannerChatPageProps {
   plannerStrength: PlannerStrength;
   providerSetupRequired: boolean;
   providerSetupMessage: string;
+  reviewStateError: string | null;
   onAcceptChangeSet: (changeSetId: string) => void;
   onOpenProviderSettings: () => void;
   onLoadChangeSetDiff: (changeSetId: string) => void;
@@ -59,6 +60,7 @@ export function PlannerChatPage({
   plannerStrength,
   providerSetupRequired,
   providerSetupMessage,
+  reviewStateError,
   onAcceptChangeSet,
   onOpenProviderSettings,
   onLoadChangeSetDiff,
@@ -142,6 +144,12 @@ export function PlannerChatPage({
               <div className="chat-loading-row" role="status">
                 <span className="loading-dot" aria-hidden="true" />
                 Working...
+              </div>
+            )}
+            {reviewStateError && (
+              <div className="work-state-error" role="alert">
+                <strong>Work results could not be loaded.</strong>
+                <p>{reviewStateError}</p>
               </div>
             )}
             <WorkTimeline runId={runIdForTimeline} items={timelineItems} />

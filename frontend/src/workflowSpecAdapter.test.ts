@@ -1,5 +1,6 @@
 import { defaultPlannerLedAgentWorkflow } from "./examples";
 import { readFileSync } from "node:fs";
+import { normalizeRunChangeSetsResponse, normalizeRunTimelineResponse } from "./api";
 import { AppSidebar } from "./components/AppSidebar";
 import { PlannerChatPage } from "./features/planner-chat/PlannerChatPage";
 import { ReviewChangesCard } from "./features/review-changes/ReviewChangesCard";
@@ -542,6 +543,18 @@ test("Work timeline shows a clear empty progress state", () => {
   assert.ok(classNames.includes("timeline-empty"));
 });
 
+test("Work timeline renders safely with undefined null or malformed items", () => {
+  const undefinedTree = WorkTimeline({ runId: "run-1", items: undefined });
+  const nullTree = WorkTimeline({ runId: "run-1", items: null });
+  const malformedTree = WorkTimeline({ runId: "run-1", items: { items: [] } as unknown as TimelineItem[] });
+  const malformedArrayTree = WorkTimeline({ runId: "run-1", items: [null] as unknown as TimelineItem[] });
+
+  assert.ok(collectReactTreeText(undefinedTree).includes("Work has started"));
+  assert.ok(collectReactTreeText(nullTree).includes("Work has started"));
+  assert.ok(collectReactTreeText(malformedTree).includes("Work has started"));
+  assert.ok(collectReactTreeText(malformedArrayTree).includes("Work has started"));
+});
+
 test("Review Changes stays hidden without changes and shows undo conflicts", () => {
   const empty = ReviewChangesCard({
     changeSets: [],
@@ -590,6 +603,21 @@ test("Review Changes stays hidden without changes and shows undo conflicts", () 
   assert.ok(classNames.includes("change-set-failed_to_undo"));
 });
 
+test("Review Changes renders safely with undefined null or malformed change sets", () => {
+  const baseProps = {
+    diffByChangeSetId: {},
+    loadingChangeSetId: null,
+    onAccept: () => undefined,
+    onLoadDiff: () => undefined,
+    onUndo: () => undefined
+  };
+
+  assert.equal(ReviewChangesCard({ ...baseProps, changeSets: undefined }), null);
+  assert.equal(ReviewChangesCard({ ...baseProps, changeSets: null }), null);
+  assert.equal(ReviewChangesCard({ ...baseProps, changeSets: { changes: [] } as unknown as [] }), null);
+  assert.equal(ReviewChangesCard({ ...baseProps, changeSets: [null] as unknown as [] }), null);
+});
+
 test("Review Changes renders loaded diffs with readable diff class", () => {
   const tree = ReviewChangesCard({
     changeSets: [
@@ -628,12 +656,42 @@ test("Review Changes renders loaded diffs with readable diff class", () => {
   assert.ok(classNames.includes("change-set-pending_review"));
 });
 
+test("Start Work review loading failure keeps chat visible", () => {
+  const tree = renderPlannerChat(plannerSessionFixture({ run_id: "run-1" }), {
+    activeRunId: "run-1",
+    reviewStateError: "Work results failed to load; chat remains available. timeline: connection refused",
+    timelineItems: [],
+    changeSets: []
+  });
+  const text = collectReactTreeText(tree);
+  const classNames = collectReactTreeClassNames(tree);
+  const appSource = readFileSync("src/App.tsx", "utf8");
+
+  assert.ok(text.includes("Please plan the change."));
+  assert.ok(text.includes("Work results could not be loaded."));
+  assert.ok(text.includes("Work has started"));
+  assert.ok(classNames.includes("work-state-error"));
+  assert.ok(appSource.includes("Promise.allSettled"));
+  assert.ok(appSource.includes("setTimelineItems([])"));
+  assert.ok(appSource.includes("setChangeSets([])"));
+  assert.ok(appSource.includes("setReviewStateError(message)"));
+});
+
+test("Timeline and changes API responses normalize malformed payloads", () => {
+  assert.deepEqual(normalizeRunTimelineResponse("run-1", null), { run_id: "run-1", items: [] });
+  assert.deepEqual(normalizeRunTimelineResponse("run-1", { run_id: "run-x" }), { run_id: "run-x", items: [] });
+  assert.deepEqual(normalizeRunChangeSetsResponse("run-1", undefined), { run_id: "run-1", changes: [] });
+  assert.deepEqual(normalizeRunChangeSetsResponse("run-1", { changes: "bad" } as never), { run_id: "run-1", changes: [] });
+});
+
 test("Core UI styles include responsive chat and review polish hooks", () => {
   const css = readFileSync("src/styles.css", "utf8");
 
   assert.ok(css.includes(".message-bubble"));
   assert.ok(css.includes(".composer-actions"));
   assert.ok(css.includes(".review-diff-state"));
+  assert.ok(css.includes(".work-state-error"));
+  assert.ok(css.includes(".render-error-panel"));
   assert.ok(css.includes(".timeline-empty"));
   assert.ok(css.includes("@media (max-width: 640px)"));
   assert.ok(css.includes("white-space: pre;"));
@@ -746,6 +804,7 @@ function renderPlannerChat(
     plannerStrength: "balanced",
     providerSetupRequired: false,
     providerSetupMessage: "",
+    reviewStateError: null,
     onAcceptChangeSet: () => undefined,
     onLoadChangeSetDiff: () => undefined,
     onOpenProviderSettings: () => undefined,

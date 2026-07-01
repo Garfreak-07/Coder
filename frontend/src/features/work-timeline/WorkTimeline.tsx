@@ -9,30 +9,31 @@ import {
 
 interface WorkTimelineProps {
   runId: string | null;
-  items: TimelineItem[];
+  items?: TimelineItem[] | null;
 }
 
 export function WorkTimeline({ runId, items }: WorkTimelineProps) {
-  if (!runId && items.length === 0) return null;
+  const safeItems = Array.isArray(items) ? items.filter(isTimelineItem) : [];
+  if (!runId && safeItems.length === 0) return null;
   return (
     <section className="work-timeline" aria-label="Work timeline" aria-live="polite">
       <div className="timeline-header">
         <div>
           <span>Work timeline</span>
-          <p>{items.length > 0 ? `${items.length} public step${items.length === 1 ? "" : "s"}` : "Waiting for executor events"}</p>
+          <p>{safeItems.length > 0 ? `${safeItems.length} public step${safeItems.length === 1 ? "" : "s"}` : "Waiting for executor events"}</p>
         </div>
       </div>
-      {items.length === 0 ? (
+      {safeItems.length === 0 ? (
         <div className="timeline-empty">
           <strong>Work has started</strong>
           <span>Timeline events will appear here as the executor reports progress.</span>
         </div>
       ) : (
         <ol className="timeline-list">
-          {items.map((item) => (
+          {safeItems.map((item, index) => (
             <li
               className={`timeline-item timeline-${item.type} timeline-tone-${timelineItemTone(item)}`}
-              key={item.id}
+              key={item.id || `${item.type}-${index}`}
             >
               <div className="timeline-marker" />
               <div className="timeline-body">
@@ -58,7 +59,7 @@ function TimelineItemBody({ item }: { item: TimelineItem }) {
     case "reasoning_summary":
       return (
         <ul>
-          {item.summary_text.map((summary, index) => (
+          {safeStringList(item.summary_text).map((summary, index) => (
             <li key={`${item.id}-${index}`}>{summary}</li>
           ))}
         </ul>
@@ -100,14 +101,14 @@ function TimelineItemBody({ item }: { item: TimelineItem }) {
       return (
         <div className="final-summary-card">
           <p>{item.summary}</p>
-          {item.changed_files.length > 0 && (
-            <InlineList title="Files" values={item.changed_files} />
+          {safeStringList(item.changed_files).length > 0 && (
+            <InlineList title="Files" values={safeStringList(item.changed_files)} />
           )}
-          {item.checks.length > 0 && <InlineList title="Checks" values={item.checks} />}
-          {item.blockers.length > 0 && <InlineList title="Remaining risks" values={item.blockers} />}
-          {item.next_steps.length > 0 && <InlineList title="Next steps" values={item.next_steps} />}
+          {safeStringList(item.checks).length > 0 && <InlineList title="Checks" values={safeStringList(item.checks)} />}
+          {safeStringList(item.blockers).length > 0 && <InlineList title="Remaining risks" values={safeStringList(item.blockers)} />}
+          {safeStringList(item.next_steps).length > 0 && <InlineList title="Next steps" values={safeStringList(item.next_steps)} />}
           <div className="timeline-meta">
-            <span>{item.evidence_refs.length} evidence refs</span>
+            <span>{Array.isArray(item.evidence_refs) ? item.evidence_refs.length : 0} evidence refs</span>
           </div>
         </div>
       );
@@ -151,4 +152,12 @@ function InlineList({ title, values }: { title: string; values: string[] }) {
       </div>
     </div>
   );
+}
+
+function safeStringList(values: unknown): string[] {
+  return Array.isArray(values) ? values.filter((value): value is string => typeof value === "string") : [];
+}
+
+function isTimelineItem(item: unknown): item is TimelineItem {
+  return Boolean(item && typeof item === "object" && typeof (item as { type?: unknown }).type === "string");
 }

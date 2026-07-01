@@ -29,6 +29,7 @@ import {
   validateAgentWorkflow
 } from "./api";
 import { defaultPlannerLedAgentWorkflow } from "./examples";
+import { AppErrorBoundary } from "./components/AppErrorBoundary";
 import { AppSidebar, type AppSection } from "./components/AppSidebar";
 import { ProviderSettingsPanel } from "./components/ProviderSettingsPanel";
 import { AgentWorkflowPage } from "./features/agent-workflow/AgentWorkflowPage";
@@ -101,6 +102,7 @@ export function App() {
   const [plannerSession, setPlannerSession] = useState<PlannerChatSession | null>(null);
   const [timelineItems, setTimelineItems] = useState<TimelineItem[]>([]);
   const [changeSets, setChangeSets] = useState<ChangeSet[]>([]);
+  const [reviewStateError, setReviewStateError] = useState<string | null>(null);
   const [diffByChangeSetId, setDiffByChangeSetId] = useState<Record<string, string>>({});
   const [loadingChangeSetId, setLoadingChangeSetId] = useState<string | null>(null);
   const [newAgentRoleCard, setNewAgentRoleCard] = useState("executor");
@@ -157,14 +159,31 @@ export function App() {
   }
 
   async function loadRunReviewState(runId: string) {
-    const [timeline, changes] = await Promise.all([
+    setReviewStateError(null);
+    const [timelineResult, changesResult] = await Promise.allSettled([
       getRunTimeline(runId),
       getRunChangeSets(runId)
     ]);
-    setTimelineItems(timeline.items);
-    setChangeSets(changes.changes);
+    const failures: string[] = [];
+    if (timelineResult.status === "fulfilled") {
+      setTimelineItems(Array.isArray(timelineResult.value.items) ? timelineResult.value.items : []);
+    } else {
+      setTimelineItems([]);
+      failures.push(`timeline: ${errorMessage(timelineResult.reason)}`);
+    }
+    if (changesResult.status === "fulfilled") {
+      setChangeSets(Array.isArray(changesResult.value.changes) ? changesResult.value.changes : []);
+    } else {
+      setChangeSets([]);
+      failures.push(`changes: ${errorMessage(changesResult.reason)}`);
+    }
     setDiffByChangeSetId({});
     setLoadingChangeSetId(null);
+    if (failures.length > 0) {
+      const message = `Work results failed to load; chat remains available. ${failures.join("; ")}`;
+      setReviewStateError(message);
+      setStatus(message);
+    }
   }
 
   async function openStoredRun(runId: string) {
@@ -572,6 +591,7 @@ export function App() {
     const requestText = request.trim();
     if (!requestText) return;
     setRunLoading(true);
+    setReviewStateError(null);
     setStatus("Sending message to Planner...");
     try {
       const workflow = normalizeAgentWorkflow(agentWorkflow);
@@ -674,6 +694,7 @@ export function App() {
       setEventHasMore(false);
       setTimelineItems([]);
       setChangeSets([]);
+      setReviewStateError(null);
       setDiffByChangeSetId({});
       setLoadingChangeSetId(null);
       refreshRuntimeInfo();
@@ -785,33 +806,36 @@ export function App() {
       />
 
       {activeSection === "chat" ? (
-        <PlannerChatPage
-          activeRunId={selectedRunDetail?.id ?? activeRunId}
-          changeSets={changeSets}
-          debugEvidence={debugEvidence}
-          diffByChangeSetId={diffByChangeSetId}
-          loadingChangeSetId={loadingChangeSetId}
-          repo={repo}
-          request={request}
-          runLoading={runLoading}
-          scopesText={scopesText}
-          submittedRequest={submittedRequest}
-          timelineItems={timelineItems}
-          plannerSession={plannerSession}
-          plannerStrength={plannerStrength}
-          providerSetupRequired={providerSetupRequired}
-          providerSetupMessage={providerSetupMessage}
-          onAcceptChangeSet={acceptReviewedChangeSet}
-          onLoadChangeSetDiff={loadChangeSetDiff}
-          onOpenProviderSettings={() => setActiveSection("settings")}
-          onRepoChange={setRepo}
-          onRequestChange={setRequest}
-          onScopesTextChange={setScopesText}
-          onPlannerStrengthChange={updatePlannerStrength}
-          onStartWork={startWorkFromPlannerSession}
-          onSubmitRequest={sendPlannerTurn}
-          onUndoChangeSet={undoReviewedChangeSet}
-        />
+        <AppErrorBoundary message="Something went wrong while rendering the work timeline.">
+          <PlannerChatPage
+            activeRunId={selectedRunDetail?.id ?? activeRunId}
+            changeSets={changeSets}
+            debugEvidence={debugEvidence}
+            diffByChangeSetId={diffByChangeSetId}
+            loadingChangeSetId={loadingChangeSetId}
+            repo={repo}
+            request={request}
+            runLoading={runLoading}
+            scopesText={scopesText}
+            submittedRequest={submittedRequest}
+            timelineItems={timelineItems}
+            plannerSession={plannerSession}
+            plannerStrength={plannerStrength}
+            providerSetupRequired={providerSetupRequired}
+            providerSetupMessage={providerSetupMessage}
+            reviewStateError={reviewStateError}
+            onAcceptChangeSet={acceptReviewedChangeSet}
+            onLoadChangeSetDiff={loadChangeSetDiff}
+            onOpenProviderSettings={() => setActiveSection("settings")}
+            onRepoChange={setRepo}
+            onRequestChange={setRequest}
+            onScopesTextChange={setScopesText}
+            onPlannerStrengthChange={updatePlannerStrength}
+            onStartWork={startWorkFromPlannerSession}
+            onSubmitRequest={sendPlannerTurn}
+            onUndoChangeSet={undoReviewedChangeSet}
+          />
+        </AppErrorBoundary>
       ) : activeSection === "workflow" ? (
         <AgentWorkflowPage
           agentWorkflow={agentWorkflow}
@@ -936,6 +960,10 @@ function modelTierForPlannerStrength(strength: PlannerStrength): AgentModelTier 
   if (strength === "fast") return "economy";
   if (strength === "balanced") return "standard";
   return "best";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function summarizePlannerChatWorkflow(workflow: AgentWorkflowSpec): PlannerChatWorkflowSummary {

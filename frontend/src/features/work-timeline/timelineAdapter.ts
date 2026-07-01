@@ -58,8 +58,9 @@ export function timelineItemTone(item: TimelineItem): "neutral" | "success" | "w
   return "neutral";
 }
 
-export function commandLine(command: string[]): string {
-  return command.length > 0 ? command.join(" ") : "command";
+export function commandLine(command: unknown): string {
+  const parts = Array.isArray(command) ? command.filter((part): part is string => typeof part === "string") : [];
+  return parts.length > 0 ? parts.join(" ") : "command";
 }
 
 export function formatDuration(durationMs?: number | null): string | null {

@@ -380,6 +380,44 @@ label {
   padding: 8px 12px;
 }
 
+.work-state-error,
+.render-error-panel {
+  background: #2a1014;
+  border: 1px solid #7f1d1d;
+  border-radius: 8px;
+  color: #fecaca;
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+}
+
+.work-state-error strong,
+.render-error-panel strong {
+  color: #fee2e2;
+}
+
+.work-state-error p,
+.render-error-panel p {
+  margin: 0;
+}
+
+.render-error-actions {
+  align-items: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.render-error-actions details {
+  width: 100%;
+}
+
+.render-error-actions pre {
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
 .loading-dot {
   background: #38bdf8;
   border-radius: 999px;
