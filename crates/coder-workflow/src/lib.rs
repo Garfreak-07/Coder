@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    env,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -20,7 +21,8 @@ use coder_harness::{
 };
 use coder_openhands::{
     normalize_openhands_event, openhands_final_report, openhands_raw_event_kind, OpenHandsApiPaths,
-    OpenHandsAuthHeaderMode, OpenHandsClient, OpenHandsRunStartStrategy, OpenHandsServerConfig,
+    OpenHandsAuthHeaderMode, OpenHandsClient, OpenHandsError, OpenHandsRunStartStrategy,
+    OpenHandsServerConfig,
 };
 use coder_store::{RepoEvidenceKind, RepoEvidenceRef, RunStore, StoreError};
 use coder_tools::{
@@ -1079,9 +1081,11 @@ pub fn build_openhands_conversation_payload(input: OpenHandsConversationPayloadI
     });
 
     json!({
-        "agent": {
-            "kind": "CodeActAgent"
+        "workspace": {
+            "kind": "LocalWorkspace",
+            "working_dir": input.repo_root
         },
+        "agent": openhands_agent_payload(input.agent, input.model, input.harness),
         "metadata": {
             "source": "coder-workflow",
             "coder": coder_metadata
@@ -1123,6 +1127,67 @@ pub fn build_openhands_conversation_payload(input: OpenHandsConversationPayloadI
             "plan_context": input.plan_context.cloned().unwrap_or(Value::Null)
         }
     })
+}
+
+fn openhands_agent_payload(agent: &AgentSpec, model: &ModelSpec, harness: &HarnessSpec) -> Value {
+    let mut llm = serde_json::Map::new();
+    llm.insert(
+        "model".to_owned(),
+        Value::String(openhands_llm_model_name(model)),
+    );
+    llm.insert(
+        "usage_id".to_owned(),
+        Value::String(format!("coder-{}", agent.role)),
+    );
+    if let Some(base_url) = model
+        .base_url_env
+        .as_deref()
+        .and_then(|name| env::var(name).ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        llm.insert("base_url".to_owned(), Value::String(base_url));
+    }
+    if let Some(api_key) = model
+        .api_key_env
+        .as_deref()
+        .and_then(|name| env::var(name).ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        llm.insert("api_key".to_owned(), Value::String(api_key));
+    }
+
+    json!({
+        "kind": "Agent",
+        "llm": Value::Object(llm),
+        "tools": openhands_tool_payloads(&harness.tools),
+        "include_default_tools": ["FinishTool", "ThinkTool"],
+        "agent_context": {
+            "system_message_suffix": agent.system
+        }
+    })
+}
+
+fn openhands_llm_model_name(model: &ModelSpec) -> String {
+    if model.provider == "openai-compatible" && !model.model.contains('/') {
+        format!("openai/{}", model.model)
+    } else {
+        model.model.clone()
+    }
+}
+
+fn openhands_tool_payloads(tools: &[String]) -> Vec<Value> {
+    tools
+        .iter()
+        .filter_map(|tool| match tool.as_str() {
+            "terminal" => Some("terminal"),
+            "file_editor" => Some("file_editor"),
+            "task_tracker" => Some("task_tracker"),
+            _ => None,
+        })
+        .map(|name| json!({ "name": name, "params": {} }))
+        .collect()
 }
 
 fn harness_backend_context(input: OpenHandsConversationPayloadInput<'_>) -> Value {
@@ -2564,10 +2629,20 @@ async fn poll_openhands_events(
     let mut captured_events = 0;
 
     loop {
-        let raw_events = client
-            .fetch_events(conversation_id, fetch_limit)
-            .await
-            .map_err(|error| HarnessError::Failed(error.to_string()))?;
+        let raw_events = match client.fetch_events(conversation_id, fetch_limit).await {
+            Ok(raw_events) => raw_events,
+            Err(error) if openhands_event_fetch_retryable(&error) => {
+                events.push(HarnessRunEvent::new(
+                    "backend.openhands.events_retry",
+                    json!({
+                        "conversation_id": conversation_id,
+                        "reason": openhands_fetch_retry_reason(&error)
+                    }),
+                ));
+                Vec::new()
+            }
+            Err(error) => return Err(HarnessError::Failed(error.to_string())),
+        };
         for raw in raw_events {
             let key = openhands_event_key(&raw);
             if !seen.insert(key) {
@@ -2632,6 +2707,36 @@ async fn poll_openhands_events(
         if !poll_interval.is_zero() {
             std::thread::sleep(poll_interval);
         }
+    }
+}
+
+fn openhands_event_fetch_retryable(error: &OpenHandsError) -> bool {
+    matches!(
+        error,
+        OpenHandsError::HttpStatus {
+            method: "GET",
+            status: 500..=599,
+            ..
+        }
+    )
+}
+
+fn openhands_fetch_retry_reason(error: &OpenHandsError) -> Value {
+    match error {
+        OpenHandsError::HttpStatus {
+            method,
+            path,
+            status,
+            ..
+        } => json!({
+            "method": method,
+            "path": path,
+            "status": status,
+            "summary": "OpenHands event fetch returned a transient server error"
+        }),
+        _ => json!({
+            "summary": "OpenHands event fetch returned a transient error"
+        }),
     }
 }
 
@@ -2843,17 +2948,7 @@ fn openhands_public_react_events(
         events.push(event);
     }
 
-    let raw_status = raw
-        .get("status")
-        .or_else(|| raw.get("state"))
-        .or_else(|| raw.get("result"))
-        .and_then(Value::as_str)
-        .map(|value| value.to_ascii_lowercase());
-    let terminal_status = raw_status
-        .as_deref()
-        .and_then(terminal_status_from_text)
-        .or_else(|| terminal_status_from_text(&normalized_kind));
-    if let Some(status) = terminal_status {
+    if let Some((status, _)) = openhands_terminal_status_from_raw(raw, &raw_kind, &tool_name) {
         events.push(
             HarnessRunEvent::new(
                 executor_terminal_event_kind(status),
@@ -2865,6 +2960,7 @@ fn openhands_public_react_events(
                     "harness_id": request.harness_id,
                     "backend": "openhands",
                     "step": step,
+                    "tool_name": tool_name,
                     "status": status,
                     "summary": truncate_public(&summary, 500),
                     "raw_kind": raw_kind,
@@ -3347,21 +3443,13 @@ fn openhands_terminal_status(
 ) -> Option<(&'static str, String)> {
     let raw_kind = openhands_raw_event_kind(raw);
     let normalized_kind = raw_kind.to_ascii_lowercase();
+    let tool_name = openhands_tool_name(raw).unwrap_or_default();
     let configured_terminal = terminal_event_kinds
         .iter()
         .any(|kind| kind.eq_ignore_ascii_case(&raw_kind));
-    let status = raw
-        .get("status")
-        .or_else(|| raw.get("state"))
-        .or_else(|| raw.get("result"))
-        .and_then(Value::as_str)
-        .map(|value| value.to_ascii_lowercase());
 
-    if let Some(status) = status.as_deref().and_then(terminal_status_from_text) {
-        return Some((
-            status,
-            format!("OpenHands reported terminal status '{}'", status),
-        ));
+    if let Some(terminal) = openhands_terminal_status_from_raw(raw, &raw_kind, &tool_name) {
+        return Some(terminal);
     }
     if !configured_terminal {
         return None;
@@ -3378,6 +3466,75 @@ fn openhands_terminal_status(
     ))
 }
 
+fn openhands_terminal_status_from_raw(
+    raw: &Value,
+    raw_kind: &str,
+    tool_name: &str,
+) -> Option<(&'static str, String)> {
+    let normalized_kind = raw_kind.to_ascii_lowercase();
+    let status = raw
+        .get("status")
+        .or_else(|| raw.get("state"))
+        .or_else(|| raw.get("result"))
+        .and_then(Value::as_str)
+        .map(|value| value.to_ascii_lowercase());
+
+    if let Some(status) = status.as_deref().and_then(terminal_status_from_text) {
+        return Some((
+            status,
+            format!("OpenHands reported terminal status '{}'", status),
+        ));
+    }
+    if let Some(status) = terminal_status_from_text(&normalized_kind) {
+        return Some((
+            status,
+            format!("OpenHands emitted terminal event kind '{raw_kind}'"),
+        ));
+    }
+    if openhands_finish_signal(raw, raw_kind, tool_name) {
+        return Some((
+            "completed",
+            "OpenHands emitted finish tool event".to_owned(),
+        ));
+    }
+    None
+}
+
+fn openhands_finish_signal(raw: &Value, raw_kind: &str, tool_name: &str) -> bool {
+    if openhands_finish_signal_text(raw_kind) || openhands_finish_signal_text(tool_name) {
+        return true;
+    }
+
+    [
+        "/tool_name",
+        "/tool",
+        "/name",
+        "/action/kind",
+        "/action/name",
+        "/action/tool_name",
+        "/tool_call/kind",
+        "/tool_call/name",
+        "/tool_call/tool_name",
+    ]
+    .iter()
+    .filter_map(|pointer| raw.pointer(pointer))
+    .filter_map(openhands_value_string)
+    .any(|value| openhands_finish_signal_text(&value))
+}
+
+fn openhands_finish_signal_text(value: &str) -> bool {
+    let normalized: String = value
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "finish" | "finishtool" | "finishaction" | "finishobservation"
+    )
+}
+
 fn terminal_status_from_text(value: &str) -> Option<&'static str> {
     match value {
         "completed" | "complete" | "success" | "succeeded" | "done" | "finished"
@@ -3390,13 +3547,17 @@ fn terminal_status_from_text(value: &str) -> Option<&'static str> {
 }
 
 fn openhands_create_conversation_payload(request: &HarnessRunRequest) -> Value {
-    request
+    let mut payload = request
         .backend_context
         .pointer("/openhands/create_conversation_payload")
         .cloned()
         .unwrap_or_else(|| {
             json!({
-                "agent": {"kind": "CodeActAgent"},
+                "workspace": {
+                    "kind": "LocalWorkspace",
+                    "working_dir": request.repo_root
+                },
+                "agent": {"kind": "Agent"},
                 "metadata": {
                     "source": "coder-workflow",
                     "coder": {
@@ -3410,7 +3571,22 @@ fn openhands_create_conversation_payload(request: &HarnessRunRequest) -> Value {
                     }
                 }
             })
-        })
+        });
+    ensure_openhands_workspace(&mut payload, &request.repo_root);
+    payload
+}
+
+fn ensure_openhands_workspace(payload: &mut Value, repo_root: &str) {
+    let has_workspace = payload
+        .get("workspace")
+        .map(|workspace| !workspace.is_null())
+        .unwrap_or(false);
+    if !has_workspace {
+        payload["workspace"] = json!({
+            "kind": "LocalWorkspace",
+            "working_dir": repo_root
+        });
+    }
 }
 
 struct WorkflowReportInput<'a> {
@@ -4426,7 +4602,15 @@ diff --git a/tracked.txt b/tracked.txt
         });
         let payload_text = serde_json::to_string(&payload).unwrap();
 
-        assert_eq!(payload["agent"]["kind"], "CodeActAgent");
+        assert_eq!(payload["agent"]["kind"], "Agent");
+        assert_eq!(payload["agent"]["llm"]["model"], "best");
+        assert!(payload["agent"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "terminal"));
+        assert_eq!(payload["workspace"]["kind"], "LocalWorkspace");
+        assert_eq!(payload["workspace"]["working_dir"], root.to_str().unwrap());
         assert_eq!(
             payload["metadata"]["coder"]["agent_kind_source"],
             "default_fallback"
@@ -4511,7 +4695,11 @@ diff --git a/tracked.txt b/tracked.txt
         let fallback = openhands_create_conversation_payload(&fallback_request);
 
         assert_eq!(payload["metadata"]["coder"]["marker"], "from-context");
-        assert_eq!(fallback["agent"]["kind"], "CodeActAgent");
+        assert_eq!(payload["workspace"]["kind"], "LocalWorkspace");
+        assert_eq!(payload["workspace"]["working_dir"], ".");
+        assert_eq!(fallback["agent"]["kind"], "Agent");
+        assert_eq!(fallback["workspace"]["kind"], "LocalWorkspace");
+        assert_eq!(fallback["workspace"]["working_dir"], ".");
         assert_eq!(fallback["metadata"]["coder"]["run_id"], "run-context");
         assert_eq!(
             fallback["metadata"]["coder"]["agent_kind_source"],
@@ -4686,6 +4874,36 @@ diff --git a/tracked.txt b/tracked.txt
                 .count()
                 == 0
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn openhands_finish_tool_event_completes_run() {
+        let (server_url, _) = spawn_openhands_server(vec![
+            json_response(r#"{"status":"ok"}"#),
+            json_response(r#"{"id":"conv-1"}"#),
+            json_response(r#"{"accepted":true}"#),
+            json_response(
+                r#"[
+                    {"id":"raw-1","kind":"ActionEvent","tool_name":"finish","summary":"Live smoke result documented","action":{"kind":"FinishAction","message":"complete"}},
+                    {"id":"raw-2","kind":"ObservationEvent","tool_name":"finish","observation":{"kind":"FinishObservation","content":"done"}}
+                ]"#,
+            ),
+        ]);
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let backend =
+            OpenHandsHarnessBackend::new(openhands_test_config(server_url, 10, 0), store.clone());
+        let request = openhands_test_request("finish tool terminal");
+
+        let result = backend.run(request).await.unwrap();
+
+        assert_eq!(result.status, "completed");
+        assert!(result.events.iter().any(|event| {
+            event.kind == "executor.completed"
+                && event.payload["tool_name"].as_str() == Some("finish")
+        }));
+        assert_eq!(result.report.unwrap().status, ReportStatus::Completed);
         let _ = fs::remove_dir_all(root);
     }
 

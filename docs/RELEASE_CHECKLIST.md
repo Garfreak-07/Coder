@@ -136,5 +136,25 @@ Expected live result when an OpenHands Agent Server is available:
 `backend_selected >= 1`, `timeline_backend_items >= 1`,
 `timeline_react_items >= 1`, `result_doc_changed >= 1`,
 `review_changes >= 1`, raw OpenHands events are stored, final report preview is
-readable, Undo succeeds or safely reports conflict/unsupported, and
-`secrets_check: passed`. A skipped result is not a live pass.
+readable with `Status: completed`, the run records `run.completed`, Undo
+succeeds or safely reports conflict/unsupported, and `secrets_check: passed`.
+A skipped result is not a live pass, and a run that edits the file but reports
+`blocked` is not a live pass.
+
+Latest local live result recorded for this checklist:
+
+```text
+timestamp: 2026-07-01 20:47:45 +08:00
+base_commit_before_record: 27ab5509
+server_url: http://127.0.0.1:8000
+provider: DeepSeek through OpenAI-compatible API
+model: deepseek-v4-flash
+run_id: 2718536d-950b-4415-970d-20f50844ecf2
+status: ok
+final_report: completed
+timeline_items: 77
+timeline_react_items: 64
+review_changes: 1
+undo_status: undone
+secrets_check: passed
+```

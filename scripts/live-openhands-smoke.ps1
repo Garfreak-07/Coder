@@ -72,6 +72,44 @@ function Invoke-Native {
   }
 }
 
+function Invoke-NativeCapture {
+  param(
+    [string]$FilePath,
+    [string[]]$Arguments
+  )
+  $previousErrorActionPreference = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    $output = & $FilePath @Arguments 2>&1
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+  [pscustomobject]@{
+    ExitCode = $exitCode
+    Output = @($output)
+  }
+}
+
+function Set-Utf8NoBomContent {
+  param(
+    [string]$LiteralPath,
+    [string[]]$Value
+  )
+  $encoding = New-Object System.Text.UTF8Encoding($false)
+  $text = ($Value -join [Environment]::NewLine) + [Environment]::NewLine
+  [System.IO.File]::WriteAllText($LiteralPath, $text, $encoding)
+}
+
+function Set-Utf8NoBomText {
+  param(
+    [string]$LiteralPath,
+    [string]$Value
+  )
+  $encoding = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($LiteralPath, $Value, $encoding)
+}
+
 $liveSmokeFlag = [Environment]::GetEnvironmentVariable("OPENHANDS_LIVE_SMOKE", "Process")
 if ($liveSmokeFlag -ne "1") {
   Stop-Or-Skip -Reason "Set OPENHANDS_LIVE_SMOKE=1 to run the live OpenHands smoke."
@@ -94,6 +132,25 @@ if ([string]::IsNullOrWhiteSpace($SessionApiKeyEnv)) {
   }
 }
 
+$llmModel = [Environment]::GetEnvironmentVariable("LLM_MODEL", "Process")
+if ([string]::IsNullOrWhiteSpace($llmModel)) {
+  Stop-Or-Skip -Reason "Set LLM_MODEL to run the live OpenHands smoke."
+}
+$llmBaseUrl = [Environment]::GetEnvironmentVariable("LLM_BASE_URL", "Process")
+if ([string]::IsNullOrWhiteSpace($llmBaseUrl)) {
+  Stop-Or-Skip -Reason "Set LLM_BASE_URL to run the live OpenHands smoke."
+}
+$llmApiKey = [Environment]::GetEnvironmentVariable("LLM_API_KEY", "Process")
+if ([string]::IsNullOrWhiteSpace($llmApiKey)) {
+  $deepSeekKey = [Environment]::GetEnvironmentVariable("DEEPSEEK_API_KEY", "Process")
+  if (-not [string]::IsNullOrWhiteSpace($deepSeekKey)) {
+    [Environment]::SetEnvironmentVariable("LLM_API_KEY", $deepSeekKey, "Process")
+  } else {
+    Stop-Or-Skip -Reason "Set LLM_API_KEY or DEEPSEEK_API_KEY to run the live OpenHands smoke."
+  }
+}
+$llmModelYaml = $llmModel.Replace("\", "\\").Replace('"', '\"')
+
 $workRootPath = Resolve-UnderRepo -PathValue $WorkRoot
 $storePath = Resolve-UnderRepo -PathValue $Store
 $repoPath = Join-Path $workRootPath "repo"
@@ -110,20 +167,20 @@ if (Test-Path -LiteralPath $workRootPath) {
 New-Item -ItemType Directory -Force -Path $repoPath | Out-Null
 New-Item -ItemType Directory -Force -Path $storePath | Out-Null
 
-Set-Content -LiteralPath (Join-Path $repoPath "README.md") -Value @(
+Set-Utf8NoBomContent -LiteralPath (Join-Path $repoPath "README.md") -Value @(
   "# OpenHands live smoke"
   ""
   "This temporary repository is used by Coder's opt-in live OpenHands smoke."
   "The task is documentation-only and must not commit or push."
-) -Encoding UTF8
+)
 $docsPath = Join-Path $repoPath "docs"
 New-Item -ItemType Directory -Force -Path $docsPath | Out-Null
 $resultDocPath = Join-Path $docsPath "OPENHANDS_LIVE_SMOKE_RESULT.md"
-Set-Content -LiteralPath $resultDocPath -Value @(
+Set-Utf8NoBomContent -LiteralPath $resultDocPath -Value @(
   "# OpenHands Live Smoke Result"
   ""
   "Initial fixture. The live OpenHands smoke must update this file."
-) -Encoding UTF8
+)
 
 $git = (Get-Command git).Source
 Invoke-Native -FilePath $git -Arguments @("-C", $repoPath, "init")
@@ -155,12 +212,12 @@ if ($ApiProfile -eq "legacy-sdk") {
 "@
 }
 
-Set-Content -LiteralPath $configPath -Encoding UTF8 -Value @"
+Set-Utf8NoBomText -LiteralPath $configPath -Value @"
 version: 1
 models:
   default:
     provider: openai-compatible
-    model: smoke
+    model: "$llmModelYaml"
     base_url_env: LLM_BASE_URL
     api_key_env: LLM_API_KEY
 agents:
@@ -196,8 +253,8 @@ $sessionLine
       workspace_mode: local
       prefer_websocket: false
       poll_interval_ms: 1000
-      max_event_poll_seconds: 180
-      max_events: 200
+      max_event_poll_seconds: 300
+      max_events: 100
 $apiProfileYaml
     tools: [terminal, file_editor, task_tracker]
     permissions:
@@ -215,7 +272,7 @@ $apiProfileYaml
 workflows:
   planner-led:
     name: OpenHands live smoke
-    max_rounds: 2
+    max_rounds: 1
     nodes:
       - id: planner
         agent: planner
@@ -227,9 +284,6 @@ workflows:
       - from: planner
         to: executor
         on: ready
-      - from: executor
-        to: planner
-        on: completed
     stop:
       on_status: [completed, blocked, failed]
       final_report_agent: planner
@@ -261,8 +315,9 @@ $runArgs = @(
   "planner-led",
   $task
 )
-$runOutput = & $cargo @runArgs 2>&1
-if ($LASTEXITCODE -ne 0) {
+$runResult = Invoke-NativeCapture -FilePath $cargo -Arguments $runArgs
+$runOutput = @($runResult.Output)
+if ($runResult.ExitCode -ne 0) {
   $text = ($runOutput | ForEach-Object { $_.ToString() }) -join "`n"
   throw "OpenHands workflow run failed.`n$text"
 }
@@ -309,6 +364,9 @@ if ($rawOpenHandsEvents.Count -lt 1) {
 $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
 if ([string]::IsNullOrWhiteSpace($report.summary)) {
   throw "Final report did not include a summary."
+}
+if ($report.status -ne "completed") {
+  throw "Final report status was '$($report.status)', expected 'completed'."
 }
 
 if (-not (Test-Path -LiteralPath $resultDocPath)) {

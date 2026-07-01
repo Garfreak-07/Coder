@@ -130,6 +130,41 @@ documentation-only task through the configured `openhands` harness, and checks:
   change
 - no configured API key appears in events, reports, timeline, or changes output
 
+The live smoke must finish with `Status: completed` and a `run.completed` event.
+Editing the result document is not enough if the final report is `blocked` or
+`failed`.
+
 The current live smoke intentionally requires a documentation-only file edit so
 Review Changes and Undo are exercised. CI must keep using fake adapter tests and
 must not require this live smoke.
+
+## Local Live Compatibility Record
+
+Latest validated local run:
+
+```text
+timestamp: 2026-07-01 20:47:45 +08:00
+base_commit_before_record: 27ab5509
+OpenHands Agent Server: http://127.0.0.1:8000
+provider: DeepSeek via OpenAI-compatible API
+model: deepseek-v4-flash
+run_id: 2718536d-950b-4415-970d-20f50844ecf2
+result: status ok, final report completed, run.completed recorded
+timeline: 77 items, 64 public ReAct items
+review/undo: 1 Review Changes entry, undo_status undone
+secrets_check: passed
+```
+
+Compatibility details from that run:
+
+- Coder sends `workspace.kind=LocalWorkspace` and the local repo `working_dir`
+  in the conversation payload.
+- Coder sends Agent Canvas `kind=Agent` with `terminal`, `file_editor`, and
+  `task_tracker` tool names.
+- OpenAI-compatible DeepSeek settings are passed to OpenHands through the agent
+  `llm` payload from environment variables. API keys are not written to Coder
+  metadata or docs.
+- OpenHands `finish` tool events are normalized to `executor.completed`.
+- The smoke workflow is single-round so an executor completion ends the run.
+- The smoke uses `max_events: 100`; this avoids a local OpenHands
+  `/events/search?limit=200` HTTP 500 observed during validation.

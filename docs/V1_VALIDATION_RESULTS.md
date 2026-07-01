@@ -42,7 +42,19 @@ commits after that run had not yet been pushed when this file was written.
 | Live test | Result | Notes |
 | --- | --- | --- |
 | DeepSeek live smoke | Passed | Ran with `.local-env.ps1`, `DEEPSEEK_API_KEY`, and proxy `http://127.0.0.1:7890`. Result: `status: ok`, provider `deepseek`, model `deepseek-v4-flash`, provider test `live`, 4 Planner turns, Start Work returned `needs_clarification` without starting a run. |
-| OpenHands live smoke | Skipped | `scripts/live-openhands-smoke.ps1 -SkipIfMissingOpenHands` returned `status: skipped` because `OPENHANDS_LIVE_SMOKE=1` was not set. This is not a live OpenHands pass. The opt-in script now requires `backend.selected=openhands`, timeline backend/ReAct items, result-doc modification, final report preview, Review Changes/Undo, and `secrets_check: passed`. |
+| OpenHands live smoke | Passed | Recorded 2026-07-01 20:47:45 +08:00 on local base commit `27ab5509`. Command used `OPENHANDS_LIVE_SMOKE=1`, local Agent Server `http://127.0.0.1:8000`, OpenAI-compatible DeepSeek model `deepseek-v4-flash`, and local proxy bypass `NO_PROXY=127.0.0.1,localhost,::1`. Result: `status: ok`, run `2718536d-950b-4415-970d-20f50844ecf2`, final report `Status: completed`, `backend_selected: 1`, `timeline_items: 77`, `timeline_react_items: 64`, `react_events: 63`, `raw_openhands_events: 31`, `result_doc_changed: 1`, `review_changes: 1`, `undo_status: undone`, and `secrets_check: passed`. No API key was written to the recorded events, report, timeline, or changes output. |
+
+### OpenHands Live Smoke Notes
+
+The successful live smoke used the current OpenHands Agent Server API shape:
+
+- conversation payload includes `workspace.kind=LocalWorkspace` and local `working_dir`
+- agent payload uses `kind=Agent`
+- tools are mapped to Agent Canvas names: `terminal`, `file_editor`, `task_tracker`
+- OpenAI-compatible DeepSeek credentials are injected through the OpenHands agent `llm` payload from environment variables and are not written to Coder metadata
+- OpenHands finish-tool events are recognized as `executor.completed`
+- the smoke workflow is single-round so `executor.completed` ends the run instead of starting a second executor pass
+- event polling uses `max_events: 100`; `limit=200` was observed to trigger HTTP 500 on this local OpenHands server
 
 ## npm Audit Note
 
