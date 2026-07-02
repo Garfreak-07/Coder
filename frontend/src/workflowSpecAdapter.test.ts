@@ -878,6 +878,23 @@ test("Planner Chat shows provider setup before chat when credentials are missing
   assert.equal(Boolean(composer?.props?.disabled), true);
 });
 
+test("Snake live smoke requires browser gameplay validation", () => {
+  const snakeSmokeScript = readFileSync("../scripts/live-snake-game-smoke.ps1", "utf8");
+  const validationDocs = readFileSync("../docs/RELEASE_CHECKLIST.md", "utf8");
+
+  assert.ok(snakeSmokeScript.includes("Invoke-SnakeBrowserValidation"));
+  assert.ok(snakeSmokeScript.includes("playwright@"));
+  assert.ok(snakeSmokeScript.includes("window.__snakeTestState"));
+  assert.ok(snakeSmokeScript.includes("do not install Playwright"));
+  assert.ok(snakeSmokeScript.includes("Do not create package.json"));
+  assert.ok(snakeSmokeScript.includes("restart-btn"));
+  assert.ok(snakeSmokeScript.includes("no_immediate_game_over"));
+  assert.ok(snakeSmokeScript.includes("direction_key_moves_game"));
+  assert.ok(snakeSmokeScript.includes("opposite-direction reversal"));
+  assert.ok(snakeSmokeScript.includes("restart_works"));
+  assert.ok(validationDocs.includes("Earlier Snake E2E verified file creation and JS syntax only."));
+});
+
 function renderPlannerChat(
   plannerSession: Parameters<typeof PlannerChatPage>[0]["plannerSession"],
   overrides: Partial<Parameters<typeof PlannerChatPage>[0]> = {}

@@ -3532,6 +3532,12 @@ fn openhands_terminal_status_from_raw(
             format!("OpenHands reported terminal status '{}'", status),
         ));
     }
+    if let Some(status) = openhands_terminal_status_update(raw) {
+        return Some((
+            status,
+            format!("OpenHands reported execution_status '{}'", status),
+        ));
+    }
     if let Some(status) = terminal_status_from_text(&normalized_kind) {
         return Some((
             status,
@@ -3545,6 +3551,22 @@ fn openhands_terminal_status_from_raw(
         ));
     }
     None
+}
+
+fn openhands_terminal_status_update(raw: &Value) -> Option<&'static str> {
+    let key = raw.get("key").and_then(Value::as_str)?;
+    let normalized_key = key.trim().to_ascii_lowercase();
+    if !matches!(
+        normalized_key.as_str(),
+        "execution_status" | "status" | "state" | "run_status"
+    ) {
+        return None;
+    }
+    raw.get("value")
+        .and_then(Value::as_str)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .as_deref()
+        .and_then(terminal_status_from_text)
 }
 
 fn openhands_finish_signal(raw: &Value, raw_kind: &str, tool_name: &str) -> bool {
@@ -4981,6 +5003,36 @@ diff --git a/tracked.txt b/tracked.txt
         assert!(result.events.iter().any(|event| {
             event.kind == "executor.completed"
                 && event.payload["tool_name"].as_str() == Some("finish")
+        }));
+        assert_eq!(result.report.unwrap().status, ReportStatus::Completed);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn openhands_execution_status_update_completes_run() {
+        let (server_url, _) = spawn_openhands_server(vec![
+            json_response(r#"{"status":"ok"}"#),
+            json_response(r#"{"id":"conv-1"}"#),
+            json_response(r#"{"accepted":true}"#),
+            json_response(
+                r#"[
+                    {"id":"raw-1","kind":"MessageEvent","llm_message":{"role":"assistant","content":[{"type":"text","text":"Final summary"}]}},
+                    {"id":"raw-2","kind":"ConversationStateUpdateEvent","key":"execution_status","value":"finished"}
+                ]"#,
+            ),
+        ]);
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let backend =
+            OpenHandsHarnessBackend::new(openhands_test_config(server_url, 10, 0), store.clone());
+        let request = openhands_test_request("execution status terminal");
+
+        let result = backend.run(request).await.unwrap();
+
+        assert_eq!(result.status, "completed");
+        assert!(result.events.iter().any(|event| {
+            event.kind == "executor.completed"
+                && event.payload["raw_kind"].as_str() == Some("ConversationStateUpdateEvent")
         }));
         assert_eq!(result.report.unwrap().status, ReportStatus::Completed);
         let _ = fs::remove_dir_all(root);

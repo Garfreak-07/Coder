@@ -110,6 +110,276 @@ function Invoke-NativeCapture {
   }
 }
 
+function Resolve-PlaywrightNodeModules {
+  $candidates = @(
+    (Join-Path $repoRoot "node_modules"),
+    (Join-Path $repoRoot "frontend\node_modules"),
+    (Resolve-UnderRepo -PathValue ".tmp\playwright-smoke\node_modules")
+  )
+  foreach ($nodeModules in $candidates) {
+    if (Test-Path -LiteralPath (Join-Path $nodeModules "playwright\package.json")) {
+      return $nodeModules
+    }
+  }
+
+  $installRoot = Resolve-UnderRepo -PathValue ".tmp\playwright-smoke"
+  New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
+  $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
+  if ($null -eq $npm) {
+    $npm = Get-Command npm -ErrorAction SilentlyContinue
+  }
+  if ($null -eq $npm) {
+    throw "Browser gameplay validation requires npm so Playwright can be bootstrapped."
+  }
+  Invoke-Native -FilePath $npm.Source -Arguments @("--prefix", $installRoot, "install", "--no-audit", "--fund=false", "playwright@1.57.0")
+  $nodeModules = Join-Path $installRoot "node_modules"
+  if (-not (Test-Path -LiteralPath (Join-Path $nodeModules "playwright\package.json"))) {
+    throw "Playwright bootstrap completed without installing playwright."
+  }
+  $nodeModules
+}
+
+function Invoke-SnakeBrowserValidation {
+  param([string]$IndexPath)
+
+  $node = (Get-Command node).Source
+  $nodeModules = Resolve-PlaywrightNodeModules
+  $scriptPath = Resolve-UnderRepo -PathValue ".tmp\live-snake-game-smoke\browser-gameplay-validation.mjs"
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $scriptPath) | Out-Null
+  Set-Content -LiteralPath $scriptPath -Encoding UTF8 -Value @'
+import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
+const [, , indexPath, nodeModules] = process.argv;
+const require = createRequire(import.meta.url);
+const { chromium } = require(path.join(nodeModules, "playwright"));
+
+function fail(message, detail = {}) {
+  console.error(JSON.stringify({ status: "failed", message, ...detail }, null, 2));
+  process.exit(1);
+}
+
+async function launchBrowser() {
+  const attempts = [
+    { name: "bundled", options: {} },
+    { name: "msedge", options: { channel: "msedge" } },
+    { name: "chrome", options: { channel: "chrome" } },
+  ];
+  const errors = [];
+  for (const attempt of attempts) {
+    try {
+      const browser = await chromium.launch({ headless: true, ...attempt.options });
+      return { browser, browserName: attempt.name };
+    } catch (error) {
+      errors.push(`${attempt.name}: ${error.message}`);
+    }
+  }
+  fail("Could not launch a Playwright Chromium-compatible browser.", { errors });
+}
+
+function canvasDigest(dataUrl) {
+  return createHash("sha256").update(dataUrl).digest("hex");
+}
+
+async function readCanvas(page) {
+  return canvasDigest(await page.$eval("canvas", (canvas) => canvas.toDataURL("image/png")));
+}
+
+async function readScore(page) {
+  return page.evaluate(() => {
+    const score = document.querySelector("#score");
+    return score ? score.textContent?.trim() ?? "" : "";
+  });
+}
+
+function visibleScoreIsZero(scoreText) {
+  const trimmed = String(scoreText ?? "").trim();
+  if (trimmed === "") return true;
+  const matches = trimmed.match(/-?\d+/g);
+  if (!matches || matches.length === 0) return false;
+  return Number(matches[matches.length - 1]) === 0;
+}
+
+async function readState(page) {
+  return page.evaluate(() => {
+    const raw = window.__snakeTestState;
+    let value = null;
+    if (typeof raw === "function") {
+      value = raw();
+    } else if (raw && typeof raw.snapshot === "function") {
+      value = raw.snapshot();
+    } else if (raw && typeof raw === "object") {
+      value = raw;
+    }
+    if (!value) return null;
+    return JSON.parse(JSON.stringify(value));
+  });
+}
+
+function stateGameOver(state) {
+  if (!state) return false;
+  const status = String(state.status ?? state.state ?? "").toLowerCase();
+  return state.gameOver === true || status === "game_over" || status === "game over" || status === "ended";
+}
+
+function headOf(state) {
+  if (!state) return null;
+  return state.head ?? state.snakeHead ?? (Array.isArray(state.snake) ? state.snake[0] : null);
+}
+
+function directionOf(state) {
+  if (!state) return null;
+  return state.direction ?? state.dir ?? state.velocity ?? null;
+}
+
+function numberValue(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function progressed(before, after) {
+  if (!before || !after) return false;
+  const beforeTick = numberValue(before.tick ?? before.ticks ?? before.frame);
+  const afterTick = numberValue(after.tick ?? after.ticks ?? after.frame);
+  if (beforeTick !== null && afterTick !== null && afterTick > beforeTick) return true;
+
+  const beforeHead = headOf(before);
+  const afterHead = headOf(after);
+  if (beforeHead && afterHead && (beforeHead.x !== afterHead.x || beforeHead.y !== afterHead.y)) {
+    return true;
+  }
+  return false;
+}
+
+async function assertNotGameOver(page, label) {
+  const state = await readState(page);
+  if (stateGameOver(state)) {
+    fail(`Game Over appeared during ${label}.`, { state });
+  }
+  return state;
+}
+
+async function waitForMovement(page, label, previousState, previousCanvas) {
+  let lastState = previousState;
+  let lastCanvas = previousCanvas;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await page.waitForTimeout(150);
+    const state = await assertNotGameOver(page, label);
+    const canvas = await readCanvas(page);
+    const changedFromStart = progressed(previousState, state) || canvas !== previousCanvas;
+    const changedSinceLast = progressed(lastState, state) || canvas !== lastCanvas;
+    if (changedFromStart && changedSinceLast) {
+      return { state, canvas };
+    }
+    lastState = state;
+    lastCanvas = canvas;
+  }
+  fail(`Canvas or test state did not keep changing during ${label}.`, {
+    previousState,
+    lastState,
+    previousCanvas,
+    lastCanvas,
+  });
+}
+
+const { browser, browserName } = await launchBrowser();
+const consoleMessages = [];
+try {
+  const page = await browser.newPage({ viewport: { width: 900, height: 700 } });
+  page.on("console", (message) => {
+    if (["error", "warning"].includes(message.type())) {
+      consoleMessages.push(`${message.type()}: ${message.text()}`);
+    }
+  });
+  page.on("pageerror", (error) => {
+    consoleMessages.push(`pageerror: ${error.message}`);
+  });
+
+  await page.goto(pathToFileURL(indexPath).href, { waitUntil: "load" });
+  const title = await page.title();
+  if (!/snake/i.test(title)) {
+    fail("Browser did not open the Snake page.", { title });
+  }
+  await page.waitForSelector("canvas", { state: "visible", timeout: 10000 });
+  const canvasBox = await page.locator("canvas").boundingBox();
+  if (!canvasBox || canvasBox.width <= 0 || canvasBox.height <= 0) {
+    fail("Canvas was not visible.");
+  }
+
+  const initialState = await assertNotGameOver(page, "initial load");
+  const initialCanvas = await readCanvas(page);
+  await page.waitForTimeout(350);
+  const afterLoadState = await assertNotGameOver(page, "post-load idle");
+  const afterLoadCanvas = await readCanvas(page);
+
+  await page.keyboard.press("ArrowRight");
+  const afterRight = await waitForMovement(page, "ArrowRight movement", afterLoadState, afterLoadCanvas);
+
+  await page.keyboard.press("ArrowLeft");
+  await page.waitForTimeout(220);
+  const afterReverseState = await assertNotGameOver(page, "opposite-direction guard");
+  const reverseDirection = directionOf(afterReverseState);
+  if (reverseDirection && Number(reverseDirection.x) < 0) {
+    fail("Opposite-direction reversal was not prevented.", { state: afterReverseState });
+  }
+
+  await page.keyboard.press("ArrowDown");
+  const afterDown = await waitForMovement(page, "second valid direction", afterReverseState ?? afterRight.state, afterRight.canvas);
+
+  const restartButton = page.locator("#restart-btn, [data-testid='restart-button']").first();
+  if (await restartButton.count() === 0) {
+    fail("Restart button was missing. Expected #restart-btn or data-testid='restart-button'.");
+  }
+  await restartButton.click({ timeout: 5000 });
+  await page.waitForTimeout(250);
+  const afterRestartState = await assertNotGameOver(page, "restart");
+  const restartScore = await readScore(page);
+  if (!visibleScoreIsZero(restartScore)) {
+    fail("Restart did not reset the visible score.", { restartScore });
+  }
+  const afterRestartCanvas = await readCanvas(page);
+  await page.keyboard.press("ArrowRight");
+  await waitForMovement(page, "post-restart movement", afterRestartState, afterRestartCanvas);
+
+  if (consoleMessages.some((message) => message.toLowerCase().includes("error"))) {
+    fail("Browser console reported errors.", { consoleMessages });
+  }
+
+  console.log(JSON.stringify({
+    status: "ok",
+    browser: browserName,
+    title,
+    state_hook: Boolean(initialState || afterLoadState || afterRight.state || afterDown.state),
+    checks: {
+      page_opened: true,
+      canvas_visible: true,
+      no_immediate_game_over: true,
+      direction_key_moves_game: true,
+      opposite_reversal_prevented: true,
+      second_direction_continues: true,
+      restart_works: true,
+      canvas_changed: initialCanvas !== afterDown.canvas || initialCanvas !== afterRight.canvas,
+    },
+    console_messages: consoleMessages,
+  }));
+} finally {
+  await browser.close();
+}
+'@
+
+  $result = Invoke-NativeCapture -FilePath $node -Arguments @($scriptPath, $IndexPath, $nodeModules)
+  if ($result.ExitCode -ne 0) {
+    throw "Browser gameplay validation failed: $($result.Output -join "`n")"
+  }
+  $jsonText = ($result.Output | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join "`n"
+  if ([string]::IsNullOrWhiteSpace($jsonText)) {
+    throw "Browser gameplay validation produced no JSON output."
+  }
+  $jsonText | ConvertFrom-Json
+}
+
 function Get-FirstEnvValue {
   param([string[]]$Names)
   foreach ($name in $Names) {
@@ -562,13 +832,13 @@ try {
     })
   }
 
-  $task = "Create a minimal Snake game in $projectPath. Requirements: create index.html, style.css, main.js, and README.md; use vanilla HTML/CSS/JS only; no external network dependencies; arrow keys or WASD movement; visible score; restart button or restart on game over; code is readable. Acceptance: node --check main.js passes and the game can run by opening index.html. Do not commit, push, publish, or clean the working tree."
+  $task = "Create a minimal Snake game in $projectPath. Requirements: create exactly these project files: index.html, style.css, main.js, and README.md; use vanilla HTML/CSS/JS only; no external network dependencies; arrow keys or WASD movement; visible score; a visible restart button with id='restart-btn' and text 'Restart'; code is readable. Do not create package.json, package-lock.json, node_modules, tests, screenshots, or reports. Gameplay requirements: the snake must not self-collide immediately on page load, the game must either wait for the first valid direction key or start with a safe initial direction, opposite-direction reversal must be prevented, and Game Over must not appear immediately after load or after the first valid move. Expose a minimal read-only window.__snakeTestState snapshot or object with gameOver, score, head, direction, and tick fields so Coder can validate browser gameplay after Start Work. During Start Work, do not install Playwright and do not run browser automation; Coder's smoke script runs browser validation after OpenHands finishes. Executor acceptance before final summary: create the four files, include #restart-btn, and run node --check main.js. Do not commit, push, publish, or clean the working tree."
   $firstTurn = Send-PlannerTurn -Message $task -Confirmed $false
   Assert-Smoke (-not [string]::IsNullOrWhiteSpace($firstTurn.assistant_message)) "First Planner turn did not return assistant text."
   Assert-Smoke ((Count-Words $firstTurn.assistant_message) -le 600) "First Planner response was too long."
   Assert-Smoke ($firstTurn.should_start_workflow -eq $false) "First Planner turn unexpectedly requested execution."
 
-  $secondTurn = Send-PlannerTurn -Message "Confirm the Snake task is ready for Start Work. Execute only after Start Work through OpenHands. Target folder: $projectPath. Acceptance: create index.html, style.css, main.js, README.md; node --check main.js passes; Review Changes and Final Summary appear; leave changes uncommitted." -Confirmed $true -Mode "work"
+  $secondTurn = Send-PlannerTurn -Message "Confirm the Snake task is ready for Start Work. Execute only after Start Work through OpenHands. Target folder: $projectPath. Start Work should create only index.html, style.css, main.js, and README.md; include a visible restart button with id='restart-btn'; use no external dependencies; do not create package.json, package-lock.json, node_modules, tests, screenshots, or reports; do not install Playwright or run browser automation inside the user project. Run node --check main.js if available, then stop with a short final summary. Coder's smoke script will perform browser gameplay validation after OpenHands finishes. Review Changes and Final Summary must appear; leave changes uncommitted." -Confirmed $true -Mode "work"
   Assert-Smoke (-not [string]::IsNullOrWhiteSpace($secondTurn.assistant_message)) "Second Planner turn did not return assistant text."
   Assert-Smoke ((Count-Words $secondTurn.assistant_message) -le 120) "Ready Planner response was too long."
   Assert-Smoke ($secondTurn.assistant_message.Contains("Click Start Work")) "Planner did not direct user to Start Work."
@@ -618,10 +888,23 @@ try {
   Assert-Smoke (Test-Path -LiteralPath $stylePath) "style.css was not created."
   Assert-Smoke (Test-Path -LiteralPath $mainPath) "main.js was not created."
   Assert-Smoke (Test-Path -LiteralPath $readmePath) "README.md was not created."
+  $indexHtml = Get-Content -LiteralPath $indexPath -Raw
+  Assert-Smoke ($indexHtml.Contains('id="restart-btn"') -or $indexHtml.Contains("id='restart-btn'")) "index.html did not include #restart-btn."
+  foreach ($forbiddenPath in @("package.json", "package-lock.json", "node_modules", "tests", "screenshots", "reports")) {
+    $candidate = Join-Path $projectPath $forbiddenPath
+    Assert-Smoke (-not (Test-Path -LiteralPath $candidate)) "Start Work created forbidden Snake project artifact: $forbiddenPath."
+  }
 
   $node = (Get-Command node).Source
   $nodeCheck = Invoke-NativeCapture -FilePath $node -Arguments @("--check", $mainPath)
   Assert-Smoke ($nodeCheck.ExitCode -eq 0) "node --check failed: $($nodeCheck.Output -join "`n")"
+
+  $browserValidation = Invoke-SnakeBrowserValidation -IndexPath $indexPath
+  Assert-Smoke ($browserValidation.status -eq "ok") "Browser gameplay validation did not pass."
+  Assert-Smoke ($browserValidation.checks.no_immediate_game_over -eq $true) "Browser validation did not confirm no immediate Game Over."
+  Assert-Smoke ($browserValidation.checks.direction_key_moves_game -eq $true) "Browser validation did not confirm direction key movement."
+  Assert-Smoke ($browserValidation.checks.second_direction_continues -eq $true) "Browser validation did not confirm continued movement."
+  Assert-Smoke ($browserValidation.checks.restart_works -eq $true) "Browser validation did not confirm Restart."
 
   $changes = Invoke-RestJsonWithRetry -Method Get -Uri "$base/api/v3/runs/$runId/changes"
   $changeSets = @($changes.changes)
@@ -683,7 +966,10 @@ try {
     style_exists = Test-Path -LiteralPath $stylePath
     main_js_exists = Test-Path -LiteralPath $mainPath
     readme_exists = Test-Path -LiteralPath $readmePath
+    forbidden_project_artifacts_absent = $true
     node_check = "passed"
+    browser_gameplay = "passed"
+    browser_validation = $browserValidation
     review_changes = $changeSets.Count
     changed_files = $changedPaths
     secrets_check = "passed"

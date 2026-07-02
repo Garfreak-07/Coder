@@ -133,6 +133,10 @@ impl ExecutorRuntime {
         self.openhands.ensure_started(settings);
     }
 
+    fn restart_unhealthy_openhands(&self, settings: &OpenHandsSettings) -> bool {
+        self.openhands.restart_unhealthy(settings)
+    }
+
     fn openhands_connection(&self, settings: &OpenHandsSettings) -> OpenHandsRuntimeConnection {
         self.openhands.connection(settings)
     }
@@ -153,6 +157,7 @@ struct ManagedOpenHandsRuntimeState {
     child: Option<Child>,
     startup_attempted: bool,
     startup_error: Option<String>,
+    launched_at: Option<SystemTime>,
 }
 
 #[derive(Debug, Clone)]
@@ -186,6 +191,7 @@ impl ManagedOpenHandsRuntime {
                 child: None,
                 startup_attempted: false,
                 startup_error: None,
+                launched_at: None,
             }),
         }
     }
@@ -203,6 +209,7 @@ impl ManagedOpenHandsRuntime {
             .is_some()
         {
             state.child = None;
+            state.launched_at = None;
         }
         if state.child.is_some() || state.startup_attempted {
             return;
@@ -222,8 +229,8 @@ impl ManagedOpenHandsRuntime {
         process.env("OH_SECRET_KEY", &self.runtime_secret);
         let state_dir = managed_openhands_state_dir(port);
         process.env("OH_CANVAS_SAFE_STATE_DIR", &state_dir);
-        process.env("UV_CACHE_DIR", managed_openhands_uv_cache_dir(&state_dir));
-        process.env("UV_TOOL_DIR", managed_openhands_uv_tool_dir(&state_dir));
+        process.env("UV_CACHE_DIR", managed_openhands_uv_cache_dir());
+        process.env("UV_TOOL_DIR", managed_openhands_uv_tool_dir());
         if let Some(python) = managed_openhands_python() {
             process.env("UV_PYTHON", python);
         }
@@ -245,13 +252,42 @@ impl ManagedOpenHandsRuntime {
             Ok(child) => {
                 state.child = Some(child);
                 state.startup_error = None;
+                state.launched_at = Some(SystemTime::now());
             }
             Err(error) => {
                 state.startup_error = Some(format!(
                     "Coder could not start its internal OpenHands executor runtime: {error}"
                 ));
+                state.launched_at = None;
             }
         }
+    }
+
+    fn restart_unhealthy(&self, settings: &OpenHandsSettings) -> bool {
+        if openhands_runtime_mode(settings) != "managed" {
+            return false;
+        }
+        let should_restart = {
+            let state = self.state.lock().unwrap();
+            state
+                .launched_at
+                .and_then(|launched_at| launched_at.elapsed().ok())
+                .is_some_and(|elapsed| elapsed >= Duration::from_secs(120))
+        };
+        if !should_restart {
+            return false;
+        }
+        {
+            let mut state = self.state.lock().unwrap();
+            if let Some(mut child) = state.child.take() {
+                terminate_managed_child_process(&mut child);
+            }
+            state.startup_attempted = false;
+            state.startup_error = None;
+            state.launched_at = None;
+        }
+        self.ensure_started(settings);
+        true
     }
 
     fn connection(&self, settings: &OpenHandsSettings) -> OpenHandsRuntimeConnection {
@@ -383,18 +419,25 @@ fn managed_openhands_state_dir(port: u16) -> String {
         .to_string()
 }
 
-fn managed_openhands_uv_cache_dir(state_dir: &str) -> String {
-    FsPath::new(state_dir)
-        .join("uv-cache")
-        .to_string_lossy()
-        .to_string()
+fn managed_openhands_uv_cache_dir() -> String {
+    managed_openhands_stable_runtime_dir("CODER_OPENHANDS_UV_CACHE_DIR", "coder-openhands-uv-cache")
 }
 
-fn managed_openhands_uv_tool_dir(state_dir: &str) -> String {
-    FsPath::new(state_dir)
-        .join("uv-tools")
-        .to_string_lossy()
-        .to_string()
+fn managed_openhands_uv_tool_dir() -> String {
+    managed_openhands_stable_runtime_dir("CODER_OPENHANDS_UV_TOOL_DIR", "coder-openhands-uv-tools")
+}
+
+fn managed_openhands_stable_runtime_dir(env_name: &str, fallback_name: &str) -> String {
+    env::var_os(env_name)
+        .and_then(|value| value.into_string().ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            env::temp_dir()
+                .join(fallback_name)
+                .to_string_lossy()
+                .to_string()
+        })
 }
 
 fn managed_openhands_python() -> Option<String> {
@@ -5887,6 +5930,15 @@ async fn openhands_status_for_settings(
     let response = match request.send().await {
         Ok(response) => response,
         Err(error) => {
+            if connection.mode == "managed" {
+                let restarted = executor_runtime.restart_unhealthy_openhands(settings);
+                let detail = if restarted {
+                    "Coder internal executor runtime was restarted and is starting.".to_owned()
+                } else {
+                    "Coder internal executor runtime is starting.".to_owned()
+                };
+                return base_status("starting", true, detail);
+            }
             return base_status(
                 "failed",
                 true,
@@ -5896,6 +5948,22 @@ async fn openhands_status_for_settings(
     };
     let status = response.status();
     if !status.is_success() {
+        if connection.mode == "managed"
+            && matches!(
+                status,
+                StatusCode::BAD_GATEWAY
+                    | StatusCode::SERVICE_UNAVAILABLE
+                    | StatusCode::GATEWAY_TIMEOUT
+            )
+        {
+            let restarted = executor_runtime.restart_unhealthy_openhands(settings);
+            let detail = if restarted {
+                "Coder internal executor runtime was restarted and is starting.".to_owned()
+            } else {
+                "Coder internal executor runtime is starting.".to_owned()
+            };
+            return base_status("starting", true, detail);
+        }
         let detail = if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
             format!("OpenHands authentication failed with HTTP {status}.")
         } else {
@@ -9868,6 +9936,37 @@ mod tests {
         );
         let serialized = serde_json::to_string(&config).unwrap();
         assert!(!serialized.contains(&first_token));
+    }
+
+    #[test]
+    fn managed_openhands_uv_dirs_are_stable_and_overrideable() {
+        let previous_cache_dir = env::var_os("CODER_OPENHANDS_UV_CACHE_DIR");
+        let previous_tool_dir = env::var_os("CODER_OPENHANDS_UV_TOOL_DIR");
+        env::remove_var("CODER_OPENHANDS_UV_CACHE_DIR");
+        env::remove_var("CODER_OPENHANDS_UV_TOOL_DIR");
+
+        let cache_dir = managed_openhands_uv_cache_dir();
+        let tool_dir = managed_openhands_uv_tool_dir();
+        assert!(cache_dir.ends_with("coder-openhands-uv-cache"));
+        assert!(tool_dir.ends_with("coder-openhands-uv-tools"));
+        assert!(!cache_dir.contains("coder-openhands-managed"));
+        assert!(!tool_dir.contains("coder-openhands-managed"));
+
+        let cache_override = temp_root()
+            .join("uv-cache-override")
+            .to_string_lossy()
+            .to_string();
+        let tool_override = temp_root()
+            .join("uv-tools-override")
+            .to_string_lossy()
+            .to_string();
+        env::set_var("CODER_OPENHANDS_UV_CACHE_DIR", &cache_override);
+        env::set_var("CODER_OPENHANDS_UV_TOOL_DIR", &tool_override);
+        assert_eq!(managed_openhands_uv_cache_dir(), cache_override);
+        assert_eq!(managed_openhands_uv_tool_dir(), tool_override);
+
+        restore_env_var("CODER_OPENHANDS_UV_CACHE_DIR", previous_cache_dir);
+        restore_env_var("CODER_OPENHANDS_UV_TOOL_DIR", previous_tool_dir);
     }
 
     #[test]

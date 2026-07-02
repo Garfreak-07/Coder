@@ -153,8 +153,14 @@ settings `connected`, Planner Chat retains two user/assistant turns, Start Work
 returns a completed run id, timeline includes `Executor backend: OpenHands`,
 public ReAct items, and a final summary, final report status is `completed`,
 Review Changes includes `README.md`, `index.html`, `main.js`, and `style.css`,
-`node --check main.js` passes, and `secrets_check: passed`. A skipped result is
-not a live pass.
+`node --check main.js` passes, browser automation opens `index.html`, direction
+keys move the snake over multiple ticks, Game Over does not appear immediately,
+opposite-direction reversal is guarded when test state is exposed, Restart
+works, and `secrets_check: passed`. A skipped result is not a live pass.
+
+Earlier Snake E2E verified file creation and JS syntax only. It did not
+validate playable browser behavior. Browser interaction validation is now
+required.
 
 Latest local live result recorded for this checklist:
 
@@ -177,21 +183,26 @@ secrets_check: passed
 Latest local full path live result:
 
 ```text
-timestamp: 2026-07-02 00:52:20 +08:00
-server_url: http://127.0.0.1:8000
+timestamp: 2026-07-02 20:42:25 +08:00
+runtime_mode: managed
 provider: deepseek
 model: deepseek-v4-flash
 openhands_status: connected
-session_id: pcs_e10d554e-90b8-4aed-8805-894bf31af9df
-run_id: 657c6116-758b-4859-9ea7-2fcfd673a4a3
+session_id: pcs_a3a88493-7f06-4309-9779-aa7633005e71
+run_id: b47949a6-7744-4148-b3b2-fb4a2d76716e
 status: ok
 start_work_status: completed
-events: 127
-timeline_items: 87
+events: 134
+timeline_items: 93
 timeline_backend_items: 1
-timeline_react_items: 58
-final_summary_items: 1
+timeline_react_items: 89
+final_report_status: completed
+final_summary_words: 147
+node_check: passed
+browser_gameplay: passed
+browser: msedge
+browser_checks: no_immediate_game_over, direction_key_moves_game,
+  opposite_reversal_prevented, second_direction_continues, restart_works
 review_changes: 1
-undo_status: undone
 secrets_check: passed
 ```

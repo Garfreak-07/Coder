@@ -15,6 +15,8 @@
 - Timeline items cover plan updates, executor steps, tools, commands, file
   changes, approvals, verification, and final summary.
 - Review Changes exposes changed files, diff, checks, accept, and undo.
+- Generated browser apps require browser-level behavior validation; syntax and
+  file-creation checks are not enough for user-visible confidence.
 
 ## Removed Coder Behavior
 
@@ -41,6 +43,9 @@
   review diff.
 - Mock tests prove deterministic plumbing only. Optional live LLM smoke is
   required for confidence in the real product provider path.
+- Earlier Snake E2E verified file creation and JS syntax only. It did not
+  validate playable browser behavior. Browser interaction validation is now
+  required.
 
 ## Intentionally Different
 

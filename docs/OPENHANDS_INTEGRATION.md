@@ -202,10 +202,39 @@ The managed path requires only provider credentials. It does not require
 manual OpenHands token. Coder starts or discovers the executor runtime, injects
 the in-memory Executor Runtime Secret, runs Start Work through OpenHands, checks
 the generated files, runs `node --check main.js`, verifies Review Changes and
-the final summary, and scans serialized artifacts for provider or executor
-secret leakage.
+the final summary, opens the generated page in browser automation, verifies
+direction-key gameplay over multiple ticks, verifies Restart, and
+scans serialized artifacts for provider or executor secret leakage.
+
+Earlier Snake E2E verified file creation and JS syntax only. It did not
+validate playable browser behavior. Browser interaction validation is now
+required.
 
 Latest validated Snake product run:
+
+```text
+timestamp: 2026-07-02 20:42:25 +08:00
+runtime_mode: managed
+provider: deepseek
+model: deepseek-v4-flash
+session_id: pcs_a3a88493-7f06-4309-9779-aa7633005e71
+run_id: b47949a6-7744-4148-b3b2-fb4a2d76716e
+result: status ok, Start Work completed, final report completed
+target_folder: F:\ccc\coder-snake-game
+files: README.md, index.html, main.js, style.css
+forbidden_project_artifacts_absent: true
+node_check: passed
+browser_gameplay: passed
+browser: msedge
+browser_checks: page_opened, canvas_visible, no_immediate_game_over,
+  direction_key_moves_game, opposite_reversal_prevented,
+  second_direction_continues, restart_works, canvas_changed
+timeline: 93 items, 89 public ReAct items
+review_changes: 1
+secrets_check: passed
+```
+
+Previous Snake run before browser validation was added:
 
 ```text
 timestamp: 2026-07-02 +08:00
@@ -218,6 +247,7 @@ result: status ok, Start Work completed, final report completed
 target_folder: F:\ccc\coder-snake-game
 files: README.md, index.html, main.js, style.css
 node_check: passed
+browser_gameplay: not validated
 timeline: 144 items, 140 public ReAct items
 review_changes: 1
 secrets_check: passed
