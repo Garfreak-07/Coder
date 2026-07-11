@@ -347,13 +347,8 @@ fn local_skill_frontmatter_json(
 fn local_skill_execution_policy(
     frontmatter: &BTreeMap<String, serde_yaml::Value>,
 ) -> SkillExecutionPolicy {
-    let model = yaml_string_field(frontmatter, &["model"]).and_then(|model| {
-        if model.eq_ignore_ascii_case("inherit") {
-            None
-        } else {
-            Some(model)
-        }
-    });
+    let model = yaml_string_field(frontmatter, &["model"])
+        .filter(|model| !model.eq_ignore_ascii_case("inherit"));
     let context = yaml_string_field(frontmatter, &["context"])
         .filter(|context| context == "fork")
         .unwrap_or_else(|| "inline".to_owned());

@@ -481,7 +481,8 @@ fn model_tool_agent_tool_allowlist_decision(
                 resolution.allowed_agent_types,
                 "project_config",
             )
-        } else if let Some(selected_tools) = inherited_selected_tools {
+        } else {
+            let selected_tools = inherited_selected_tools?;
             (
                 selected_tools.iter().filter_map(Value::as_str).any(|tool| {
                     crate::model_tool_input::canonical_model_tool_name(tool) == "agent_subagent"
@@ -489,8 +490,6 @@ fn model_tool_agent_tool_allowlist_decision(
                 None,
                 "inherited_backend_context",
             )
-        } else {
-            return None;
         };
     let requested_subagent_type = model_tool_input_string(input, &["subagent_type"]);
     let (allowed, reason) = if !tool_selected {
