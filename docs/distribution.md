@@ -1,97 +1,86 @@
-# Distribution Baseline
+# Distribution
 
-The Rust-first Coder track now has a testable release and installer baseline.
-Publishing to npm, Homebrew, or signed artifact channels still requires external
-credentials and release-time checksums.
+Distribution currently centers on the Rust CLI, React frontend, installer
+scripts, and npm wrapper.
 
-## CLI Surface
+## CLI
 
-The Rust binary is `coder-rust`. The baseline command surface includes:
+Primary binary:
 
-- `coder-rust doctor`
-- `coder-rust config validate`
-- `coder-rust workflow validate`
-- `coder-rust workflow preview`
-- `coder-rust workflow run`
-- `coder-rust runs list`
-- `coder-rust runs show`
-- `coder-rust server`
-- `coder-rust openhands doctor`
-- `coder-rust tools ...`
+```sh
+cargo run -p coder-cli --bin coder-rust -- doctor
+```
 
-The command surface is covered by Rust CLI tests so these entrypoints do not
-disappear accidentally.
+Useful commands:
 
-## Release Workflow
+```sh
+cargo run -p coder-cli --bin coder-rust -- config validate --path examples/coder.yaml
+cargo run -p coder-cli --bin coder-rust -- workflow preview planner-led "summarize this repo"
+cargo run -p coder-cli --bin coder-rust -- workflow run --mock planner-led "summarize this repo"
+cargo run -p coder-cli --bin coder-rust -- runs list --store .coder
+cargo run -p coder-cli --bin coder-rust -- server --host 127.0.0.1 --port 8876
+```
 
-`.github/workflows/release.yml` runs on tags matching `v*` and can also be
-started manually. It builds release archives for:
+## Frontend
 
-- Windows x86_64: `coder-rust-x86_64-pc-windows-msvc.zip`
-- macOS Apple Silicon: `coder-rust-aarch64-apple-darwin.tar.gz`
-- macOS Intel: `coder-rust-x86_64-apple-darwin.tar.gz`
-- Linux x86_64 GNU: `coder-rust-x86_64-unknown-linux-gnu.tar.gz`
+Development:
 
-Each archive contains:
+```sh
+cd frontend
+npm install
+npm run dev
+```
 
-- `coder-rust` binary, or `coder-rust.exe` on Windows
-- `README.md`
-- `LICENSE`
-- `examples/coder.yaml`
+Release gate:
 
-Tagged runs upload archives to the GitHub Release with the repository
-`GITHUB_TOKEN`. No npm token, Homebrew tap token, or live LLM credential is
-required.
+```sh
+cd frontend
+npm ci
+npm run test
+npm run build
+```
 
-## Install Scripts
+## Installers
 
-PowerShell:
+Windows dry-run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -DryRun
-powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -Version latest
 ```
 
-POSIX shell:
+POSIX dry-run:
 
 ```bash
 bash ./scripts/install.sh --dry-run
-bash ./scripts/install.sh --version latest
 ```
 
-Both scripts detect OS/architecture, construct the expected GitHub release
-asset URL, and in non-dry-run mode download, extract, verify the binary exists,
-install into a user-local bin directory, and print `coder-rust doctor` as the
-next step.
+Installer scratch space can be moved off the system drive:
 
-## Package Sources
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1 -TempDir F:\bbb\coder\tmp\installer
+```
 
-`packaging/npm` contains a thin npm `bin` wrapper. It checks for a vendored
-binary or `coder-rust` on `PATH`; it does not silently download code during
-install.
+```bash
+CODER_INSTALL_TMPDIR=/path/to/cache bash ./scripts/install.sh --dry-run
+```
 
-`packaging/homebrew/coder-rust.rb` is a Homebrew formula template. Replace the
-placeholder SHA256 values after a release before publishing it to a tap.
+## npm Wrapper
 
-## CI Coverage
+The npm wrapper should launch the Rust binary and expose dry-run behavior for CI
+or package verification:
 
-The CI workflow includes an `installer-dry-run` job:
-
-```text
-pwsh ./scripts/install.ps1 -DryRun
-bash ./scripts/install.sh --dry-run
+```sh
 node packaging/npm/bin/coder-rust.js --dry-run
 ```
 
-These checks prove the installer scripts and wrapper are syntactically runnable
-without touching the network or installing files.
+## Release Checklist
 
-## Future Enhancements
+- `cargo fmt --all --check`
+- `cargo check --workspace`
+- `cargo test --workspace`
+- `cd frontend && npm ci && npm run test && npm run build`
+- installer dry-runs on supported platforms
+- provider live smoke when release notes claim provider/runtime behavior
 
-Non-blocking follow-ups:
-
-- publish npm package
-- publish Homebrew tap
-- add signed Windows/macOS artifacts
-- add checksum verification to installer scripts
-- attach SBOM/provenance metadata to releases
+Generated build artifacts should stay outside committed source. Large local
+build caches should use an explicit target/cache directory.

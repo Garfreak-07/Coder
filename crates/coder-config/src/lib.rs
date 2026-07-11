@@ -1,11 +1,39 @@
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+mod validation;
+
+mod permissions;
+
+pub use permissions::{
+    apply_permission_updates_to_policy, apply_permission_updates_to_settings, evaluate_permission,
+    permission_decision, permission_policy_explanation, permission_policy_rules,
+    permission_settings_update_applied, permission_update_application_applied,
+    permission_update_destination_supports_persistence, PermissionDecisionReason,
+    PermissionEvaluation, PermissionMode, PermissionRule, PermissionRuleSource,
+    PermissionRuleValue, PermissionSettingsRecord, PermissionSettingsRules,
+    PermissionSettingsUpdateApplication, PermissionUpdate, PermissionUpdateApplication,
+    PermissionUpdateDestination, CLAUDE_PERMISSION_CONTRACT_SOURCES, PERMISSION_FIELDS,
+};
+pub use validation::{validate_project_config, validate_workflow};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectConfig {
     pub version: u16,
+    #[serde(default, alias = "disableAllHooks")]
+    pub disable_all_hooks: bool,
+    #[serde(default, alias = "allowedWebhookUrls")]
+    pub allowed_webhook_urls: Option<Vec<String>>,
+    #[serde(default, alias = "webhookAllowedEnvVars")]
+    pub webhook_allowed_env_vars: Option<Vec<String>>,
+    #[serde(default)]
+    pub hooks: HookSettings,
     #[serde(default)]
     pub models: BTreeMap<String, ModelSpec>,
     #[serde(default)]
@@ -14,6 +42,110 @@ pub struct ProjectConfig {
     pub harnesses: BTreeMap<String, HarnessSpec>,
     #[serde(default)]
     pub workflows: BTreeMap<String, WorkflowSpec>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HookSettings {
+    #[serde(default, rename = "PreToolUse")]
+    pub pre_tool_use: Vec<HookMatcherSpec>,
+    #[serde(default, rename = "PostToolUse")]
+    pub post_tool_use: Vec<HookMatcherSpec>,
+    #[serde(default, rename = "PostToolUseFailure")]
+    pub post_tool_use_failure: Vec<HookMatcherSpec>,
+}
+
+impl HookSettings {
+    pub fn matchers_for_event(&self, event: HookEvent) -> &[HookMatcherSpec] {
+        match event {
+            HookEvent::PreToolUse => &self.pre_tool_use,
+            HookEvent::PostToolUse => &self.post_tool_use,
+            HookEvent::PostToolUseFailure => &self.post_tool_use_failure,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pre_tool_use.is_empty()
+            && self.post_tool_use.is_empty()
+            && self.post_tool_use_failure.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookEvent {
+    PreToolUse,
+    PostToolUse,
+    PostToolUseFailure,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookMatcherSpec {
+    #[serde(default)]
+    pub matcher: Option<String>,
+    #[serde(default)]
+    pub hooks: Vec<HookCommandSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HookCommandSpec {
+    Command {
+        command: String,
+        #[serde(default, rename = "if")]
+        if_condition: Option<String>,
+        #[serde(default)]
+        shell: Option<String>,
+        #[serde(default)]
+        timeout: Option<u64>,
+        #[serde(default, alias = "statusMessage")]
+        status_message: Option<String>,
+        #[serde(default)]
+        once: bool,
+        #[serde(default, rename = "async")]
+        run_async: bool,
+        #[serde(default, alias = "asyncRewake")]
+        async_rewake: bool,
+    },
+    Prompt {
+        prompt: String,
+        #[serde(default, rename = "if")]
+        if_condition: Option<String>,
+        #[serde(default)]
+        timeout: Option<u64>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default, alias = "statusMessage")]
+        status_message: Option<String>,
+        #[serde(default)]
+        once: bool,
+    },
+    Agent {
+        prompt: String,
+        #[serde(default, rename = "if")]
+        if_condition: Option<String>,
+        #[serde(default)]
+        timeout: Option<u64>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default, alias = "statusMessage")]
+        status_message: Option<String>,
+        #[serde(default)]
+        once: bool,
+    },
+    Webhook {
+        url: String,
+        #[serde(default, rename = "if")]
+        if_condition: Option<String>,
+        #[serde(default)]
+        timeout: Option<u64>,
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+        #[serde(default, alias = "allowedEnvVars")]
+        allowed_env_vars: Vec<String>,
+        #[serde(default, alias = "statusMessage")]
+        status_message: Option<String>,
+        #[serde(default)]
+        once: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,8 +162,98 @@ pub struct AgentSpec {
     pub model: String,
     pub system: String,
     #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default, alias = "disallowedTools", alias = "disallowed-tools")]
+    pub disallowed_tools: Vec<String>,
+    #[serde(default)]
     pub memory: MemoryAccess,
     pub output_contract: String,
+    #[serde(default)]
+    pub runtime: AgentRuntimePolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRuntimePolicy {
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default = "default_context_window_tokens")]
+    pub context_window_tokens: u32,
+    #[serde(default = "default_compact_output_reserve_tokens")]
+    pub compact_output_reserve_tokens: u32,
+    #[serde(default = "default_autocompact_buffer_tokens")]
+    pub autocompact_buffer_tokens: u32,
+    #[serde(default = "default_max_output_recovery_attempts")]
+    pub max_output_recovery_attempts: u8,
+    #[serde(default = "default_max_consecutive_compaction_failures")]
+    pub max_consecutive_compaction_failures: u8,
+    #[serde(default = "default_stream_idle_timeout_ms")]
+    pub stream_idle_timeout_ms: u64,
+}
+
+impl Default for AgentRuntimePolicy {
+    fn default() -> Self {
+        Self {
+            max_output_tokens: None,
+            max_turns: None,
+            effort: None,
+            context_window_tokens: AGENT_CONTEXT_WINDOW_TOKENS_DEFAULT,
+            compact_output_reserve_tokens: AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_DEFAULT,
+            autocompact_buffer_tokens: AGENT_AUTOCOMPACT_BUFFER_TOKENS_DEFAULT,
+            max_output_recovery_attempts: AGENT_MAX_OUTPUT_RECOVERY_ATTEMPTS_DEFAULT,
+            max_consecutive_compaction_failures: AGENT_MAX_CONSECUTIVE_COMPACTION_FAILURES_DEFAULT,
+            stream_idle_timeout_ms: AGENT_STREAM_IDLE_TIMEOUT_MS_DEFAULT,
+        }
+    }
+}
+
+pub const AGENT_MAX_OUTPUT_TOKENS_MIN: u32 = 256;
+pub const AGENT_MAX_OUTPUT_TOKENS_MAX: u32 = 64_000;
+pub const AGENT_EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+pub const AGENT_CONTEXT_WINDOW_TOKENS_DEFAULT: u32 = 200_000;
+pub const AGENT_CONTEXT_WINDOW_TOKENS_MIN: u32 = 32_000;
+pub const AGENT_CONTEXT_WINDOW_TOKENS_MAX: u32 = 1_000_000;
+pub const AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_DEFAULT: u32 = 20_000;
+pub const AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_MIN: u32 = 1_000;
+pub const AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_MAX: u32 = AGENT_MAX_OUTPUT_TOKENS_MAX;
+pub const AGENT_AUTOCOMPACT_BUFFER_TOKENS_DEFAULT: u32 = 13_000;
+pub const AGENT_AUTOCOMPACT_BUFFER_TOKENS_MIN: u32 = 1_000;
+pub const AGENT_AUTOCOMPACT_BUFFER_TOKENS_MAX: u32 = 100_000;
+pub const AGENT_MAX_OUTPUT_RECOVERY_ATTEMPTS_DEFAULT: u8 = 3;
+pub const AGENT_MAX_OUTPUT_RECOVERY_ATTEMPTS_MIN: u8 = 0;
+pub const AGENT_MAX_OUTPUT_RECOVERY_ATTEMPTS_MAX: u8 = 10;
+pub const AGENT_MAX_CONSECUTIVE_COMPACTION_FAILURES_DEFAULT: u8 = 3;
+pub const AGENT_MAX_CONSECUTIVE_COMPACTION_FAILURES_MIN: u8 = 1;
+pub const AGENT_MAX_CONSECUTIVE_COMPACTION_FAILURES_MAX: u8 = 10;
+pub const AGENT_STREAM_IDLE_TIMEOUT_MS_DEFAULT: u64 = 90_000;
+pub const AGENT_STREAM_IDLE_TIMEOUT_MS_MIN: u64 = 10_000;
+pub const AGENT_STREAM_IDLE_TIMEOUT_MS_MAX: u64 = 600_000;
+
+fn default_context_window_tokens() -> u32 {
+    AGENT_CONTEXT_WINDOW_TOKENS_DEFAULT
+}
+
+fn default_compact_output_reserve_tokens() -> u32 {
+    AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_DEFAULT
+}
+
+fn default_autocompact_buffer_tokens() -> u32 {
+    AGENT_AUTOCOMPACT_BUFFER_TOKENS_DEFAULT
+}
+
+fn default_max_output_recovery_attempts() -> u8 {
+    AGENT_MAX_OUTPUT_RECOVERY_ATTEMPTS_DEFAULT
+}
+
+fn default_max_consecutive_compaction_failures() -> u8 {
+    AGENT_MAX_CONSECUTIVE_COMPACTION_FAILURES_DEFAULT
+}
+
+fn default_stream_idle_timeout_ms() -> u64 {
+    AGENT_STREAM_IDLE_TIMEOUT_MS_DEFAULT
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -58,7 +280,6 @@ pub enum MemoryScope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HarnessSpec {
     pub backend: String,
-    pub openhands: Option<OpenHandsHarnessConfig>,
     #[serde(default)]
     pub tools: Vec<String>,
     #[serde(default)]
@@ -69,112 +290,184 @@ pub struct HarnessSpec {
     pub verification: VerificationPolicy,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenHandsHarnessConfig {
-    pub server_url: String,
-    pub session_api_key_env: Option<String>,
-    #[serde(default, skip_serializing, skip_deserializing)]
-    pub session_api_key: Option<String>,
-    pub workspace_mode: Option<String>,
-    #[serde(default = "default_prefer_websocket")]
-    pub prefer_websocket: bool,
-    #[serde(default = "default_poll_interval_ms")]
-    pub poll_interval_ms: u64,
-    #[serde(default = "default_max_event_poll_seconds")]
-    pub max_event_poll_seconds: u64,
-    #[serde(default = "default_max_events")]
-    pub max_events: usize,
-    #[serde(default = "default_terminal_event_kinds")]
-    pub terminal_event_kinds: Vec<String>,
-    #[serde(default)]
-    pub api_paths: OpenHandsApiPaths,
-    #[serde(default)]
-    pub run_start_strategy: OpenHandsRunStartStrategy,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentToolResolution {
+    pub selected_tools: Vec<String>,
+    pub requested_tools: Vec<String>,
+    pub disallowed_tools: Vec<String>,
+    pub invalid_requested_tools: Vec<String>,
+    pub ignored_disallowed_tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_agent_types: Option<Vec<String>>,
+    pub wildcard: bool,
 }
 
-fn default_prefer_websocket() -> bool {
-    true
-}
+pub fn resolve_agent_tools(agent: &AgentSpec, harness: &HarnessSpec) -> AgentToolResolution {
+    let requested_specs = parsed_tool_specs(&agent.tools);
+    let requested_tools = requested_specs
+        .iter()
+        .map(|spec| spec.tool_name.clone())
+        .collect::<Vec<_>>();
+    let disallowed_tools = normalized_tool_specs(&agent.disallowed_tools);
+    let disallowed_set = disallowed_tools.iter().cloned().collect::<BTreeSet<_>>();
+    let harness_specs = parsed_tool_specs(&harness.tools);
+    let harness_tool_names = harness_specs
+        .iter()
+        .map(|tool| tool.tool_name.clone())
+        .collect::<BTreeSet<_>>();
+    let wildcard = requested_tools.is_empty()
+        || (requested_tools.len() == 1 && requested_tools.first().is_some_and(|tool| tool == "*"));
 
-fn default_poll_interval_ms() -> u64 {
-    1000
-}
-
-fn default_max_event_poll_seconds() -> u64 {
-    300
-}
-
-fn default_max_events() -> usize {
-    1000
-}
-
-fn default_terminal_event_kinds() -> Vec<String> {
-    [
-        "completed",
-        "done",
-        "finished",
-        "failed",
-        "error",
-        "cancelled",
-        "canceled",
-        "run.completed",
-        "run.failed",
-        "run.cancelled",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenHandsApiPaths {
-    #[serde(default)]
-    pub api_prefix: String,
-    #[serde(default = "default_conversations_path")]
-    pub conversations_path: String,
-    #[serde(default)]
-    pub events_search_path: Option<String>,
-    #[serde(default)]
-    pub run_endpoint_path: Option<String>,
-    #[serde(default)]
-    pub websocket_path_template: Option<String>,
-    #[serde(default)]
-    pub auth_header: OpenHandsAuthHeaderMode,
-}
-
-impl Default for OpenHandsApiPaths {
-    fn default() -> Self {
-        Self {
-            api_prefix: String::new(),
-            conversations_path: default_conversations_path(),
-            events_search_path: None,
-            run_endpoint_path: None,
-            websocket_path_template: None,
-            auth_header: OpenHandsAuthHeaderMode::default(),
+    let mut selected_tools = Vec::new();
+    let mut seen_selected = BTreeSet::new();
+    let mut selected_source_specs = Vec::new();
+    let mut invalid_requested_tools = Vec::new();
+    if wildcard {
+        for tool in &harness_specs {
+            let tool_name = &tool.tool_name;
+            if disallowed_set.contains(tool_name) {
+                continue;
+            }
+            if seen_selected.insert(tool_name.clone()) {
+                selected_tools.push(tool_name.clone());
+                selected_source_specs.push(tool.clone());
+            }
         }
+    } else {
+        for requested_tool in &requested_specs {
+            if disallowed_set.contains(&requested_tool.tool_name)
+                || !harness_tool_names.contains(&requested_tool.tool_name)
+            {
+                invalid_requested_tools.push(requested_tool.tool_name.clone());
+                continue;
+            }
+            if seen_selected.insert(requested_tool.tool_name.clone()) {
+                selected_tools.push(requested_tool.tool_name.clone());
+                selected_source_specs.push(requested_tool.clone());
+            }
+        }
+    }
+
+    let ignored_disallowed_tools = disallowed_tools
+        .iter()
+        .filter(|tool| !harness_tool_names.contains(*tool))
+        .cloned()
+        .collect();
+    let allowed_agent_types =
+        resolve_allowed_agent_types(&selected_tools, &selected_source_specs, &harness_specs);
+
+    AgentToolResolution {
+        selected_tools,
+        requested_tools,
+        disallowed_tools,
+        invalid_requested_tools,
+        ignored_disallowed_tools,
+        allowed_agent_types,
+        wildcard,
     }
 }
 
-fn default_conversations_path() -> String {
-    "/conversations".to_owned()
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolSpec {
+    pub tool_name: String,
+    pub rule_content: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OpenHandsAuthHeaderMode {
-    #[default]
-    AuthorizationBearer,
-    XSessionApiKey,
+pub fn parse_tool_spec(tool_spec: &str) -> Option<ToolSpec> {
+    let trimmed = tool_spec.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (tool_name, rule_content) = if let Some((name, rest)) = trimmed.split_once('(') {
+        let content = rest.strip_suffix(')').unwrap_or(rest).trim();
+        (
+            name.trim(),
+            (!content.is_empty()).then(|| content.to_owned()),
+        )
+    } else {
+        (trimmed, None)
+    };
+    let tool_name = canonical_config_tool_name(tool_name);
+    (!tool_name.is_empty()).then_some(ToolSpec {
+        tool_name,
+        rule_content,
+    })
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OpenHandsRunStartStrategy {
-    PostRunEndpoint,
-    #[default]
-    PostUserEventWithRunTrue,
-    None,
+pub fn normalized_tool_name(tool_spec: &str) -> Option<String> {
+    parse_tool_spec(tool_spec).map(|spec| spec.tool_name)
 }
+
+fn normalized_tool_specs(tool_specs: &[String]) -> Vec<String> {
+    parsed_tool_specs(tool_specs)
+        .into_iter()
+        .map(|tool| tool.tool_name)
+        .collect()
+}
+
+fn parsed_tool_specs(tool_specs: &[String]) -> Vec<ToolSpec> {
+    tool_specs
+        .iter()
+        .filter_map(|tool| parse_tool_spec(tool))
+        .collect()
+}
+
+fn canonical_config_tool_name(tool_name: &str) -> String {
+    match tool_name {
+        "Agent" | "agent" | "Task" | "task" | "subagent" => "agent_subagent".to_owned(),
+        _ => tool_name.to_owned(),
+    }
+}
+
+fn resolve_allowed_agent_types(
+    selected_tools: &[String],
+    selected_source_specs: &[ToolSpec],
+    harness_specs: &[ToolSpec],
+) -> Option<Vec<String>> {
+    if !selected_tools.iter().any(|tool| tool == "agent_subagent") {
+        return None;
+    }
+    let agent_restrictions = collect_agent_type_restrictions(selected_source_specs);
+    let harness_restrictions = collect_agent_type_restrictions(harness_specs);
+    match (agent_restrictions, harness_restrictions) {
+        (Some(agent), Some(harness)) => Some(intersect_preserving_order(agent, &harness)),
+        (Some(agent), None) => Some(agent),
+        (None, Some(harness)) => Some(harness),
+        (None, None) => None,
+    }
+}
+
+fn collect_agent_type_restrictions(specs: &[ToolSpec]) -> Option<Vec<String>> {
+    let mut allowed = Vec::new();
+    let mut seen = BTreeSet::new();
+    for spec in specs
+        .iter()
+        .filter(|spec| spec.tool_name == "agent_subagent")
+        .filter_map(|spec| spec.rule_content.as_deref())
+    {
+        for agent_type in spec
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+        {
+            if seen.insert(agent_type.to_owned()) {
+                allowed.push(agent_type.to_owned());
+            }
+        }
+    }
+    (!allowed.is_empty()).then_some(allowed)
+}
+
+fn intersect_preserving_order(left: Vec<String>, right: &[String]) -> Vec<String> {
+    let right = right.iter().cloned().collect::<BTreeSet<_>>();
+    left.into_iter()
+        .filter(|item| right.contains(item))
+        .collect()
+}
+
+pub const WORKFLOW_MAX_ROUNDS_DEFAULT: u32 = 3;
+pub const WORKFLOW_MAX_ROUNDS_MIN: u32 = 1;
+pub const WORKFLOW_MAX_ROUNDS_MAX: u32 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -186,12 +479,16 @@ pub enum PermissionDecision {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionPolicy {
+    #[serde(default)]
+    pub mode: PermissionMode,
     #[serde(default = "allow")]
     pub read_files: PermissionDecision,
     #[serde(default = "ask")]
     pub write_files: PermissionDecision,
     #[serde(default = "ask")]
     pub run_commands: PermissionDecision,
+    #[serde(default = "ask")]
+    pub child_harness_permissions: PermissionDecision,
     #[serde(default = "deny")]
     pub network: PermissionDecision,
     #[serde(default = "deny")]
@@ -209,9 +506,11 @@ pub struct PermissionPolicy {
 impl Default for PermissionPolicy {
     fn default() -> Self {
         Self {
+            mode: PermissionMode::Default,
             read_files: PermissionDecision::Allow,
             write_files: PermissionDecision::Ask,
             run_commands: PermissionDecision::Ask,
+            child_harness_permissions: PermissionDecision::Ask,
             network: PermissionDecision::Deny,
             secrets: PermissionDecision::Deny,
             publish_external: PermissionDecision::Deny,
@@ -247,6 +546,8 @@ pub struct WorkflowSpec {
     pub name: String,
     #[serde(default = "default_max_rounds")]
     pub max_rounds: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
     #[serde(default)]
     pub nodes: Vec<WorkflowNodeSpec>,
     #[serde(default)]
@@ -256,7 +557,7 @@ pub struct WorkflowSpec {
 }
 
 fn default_max_rounds() -> u32 {
-    3
+    WORKFLOW_MAX_ROUNDS_DEFAULT
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -353,279 +654,6 @@ pub fn load_project_config(path: impl AsRef<Path>) -> Result<ProjectConfig, Conf
     })
 }
 
-pub fn validate_project_config(config: &ProjectConfig) -> ValidationReport {
-    let mut issues = Vec::new();
-
-    if config.version != 1 {
-        issues.push(error(
-            "unsupported_version",
-            "config version must be 1",
-            "version",
-        ));
-    }
-    if config.workflows.is_empty() {
-        issues.push(error(
-            "missing_workflows",
-            "config must define at least one workflow",
-            "workflows",
-        ));
-    }
-
-    for (agent_id, agent) in &config.agents {
-        if !config.models.contains_key(&agent.model) {
-            issues.push(error(
-                "agent_model_not_found",
-                format!(
-                    "agent '{agent_id}' references unknown model '{}'",
-                    agent.model
-                ),
-                format!("agents.{agent_id}.model"),
-            ));
-        }
-        if agent.system.trim().is_empty() {
-            issues.push(warning(
-                "agent_system_empty",
-                format!("agent '{agent_id}' has empty system instructions"),
-                format!("agents.{agent_id}.system"),
-            ));
-        }
-        if agent.role != "planner"
-            && (contains_long_term_memory_scope(&agent.memory.read)
-                || contains_long_term_memory_scope(&agent.memory.write))
-        {
-            issues.push(error(
-                "agent_long_term_memory_for_non_planner",
-                format!(
-                    "agent '{agent_id}' has role '{}' and may only use workflow/run memory scopes",
-                    agent.role
-                ),
-                format!("agents.{agent_id}.memory"),
-            ));
-        }
-    }
-
-    for (harness_id, harness) in &config.harnesses {
-        if harness.backend == "openhands" && harness.openhands.is_none() {
-            issues.push(error(
-                "openhands_config_missing",
-                format!("harness '{harness_id}' uses openhands backend without openhands config"),
-                format!("harnesses.{harness_id}.openhands"),
-            ));
-        }
-        if harness.backend != "planner-model"
-            && (contains_long_term_memory_scope(&harness.memory.read)
-                || contains_long_term_memory_scope(&harness.memory.write))
-        {
-            issues.push(error(
-                "harness_long_term_memory_for_execution_backend",
-                format!(
-                    "harness '{harness_id}' uses backend '{}' and may only use workflow/run memory scopes",
-                    harness.backend
-                ),
-                format!("harnesses.{harness_id}.memory"),
-            ));
-        }
-    }
-
-    for (workflow_id, workflow) in &config.workflows {
-        issues.extend(validate_workflow(
-            workflow_id,
-            workflow,
-            &config.agents,
-            &config.harnesses,
-        ));
-    }
-
-    ValidationReport::new(issues)
-}
-
-pub fn validate_workflow(
-    workflow_id: &str,
-    workflow: &WorkflowSpec,
-    agents: &BTreeMap<String, AgentSpec>,
-    harnesses: &BTreeMap<String, HarnessSpec>,
-) -> Vec<ValidationIssue> {
-    let mut issues = Vec::new();
-    if workflow.name.trim().is_empty() {
-        issues.push(error(
-            "workflow_name_empty",
-            format!("workflow '{workflow_id}' must have a name"),
-            format!("workflows.{workflow_id}.name"),
-        ));
-    }
-    if workflow.max_rounds == 0 || workflow.max_rounds > 20 {
-        issues.push(error(
-            "workflow_max_rounds_out_of_range",
-            format!("workflow '{workflow_id}' max_rounds must be between 1 and 20"),
-            format!("workflows.{workflow_id}.max_rounds"),
-        ));
-    }
-    if let Some(final_report_agent) = &workflow.stop.final_report_agent {
-        if !agents.contains_key(final_report_agent) {
-            issues.push(error(
-                "workflow_final_report_agent_not_found",
-                format!(
-                    "workflow '{workflow_id}' final_report_agent '{final_report_agent}' does not exist"
-                ),
-                format!("workflows.{workflow_id}.stop.final_report_agent"),
-            ));
-        }
-    }
-    for status in &workflow.stop.on_status {
-        if !is_known_stop_status(status) {
-            issues.push(error(
-                "workflow_stop_status_unknown",
-                format!("workflow '{workflow_id}' stop status '{status}' is not supported"),
-                format!("workflows.{workflow_id}.stop.on_status"),
-            ));
-        }
-    }
-
-    let node_ids: std::collections::BTreeSet<&str> =
-        workflow.nodes.iter().map(|node| node.id.as_str()).collect();
-    if node_ids.len() != workflow.nodes.len() {
-        issues.push(error(
-            "duplicate_workflow_node",
-            format!("workflow '{workflow_id}' contains duplicate node ids"),
-            format!("workflows.{workflow_id}.nodes"),
-        ));
-    }
-    if workflow.nodes.is_empty() {
-        issues.push(error(
-            "workflow_nodes_empty",
-            format!("workflow '{workflow_id}' must define at least one node"),
-            format!("workflows.{workflow_id}.nodes"),
-        ));
-    }
-    for node in &workflow.nodes {
-        if node.id.trim().is_empty() {
-            issues.push(error(
-                "workflow_node_id_empty",
-                format!("workflow '{workflow_id}' contains a node with an empty id"),
-                format!("workflows.{workflow_id}.nodes"),
-            ));
-        }
-        if !agents.contains_key(&node.agent) {
-            issues.push(error(
-                "workflow_node_agent_not_found",
-                format!(
-                    "workflow '{workflow_id}' node '{}' references unknown agent '{}'",
-                    node.id, node.agent
-                ),
-                format!("workflows.{workflow_id}.nodes.{}", node.id),
-            ));
-        }
-        if !harnesses.contains_key(&node.harness) {
-            issues.push(error(
-                "workflow_node_harness_not_found",
-                format!(
-                    "workflow '{workflow_id}' node '{}' references unknown harness '{}'",
-                    node.id, node.harness
-                ),
-                format!("workflows.{workflow_id}.nodes.{}", node.id),
-            ));
-        }
-    }
-    for edge in &workflow.edges {
-        if edge.on.trim().is_empty() {
-            issues.push(error(
-                "workflow_edge_condition_empty",
-                format!(
-                    "workflow '{workflow_id}' edge from '{}' to '{}' must define a transition condition",
-                    edge.from, edge.to
-                ),
-                format!("workflows.{workflow_id}.edges"),
-            ));
-        } else if !is_known_transition_condition(&edge.on) {
-            issues.push(error(
-                "workflow_edge_condition_unknown",
-                format!(
-                    "workflow '{workflow_id}' edge from '{}' to '{}' uses unsupported transition condition '{}'",
-                    edge.from, edge.to, edge.on
-                ),
-                format!("workflows.{workflow_id}.edges"),
-            ));
-        }
-        if !node_ids.contains(edge.from.as_str()) {
-            issues.push(error(
-                "workflow_edge_source_not_found",
-                format!(
-                    "workflow '{workflow_id}' edge source '{}' does not exist",
-                    edge.from
-                ),
-                format!("workflows.{workflow_id}.edges"),
-            ));
-        }
-        if !node_ids.contains(edge.to.as_str()) {
-            issues.push(error(
-                "workflow_edge_target_not_found",
-                format!(
-                    "workflow '{workflow_id}' edge target '{}' does not exist",
-                    edge.to
-                ),
-                format!("workflows.{workflow_id}.edges"),
-            ));
-        }
-    }
-    issues
-}
-
-fn is_known_transition_condition(condition: &str) -> bool {
-    matches!(
-        condition,
-        "ready" | "completed" | "blocked" | "failed" | "cancelled" | "continue" | "finish"
-    )
-}
-
-fn is_known_stop_status(status: &str) -> bool {
-    matches!(
-        status,
-        "completed" | "blocked" | "failed" | "cancelled" | "max_rounds"
-    )
-}
-
-fn contains_long_term_memory_scope(scopes: &[MemoryScope]) -> bool {
-    scopes.iter().any(is_long_term_memory_scope)
-}
-
-fn is_long_term_memory_scope(scope: &MemoryScope) -> bool {
-    matches!(
-        scope,
-        MemoryScope::User
-            | MemoryScope::Project
-            | MemoryScope::Agent
-            | MemoryScope::RepoFacts
-            | MemoryScope::KnowledgeHints
-            | MemoryScope::ExternalDocs
-    )
-}
-
-fn error(
-    code: impl Into<String>,
-    message: impl Into<String>,
-    target: impl Into<String>,
-) -> ValidationIssue {
-    ValidationIssue {
-        level: ValidationLevel::Error,
-        code: code.into(),
-        message: message.into(),
-        target: target.into(),
-    }
-}
-
-fn warning(
-    code: impl Into<String>,
-    message: impl Into<String>,
-    target: impl Into<String>,
-) -> ValidationIssue {
-    ValidationIssue {
-        level: ValidationLevel::Warning,
-        code: code.into(),
-        message: message.into(),
-        target: target.into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,6 +664,174 @@ mod tests {
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
         let report = validate_project_config(&config);
         assert_eq!(report.status, "pass");
+    }
+
+    #[test]
+    fn workflow_token_budget_is_optional_but_must_be_positive() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        config
+            .workflows
+            .get_mut("planner-led")
+            .unwrap()
+            .token_budget = Some(100_000);
+        assert_eq!(validate_project_config(&config).status, "pass");
+
+        config
+            .workflows
+            .get_mut("planner-led")
+            .unwrap()
+            .token_budget = Some(0);
+        let report = validate_project_config(&config);
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "workflow_token_budget_zero"));
+    }
+
+    #[test]
+    fn claude_style_hooks_configuration_is_accepted() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        config.hooks = serde_yaml::from_str::<HookSettings>(
+            r#"
+PreToolUse:
+  - matcher: command_run|repo_read_file
+    hooks:
+      - type: command
+        command: echo checking
+        timeout: 5
+PostToolUse:
+  - matcher: "*"
+    hooks:
+      - type: webhook
+        url: http://127.0.0.1:8765/hooks
+"#,
+        )
+        .unwrap();
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "pass");
+    }
+
+    #[test]
+    fn webhook_hook_configuration_is_accepted() {
+        let config_text = format!(
+            "{}\nallowedWebhookUrls:\n  - https://hooks.example.com/*\nwebhookAllowedEnvVars:\n  - CODER_WEBHOOK_TOKEN\n",
+            include_str!("../../../examples/coder.yaml")
+        );
+        let mut config: ProjectConfig = serde_yaml::from_str(&config_text).unwrap();
+        config.hooks = serde_yaml::from_str::<HookSettings>(
+            r#"
+PreToolUse:
+  - matcher: command_run
+    hooks:
+      - type: webhook
+        url: https://hooks.example.com/coder
+        headers:
+          Authorization: Bearer $CODER_WEBHOOK_TOKEN
+        allowedEnvVars:
+          - CODER_WEBHOOK_TOKEN
+"#,
+        )
+        .unwrap();
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "pass");
+        assert_eq!(
+            config.allowed_webhook_urls.as_deref(),
+            Some(&["https://hooks.example.com/*".to_owned()][..])
+        );
+        assert_eq!(
+            config.webhook_allowed_env_vars.as_deref(),
+            Some(&["CODER_WEBHOOK_TOKEN".to_owned()][..])
+        );
+    }
+
+    #[test]
+    fn external_http_webhook_urls_are_rejected() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        config.hooks = serde_yaml::from_str::<HookSettings>(
+            r#"
+PreToolUse:
+  - matcher: command_run
+    hooks:
+      - type: webhook
+        url: http://hooks.example.com/coder
+"#,
+        )
+        .unwrap();
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "error");
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == "hook_webhook_url_invalid"
+                && issue.message.contains("must use https://")
+                && issue.target.ends_with(".url")
+        }));
+    }
+
+    #[test]
+    fn loopback_http_webhook_urls_are_accepted_for_local_development() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        config.hooks = serde_yaml::from_str::<HookSettings>(
+            r#"
+PreToolUse:
+  - matcher: command_run
+    hooks:
+      - type: webhook
+        url: http://localhost:8765/hooks
+PostToolUse:
+  - matcher: repo_read_file
+    hooks:
+      - type: webhook
+        url: http://[::1]:8765/hooks
+"#,
+        )
+        .unwrap();
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "pass");
+    }
+
+    #[test]
+    fn invalid_hooks_configuration_is_reported() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        config.hooks = serde_yaml::from_str::<HookSettings>(
+            r#"
+PreToolUse:
+  - matcher: command_run
+    hooks:
+      - type: command
+        command: ""
+        timeout: 0
+PostToolUse:
+  - matcher: repo_read_file
+    hooks: []
+"#,
+        )
+        .unwrap();
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "error");
+        for code in [
+            "hook_command_empty",
+            "hook_timeout_out_of_range",
+            "hook_matcher_hooks_empty",
+        ] {
+            assert!(
+                report.issues.iter().any(|issue| issue.code == code),
+                "missing {code}"
+            );
+        }
     }
 
     #[test]
@@ -734,7 +930,7 @@ mod tests {
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
         config
             .harnesses
-            .get_mut("openhands-code-edit")
+            .get_mut("native-code-edit")
             .unwrap()
             .memory
             .read
@@ -747,5 +943,314 @@ mod tests {
             .issues
             .iter()
             .any(|issue| issue.code == "harness_long_term_memory_for_execution_backend"));
+    }
+
+    #[test]
+    fn agent_runtime_policy_bounds_are_reported() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        let runtime = &mut config.agents.get_mut("executor").unwrap().runtime;
+        runtime.max_output_tokens = Some(AGENT_MAX_OUTPUT_TOKENS_MAX + 1);
+        runtime.max_turns = Some(0);
+        runtime.effort = Some("ultracode".to_owned());
+        runtime.context_window_tokens = AGENT_CONTEXT_WINDOW_TOKENS_MIN;
+        runtime.compact_output_reserve_tokens = AGENT_CONTEXT_WINDOW_TOKENS_MIN;
+        runtime.autocompact_buffer_tokens = AGENT_AUTOCOMPACT_BUFFER_TOKENS_MAX + 1;
+        runtime.max_output_recovery_attempts = AGENT_MAX_OUTPUT_RECOVERY_ATTEMPTS_MAX + 1;
+        runtime.max_consecutive_compaction_failures =
+            AGENT_MAX_CONSECUTIVE_COMPACTION_FAILURES_MAX + 1;
+        runtime.stream_idle_timeout_ms = AGENT_STREAM_IDLE_TIMEOUT_MS_MIN - 1;
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "error");
+        for code in [
+            "agent_max_output_tokens_out_of_range",
+            "agent_max_turns_out_of_range",
+            "agent_effort_level_unknown",
+            "agent_compact_output_reserve_exceeds_context",
+            "agent_compaction_headroom_exceeds_context",
+            "agent_autocompact_buffer_tokens_out_of_range",
+            "agent_max_output_recovery_attempts_out_of_range",
+            "agent_max_consecutive_compaction_failures_out_of_range",
+            "agent_stream_idle_timeout_ms_out_of_range",
+        ] {
+            assert!(
+                report.issues.iter().any(|issue| issue.code == code),
+                "missing {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_tool_resolution_applies_allow_and_disallow_lists() {
+        let config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        let mut harness = config.harnesses.get("native-code-edit").unwrap().clone();
+        harness.tools.push("agent_subagent".to_owned());
+        let mut agent = config.agents.get("executor").unwrap().clone();
+        agent.tools = vec![
+            "command_run".to_owned(),
+            "patch_apply".to_owned(),
+            "agent_subagent".to_owned(),
+        ];
+        agent.disallowed_tools = vec!["patch_apply".to_owned()];
+
+        let resolution = resolve_agent_tools(&agent, &harness);
+
+        assert_eq!(
+            resolution.selected_tools,
+            vec!["command_run".to_owned(), "agent_subagent".to_owned()]
+        );
+        assert_eq!(resolution.invalid_requested_tools, vec!["patch_apply"]);
+        assert!(!resolution.wildcard);
+    }
+
+    #[test]
+    fn agent_tool_resolution_parses_agent_allowed_types() {
+        let config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        let mut harness = config.harnesses.get("native-code-edit").unwrap().clone();
+        harness.tools.push("agent_subagent".to_owned());
+        let mut agent = config.agents.get("executor").unwrap().clone();
+        agent.tools = vec![
+            "Agent(reviewer, planner)".to_owned(),
+            "patch_apply".to_owned(),
+        ];
+
+        let resolution = resolve_agent_tools(&agent, &harness);
+
+        assert_eq!(
+            resolution.selected_tools,
+            vec!["agent_subagent".to_owned(), "patch_apply".to_owned()]
+        );
+        assert_eq!(
+            resolution.requested_tools,
+            vec!["agent_subagent".to_owned(), "patch_apply".to_owned()]
+        );
+        assert_eq!(
+            resolution.allowed_agent_types,
+            Some(vec!["reviewer".to_owned(), "planner".to_owned()])
+        );
+        assert_eq!(
+            normalized_tool_name("Task(reviewer)").as_deref(),
+            Some("agent_subagent")
+        );
+    }
+
+    #[test]
+    fn agent_tool_resolution_treats_missing_tools_as_harness_wildcard() {
+        let config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        let harness = config.harnesses.get("native-code-edit").unwrap();
+        let mut agent = config.agents.get("executor").unwrap().clone();
+        agent.disallowed_tools = vec!["command_preview".to_owned()];
+
+        let resolution = resolve_agent_tools(&agent, harness);
+
+        assert!(resolution.wildcard);
+        assert!(resolution
+            .selected_tools
+            .iter()
+            .any(|tool| tool == "command_run"));
+        assert!(!resolution
+            .selected_tools
+            .iter()
+            .any(|tool| tool == "command_preview"));
+    }
+
+    #[test]
+    fn agent_tool_config_errors_when_node_harness_cannot_supply_requested_tool() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        config
+            .agents
+            .get_mut("executor")
+            .unwrap()
+            .tools
+            .push("browser_static".to_owned());
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "error");
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "workflow_node_agent_tool_not_in_harness"));
+    }
+
+    #[test]
+    fn unknown_harness_backend_and_tools_are_reported() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        let harness = config.harnesses.get_mut("review-only").unwrap();
+        harness.backend = "mystery-backend".to_owned();
+        harness.tools.push("definitely_not_a_tool".to_owned());
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "error");
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "harness_backend_unknown"));
+    }
+
+    #[test]
+    fn backend_specific_unknown_tool_is_reported() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        config
+            .harnesses
+            .get_mut("native-code-edit")
+            .unwrap()
+            .tools
+            .push("browser_static".to_owned());
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "error");
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "harness_tool_unknown_for_backend"));
+    }
+
+    #[test]
+    fn native_accepts_coder_api_tool_surface_tools() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        let harness = config.harnesses.get_mut("native-code-edit").unwrap();
+        harness.tools = vec![
+            "agent_subagent".to_owned(),
+            "read_subagent_status".to_owned(),
+            "cancel_subagent_background".to_owned(),
+            "command_background".to_owned(),
+            "read_command_output".to_owned(),
+            "repo_read_file".to_owned(),
+            "patch_preview".to_owned(),
+        ];
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "pass");
+    }
+
+    #[test]
+    fn native_harness_tool_denied_permission_is_reported() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        config
+            .harnesses
+            .get_mut("review-only")
+            .unwrap()
+            .tools
+            .push("run_command_sandbox".to_owned());
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "error");
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == "harness_tool_permission_denied"
+                && issue.target == "harnesses.review-only.permissions.run_commands"
+        }));
+    }
+
+    #[test]
+    fn subagent_tool_denied_child_harness_permission_is_reported() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        let harness = config.harnesses.get_mut("review-only").unwrap();
+        harness.tools.push("agent_subagent".to_owned());
+        harness.permissions.child_harness_permissions = PermissionDecision::Deny;
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "error");
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == "harness_tool_permission_denied"
+                && issue.target == "harnesses.review-only.permissions.child_harness_permissions"
+        }));
+    }
+
+    #[test]
+    fn native_write_tool_denied_permission_is_reported() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        config
+            .harnesses
+            .get_mut("native-code-edit")
+            .unwrap()
+            .permissions
+            .write_files = PermissionDecision::Deny;
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "error");
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == "harness_tool_permission_denied"
+                && issue.target == "harnesses.native-code-edit.permissions.write_files"
+        }));
+    }
+
+    #[test]
+    fn read_tool_denied_permission_is_reported() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        config
+            .harnesses
+            .get_mut("review-only")
+            .unwrap()
+            .permissions
+            .read_files = PermissionDecision::Deny;
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "error");
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == "harness_tool_permission_denied"
+                && issue.target == "harnesses.review-only.permissions.read_files"
+        }));
+    }
+
+    #[test]
+    fn planner_model_harness_must_deny_side_effect_permissions() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        config
+            .harnesses
+            .get_mut("workflow-planner")
+            .unwrap()
+            .permissions
+            .run_commands = PermissionDecision::Ask;
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "error");
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "planner_model_side_effect_permission_not_denied"));
+    }
+
+    #[test]
+    fn browser_verifier_unknown_check_is_reported() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        config
+            .harnesses
+            .get_mut("browser-verification")
+            .unwrap()
+            .verification
+            .allowed_checks
+            .push("visual_magic".to_owned());
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "error");
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "browser_verifier_check_unknown"));
     }
 }

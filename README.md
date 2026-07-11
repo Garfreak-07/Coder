@@ -1,76 +1,77 @@
 # Coder
 
 Coder is a Planner-first coding workbench with a React frontend and a Rust API
-v3 runtime/control plane.
-
-Current `main` is Rust-only. The supported product path is the Rust API v3
-server, the React Planner UI, Provider Settings, Rust workflow/agent/harness
-execution, run evidence, reports, memory/knowledge/RAG baselines, MCP
-baselines, release tooling, and installer tooling.
+v3 runtime. The current product path is native: Coder owns planning,
+execution, verification, evidence, cache policy, and review surfaces without
+requiring a separate executor runtime.
 
 The removed pre-Rust compatibility implementation remains available only in git
 history at tag `pre-rust-only-legacy-v2`.
 
 ## Product Path
 
-Coder is Codex split into two cooperating agents:
+Coder is split into cooperating agents:
 
-- Planner talks to the user, organizes context, asks clarifying questions, and
-  owns public summaries.
-- Executor performs the ReAct work loop through harness-controlled tools,
-  permissions, evidence, and verification.
+- Planner talks to the user, clarifies scope, tracks readiness, and writes
+  public summaries.
+- Workflow Planner receives verifier evidence and makes a bounded
+  finish-or-improve decision. Closed, objective success takes a zero-provider
+  fast path; failures and open-ended quality goals use the real model.
+- Executor performs the native ReAct work loop through harness-controlled tools.
+- Verifier checks the result and feeds PASS/FAIL evidence back to the loop.
 
 ```text
-User configures provider in Settings
--> User talks to Planner first
--> Planner Chat clarifies scope, risks, and acceptance criteria
--> Start Work is an explicit execution action
--> WorkflowRunner
--> HarnessSpec selects native Rust or OpenHands backend
--> Executor runs Reason -> Act -> Observe through role-specific tools
--> Codex-style timeline projects commands, tools, approvals, file changes, checks
--> Review Changes exposes diff, checks, evidence, accept, and undo
--> Planner-authored final summary
+User configures a provider in Settings
+-> User talks to Planner
+-> Planner marks the task ready
+-> User clicks Start Work
+-> WorkflowRunner loads examples/coder.yaml
+-> native-code-edit executes through native-rust tools or provider-backed exact edits/file writes
+-> browser-verification or verifier checks the result
+-> Workflow Planner finishes, requests one bounded improvement, or reports a blocker
+-> Timeline, evidence, report, Review Changes, and Undo are exposed in the UI
 ```
 
-Planner Chat is side-effect free and LLM-backed in product mode. It can answer
-casual questions, ask clarifying questions, maintain internal plan state, and
-mark work ready, but it does not write files, run commands, or start workflows.
-Execution starts only when the user clicks Start Work. That explicit action
-validates readiness, passes structured plan context into workflow execution,
-and opens the Codex-style work timeline.
+Planner Chat is side-effect free. It can ask questions, maintain plan state,
+and mark work ready, but it must not write files, run commands, or start work.
+It remains usable while Start Work runs: status/cancel/guidance are local
+control operations and newer chat turns are revision-merged after completion.
+Execution starts only from Start Work.
 
 Harnesses are the execution boundary. A harness controls backend selection,
-tools, permissions, sandbox policy, memory scope, approvals, verification, event
-capture, and evidence. Each agent is expected to be Codex-grade inside its
-role-specific harness, meaning runtime claims must be backed by tool events,
-repo evidence, patch refs, command checks, or stored raw backend events.
+tool availability, permissions, sandbox policy, memory scope, approvals,
+verification, event capture, and evidence. Runtime claims must be backed by
+tool events, repo evidence, patch refs, command checks, stored blobs, or final
+reports.
 
-OpenHands is the preferred execution backend when available for coding-agent
-runtime behavior such as terminal/file/task execution. Native Rust fallback is
-limited deterministic plumbing for CI and local smoke tests, not a second full
-agent runtime. Coder owns the product control plane: Planner conversation,
-workflow graph, Agent/Harness specs, permission policy, approvals, event
-normalization, evidence storage, final reports, and the React product UI.
+After Start Work, the Rust API can inject a provider-backed
+`native-model-file-write` executor behind `native-rust`. The preferred path is
+a runtime-bounded tool-call loop where the model asks for repo, git, command, skill,
+subagent, and write tools. Rust executes them through the shared tool pipeline,
+and observations are returned to the model. The default non-interactive
+Executor uses 24 turns and stops immediately on `finish`. Providers that do not
+return tool calls can still use the strict JSON file-plan fallback.
 
 Rust v3 covers the ordinary product surface behind the React UI:
 
 - health, capabilities, and role cards
 - workflow validation, import/export, and library storage
-- Planner Chat sessions, internal plan state, readiness, and explicit Start Work
+- Planner Chat sessions, readiness, and explicit Start Work
+- native executor tools for repo search/read, git status/diff, command preview
+  and run, background commands, patch preview/apply, skills, and subagents
 - stored run inspection, timeline projection, changesets, undo, reports,
-  artifacts, blobs, and repo evidence
-- repo, command, patch, MCP, skills, extensions, provider settings, and memory
-  APIs
-- experimental Plugins & Skills developer/debug surface, hooks display, and
-  cache status
-- lexical, deterministic dense, and hybrid knowledge retrieval baselines
+  artifacts, blobs, checkpoints, and repo evidence
+- provider settings, provider tests, proxy isolation, memory, knowledge, MCP,
+  plugin/skill developer surfaces, and cache status
+
+Maintained docs start at [`docs/README.md`](docs/README.md). The current
+architecture is summarized in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## Install
 
 Install Rust and Node.js, then install frontend dependencies:
 
-```powershell
+```sh
 git clone https://github.com/Garfreak-07/Coder.git
 cd Coder
 cd frontend
@@ -80,46 +81,45 @@ cd ..
 
 ## Run Locally
 
-Start the Rust API server on the Vite proxy port:
+Start the Rust API server:
 
-```powershell
+```sh
 cargo run -p coder-cli --bin coder-rust -- server --host 127.0.0.1 --port 8876
 ```
 
+The CLI and server default to a workspace-local `.coder` store. Durable run
+state and disposable runtime caches are derived from that store unless an
+explicit `--store`, `CODER_RUNTIME_CACHE_DIR`, or `CODER_CACHE_DIR` override is
+set.
+
 Start the frontend:
 
-```powershell
+```sh
 cd frontend
-npm.cmd run dev
+npm run dev
 ```
 
 Open `http://127.0.0.1:5173`. Vite proxies `/api/*` to
 `http://127.0.0.1:8876`, and the frontend uses Rust API v3 directly.
 
-The future desktop packaging path is documented in
-[`docs/DESKTOP_APP_PLAN.md`](docs/DESKTOP_APP_PLAN.md). Current development
-mode stays as the Rust API server plus Vite frontend.
-
 ## Desktop Proof Of Concept
 
 The desktop path is an opt-in Tauri skeleton and is not part of the main CI
-release gate yet. It keeps the existing web/dev workflow intact.
+release gate yet.
 
-```powershell
+```sh
 npm run desktop:dev
 npm run desktop:build
 ```
 
 Desktop dev mode opens the React app through Vite. Start the Rust API server on
-`127.0.0.1:8876` as shown above before using the product flow. Static desktop
-builds default API calls to `http://127.0.0.1:8876` unless
-`VITE_CODER_API_BASE_URL` or `window.CODER_API_BASE_URL` is set.
+`127.0.0.1:8876` first.
 
 ## Test
 
 Rust:
 
-```powershell
+```sh
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
@@ -127,12 +127,15 @@ cargo test --workspace
 
 Frontend:
 
-```powershell
+```sh
 cd frontend
-npm.cmd ci
-npm.cmd run test
-npm.cmd run build
+npm ci
+npm run test
+npm run build
 ```
+
+Optional live smokes are developer and CI confidence checks. Ordinary users do
+not run these scripts.
 
 Rust v3 Planner-to-Review smoke test:
 
@@ -140,21 +143,19 @@ Rust v3 Planner-to-Review smoke test:
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-rust-v3.ps1 -Store .tmp\smoke-rust-v3
 ```
 
-By default this is a mock/plumbing validation. It configures Provider Settings
-in mock mode, creates a Planner Chat session, sends two side-effect-free turns,
-starts work, reads timeline and final-report surfaces, then verifies Review
-Changes and Undo against a temporary Git repository. Passing `-LiveProvider`
-labels the run as product validation and uses the configured provider path.
-
-Optional live LLM smoke, skipped when no provider key is configured:
+Live LLM smoke, skipped when no provider key is configured:
 
 ```powershell
 $env:CODER_LIVE_LLM_SMOKE="1"
 powershell -ExecutionPolicy Bypass -File .\scripts\live-llm-smoke.ps1 -SkipIfMissingProvider
 ```
 
-Mock tests prove deterministic plumbing. The optional live LLM smoke is the
-product-confidence check for the real provider path.
+Native full-path self-test:
+
+```powershell
+$env:CODER_SELFTEST_LIVE="1"
+powershell -ExecutionPolicy Bypass -File .\scripts\live-coder-selftest-suite.ps1 -SkipIfMissingLiveConfig
+```
 
 Installer dry-runs:
 
@@ -169,80 +170,49 @@ POSIX installer dry-run:
 bash ./scripts/install.sh --dry-run
 ```
 
-The full v1 release validation checklist is
-[`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md).
-
-The Rust CLI/distribution baseline is documented in
-[`docs/distribution.md`](docs/distribution.md).
-
 ## Useful Rust Commands
 
-```powershell
+```sh
 cargo run -p coder-cli --bin coder-rust -- doctor
-cargo run -p coder-cli --bin coder-rust -- config validate --path examples\coder.yaml
+cargo run -p coder-cli --bin coder-rust -- config validate --path examples/coder.yaml
 cargo run -p coder-cli --bin coder-rust -- workflow preview planner-led "summarize this repo"
 cargo run -p coder-cli --bin coder-rust -- workflow run --mock planner-led "summarize this repo"
 cargo run -p coder-cli --bin coder-rust -- server --host 127.0.0.1 --port 8766
 ```
 
-## OpenHands
-
-OpenHands is the required Start Work executor engine, but it is an internal
-Coder runtime detail. Normal users do not configure OpenHands ports, session
-keys, routes, profiles, or workspace modes. Coder starts or discovers the local
-executor runtime, generates an in-memory Executor Runtime Secret per launch,
-injects it into the child process, and shuts the runtime down with Coder.
-
-Optional external OpenHands validation remains available for developer
-compatibility checks:
-
-```powershell
-$env:OPENHANDS_LIVE_SMOKE="1"
-powershell -ExecutionPolicy Bypass -File .\scripts\live-openhands-smoke.ps1
-```
-
-Without `OPENHANDS_LIVE_SMOKE=1`, the script can be run with
-`-SkipIfMissingOpenHands` to report `skipped` for CI and local release checks.
-
 ## Provider Setup
 
-Use the app `Settings` page for DeepSeek or OpenAI-compatible API keys, model
-selection, base URLs, and provider proxy URLs. The normal user path does not
-require `LLM_BASE_URL`, `LLM_API_KEY`, OpenHands URLs, or OpenHands tokens. See
-[`docs/PROVIDER_SETUP.md`](docs/PROVIDER_SETUP.md).
-
-For local provider smoke tests and headless development, environment variables
-remain available as fallback. Prefer environment variables rather than committed
-files:
+Use the app Settings page for DeepSeek, OpenAI-compatible providers, model
+selection, base URLs, API keys, provider network mode, and optional provider
+proxy URLs. Environment variables remain available for headless development:
 
 ```powershell
 $env:CODER_LLM_PROVIDER_PROFILE="deepseek-default"
-$env:DEEPSEEK_API_KEY="..."
+$env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API key"
 $env:LLM_API_KEY=$env:DEEPSEEK_API_KEY
 $env:LLM_BASE_URL="https://api.deepseek.com"
-$env:LLM_MODEL="deepseek-v4-flash"
+$env:LLM_MODEL="deepseek-chat"
 ```
 
-External OpenHands server settings are developer/enterprise compatibility
-options, not normal user setup.
+DeepSeek and Ollama default to direct provider networking. Providers that often
+need a proxy default to environment proxy mode. See
+[`docs/PROVIDER_SETUP.md`](docs/PROVIDER_SETUP.md).
+
+Local helper files such as `.local-env.ps1` are ignored by Git and are for one
+developer machine only. Do not commit API keys into scripts, docs, examples, or
+workflow specs.
 
 ## Guardrails
 
-- Keep the ordinary product path Planner-led and Coder-backed.
-- Keep Planner Chat LLM-backed in product mode.
-- Keep user interaction in `User <-> Planner`.
-- Keep Start Work as the only execution boundary.
-- Keep the ordinary UI starting at Planner Chat; the workflow canvas is an
-  Advanced -> Developer -> Workflow editor surface.
+- Keep the ordinary product path Planner-led and Coder-owned.
+- Keep Planner Chat side-effect free in product mode.
+- Keep Start Work as the execution boundary.
+- Keep the ordinary UI starting at Planner Chat; workflow editing is an
+  advanced developer surface.
 - Executors must not ask the user directly, commit, push, deploy, publish
   externally, or write long-term memory directly.
-- Keep OpenHands as the required internal Start Work executor.
-- Keep marketplace/plugin UI deferred from the ordinary product path.
 - Keep environment variables as developer/headless fallback, not normal setup.
 - Keep GPU support optional and provider-scoped; it is not core runtime.
-- Keep the Advanced React workflow canvas, user-defined agents, workflows, harnesses,
-  provider settings, evidence/report systems, memory/knowledge/RAG baselines,
-  MCP baselines, release tooling, and installer tooling.
 
 ## Secrets
 

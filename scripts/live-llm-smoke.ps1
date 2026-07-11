@@ -6,6 +6,12 @@ param(
   [string]$BaseUrl = "",
   [string]$Model = "",
   [string]$ApiKeyEnv = "",
+  [ValidateSet("auto", "direct", "explicit", "environment")]
+  [string]$ProviderProxyMode = "auto",
+  [string]$ProviderProxyUrl = "",
+  [switch]$LoadLocalEnv,
+  [switch]$ProviderTestOnly,
+  [switch]$Live,
   [switch]$SkipIfMissingProvider
 )
 
@@ -14,8 +20,24 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 Set-Location -LiteralPath $repoRoot
 
+if ($LoadLocalEnv) {
+  $localEnvPath = Join-Path $repoRoot ".local-env.ps1"
+  if (-not (Test-Path -LiteralPath $localEnvPath)) {
+    $reason = "Local env file not found: $localEnvPath"
+    if ($SkipIfMissingProvider) {
+      [pscustomobject]@{
+        status = "skipped"
+        reason = $reason
+      } | ConvertTo-Json -Depth 4
+      exit 0
+    }
+    throw $reason
+  }
+  . $localEnvPath
+}
+
 $liveSmokeFlag = [Environment]::GetEnvironmentVariable("CODER_LIVE_LLM_SMOKE", "Process")
-if ($liveSmokeFlag -ne "1") {
+if ($liveSmokeFlag -ne "1" -and -not $Live) {
   $reason = "Set CODER_LIVE_LLM_SMOKE=1 to run the live provider smoke."
   if ($SkipIfMissingProvider) {
     [pscustomobject]@{
@@ -39,6 +61,27 @@ function Get-FirstEnvValue {
     }
   }
   return $null
+}
+
+function Assert-ProviderTrace {
+  param([object]$Turn, [string]$Label)
+  if ($null -eq $Turn.provider_trace) {
+    throw "$Label did not include provider_trace."
+  }
+  if ($Turn.provider_trace.requested_stream -ne $true) {
+    throw "$Label did not request streaming provider output."
+  }
+  if ([string]::IsNullOrWhiteSpace([string]$Turn.provider_trace.response_transport)) {
+    throw "$Label did not record provider response transport."
+  }
+  if ($normalizedProvider -eq "deepseek") {
+    if ($Turn.provider_trace.response_transport -ne "event_stream") {
+      throw "$Label used response_transport '$($Turn.provider_trace.response_transport)', expected event_stream for DeepSeek."
+    }
+    if ($Turn.provider_trace.streaming_fallback -eq $true) {
+      throw "$Label unexpectedly fell back from streaming for DeepSeek."
+    }
+  }
 }
 
 $normalizedProvider = $Provider.Trim().ToLowerInvariant()
@@ -90,7 +133,21 @@ if ([string]::IsNullOrWhiteSpace($Model)) {
   $Model = [Environment]::GetEnvironmentVariable("LLM_MODEL", "Process")
 }
 if ([string]::IsNullOrWhiteSpace($Model)) {
-  $Model = if ($normalizedProvider -eq "openai") { "gpt-5.5" } else { "deepseek-v4-flash" }
+  $Model = if ($normalizedProvider -eq "openai") { "gpt-5.5" } else { "deepseek-chat" }
+}
+
+$resolvedProviderProxyMode = $ProviderProxyMode.Trim().ToLowerInvariant()
+if ($resolvedProviderProxyMode -eq "auto") {
+  $resolvedProviderProxyMode = if (-not [string]::IsNullOrWhiteSpace($ProviderProxyUrl)) {
+    "explicit"
+  } elseif ($normalizedProvider -eq "deepseek" -or $normalizedProvider -eq "ollama") {
+    "direct"
+  } else {
+    "environment"
+  }
+}
+if ($resolvedProviderProxyMode -eq "explicit" -and [string]::IsNullOrWhiteSpace($ProviderProxyUrl)) {
+  throw "ProviderProxyMode explicit requires -ProviderProxyUrl."
 }
 
 $storePath = if ([System.IO.Path]::IsPathRooted($Store)) {
@@ -109,7 +166,7 @@ if ($processEnv.Contains("Path") -and $processEnv.Contains("PATH")) {
   [Environment]::SetEnvironmentVariable("PATH", $null, "Process")
 }
 
-[Environment]::SetEnvironmentVariable("CARGO_TARGET_DIR", (Join-Path $repoRoot ".tmp\cargo-target"), "Process")
+[Environment]::SetEnvironmentVariable("CODER_RUNTIME_CACHE_DIR", (Join-Path $repoRoot "tmp\coder-runtime-cache"), "Process")
 [Environment]::SetEnvironmentVariable("LLM_BASE_URL", $BaseUrl, "Process")
 [Environment]::SetEnvironmentVariable("LLM_MODEL", $Model, "Process")
 [Environment]::SetEnvironmentVariable("LLM_API_KEY", $apiKey.Value, "Process")
@@ -141,10 +198,18 @@ try {
   $jsonHeaders = @{ "Content-Type" = "application/json" }
   $baseUrls = @{}
   $baseUrls[$normalizedProvider] = $BaseUrl
+  $proxyModes = @{}
+  $proxyModes[$normalizedProvider] = $resolvedProviderProxyMode
+  $proxyUrls = @{}
+  if (-not [string]::IsNullOrWhiteSpace($ProviderProxyUrl)) {
+    $proxyUrls[$normalizedProvider] = $ProviderProxyUrl
+  }
   $settingsBody = @{
     default_provider = $normalizedProvider
     default_model = $Model
     base_urls = $baseUrls
+    proxy_modes = $proxyModes
+    proxy_urls = $proxyUrls
     mock_mode = $false
   } | ConvertTo-Json -Depth 20
   $settings = Invoke-RestMethod -Method Post -Uri "$base/api/v3/providers/settings" -Headers $jsonHeaders -Body $settingsBody
@@ -159,6 +224,20 @@ try {
   $providerTest = Invoke-RestMethod -Method Post -Uri "$base/api/v3/providers/test" -Headers $jsonHeaders -Body $providerTestBody
   if ($providerTest.test.ok -ne $true) {
     throw "Live provider test failed: $($providerTest.test.message)"
+  }
+
+  if ($ProviderTestOnly) {
+    [pscustomobject]@{
+      status = "ok"
+      provider = $normalizedProvider
+      model = $Model
+      credential_source = $apiKey.Name
+      proxy_mode = $settings.status.default_status.proxy_mode
+      proxy_url_configured = -not [string]::IsNullOrWhiteSpace([string]$settings.status.default_status.proxy_url)
+      provider_test = $providerTest.test.mode
+      external_payload = "synthetic_provider_test_only_no_repo_content"
+    } | ConvertTo-Json -Depth 10
+    return
   }
 
   $defaultWorkflow = Invoke-RestMethod -Method Get -Uri "$base/api/v3/workflows/default"
@@ -199,6 +278,7 @@ try {
   if ($firstTurn.should_start_workflow -eq $true) {
     throw "First Planner chat turn unexpectedly requested workflow start."
   }
+  Assert-ProviderTrace -Turn $firstTurn -Label "First Planner chat turn"
 
   $secondTurn = Send-PlannerTurn -Message "Second live smoke turn: keep this conversational and side-effect free."
   if ([string]::IsNullOrWhiteSpace($secondTurn.assistant_message)) {
@@ -210,6 +290,7 @@ try {
   if ($secondTurn.session.turns.Count -lt 4) {
     throw "Planner session did not retain two user/assistant turns."
   }
+  Assert-ProviderTrace -Turn $secondTurn -Label "Second Planner chat turn"
 
   $startBody = @{
     repo = "."
@@ -229,6 +310,8 @@ try {
     model = $Model
     credential_source = $apiKey.Name
     provider_test = $providerTest.test.mode
+    first_turn_provider_trace = $firstTurn.provider_trace
+    second_turn_provider_trace = $secondTurn.provider_trace
     session_id = $sessionId
     turns = $secondTurn.session.turns.Count
     chat_started_run = $false

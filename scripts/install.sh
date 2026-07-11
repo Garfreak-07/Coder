@@ -4,6 +4,7 @@ set -euo pipefail
 version="latest"
 repo="Garfreak-07/Coder"
 install_dir="${HOME}/.local/bin"
+temp_dir=""
 dry_run=0
 
 while [[ $# -gt 0 ]]; do
@@ -20,13 +21,17 @@ while [[ $# -gt 0 ]]; do
       install_dir="${2:?missing value for --install-dir}"
       shift 2
       ;;
+    --temp-dir)
+      temp_dir="${2:?missing value for --temp-dir}"
+      shift 2
+      ;;
     --dry-run)
       dry_run=1
       shift
       ;;
     -h|--help)
       cat <<'USAGE'
-Usage: scripts/install.sh [--version VERSION|latest] [--install-dir DIR] [--dry-run]
+Usage: scripts/install.sh [--version VERSION|latest] [--install-dir DIR] [--temp-dir DIR] [--dry-run]
 
 Downloads a coder-rust release archive, verifies it contains the binary, and
 installs it into a user-local bin directory.
@@ -80,6 +85,8 @@ echo "coder-rust installer"
 echo "Target: ${target}"
 echo "Archive: ${archive}"
 echo "InstallDir: ${install_dir}"
+temp_base="${temp_dir:-${CODER_INSTALL_TMPDIR:-${TMPDIR:-/tmp}}}"
+echo "TempDir: ${temp_base}"
 echo "URL: ${asset_url}"
 
 if [[ "${dry_run}" == "1" ]]; then
@@ -87,7 +94,8 @@ if [[ "${dry_run}" == "1" ]]; then
   exit 0
 fi
 
-tmp_dir="$(mktemp -d)"
+mkdir -p "${temp_base}"
+tmp_dir="$(mktemp -d "${temp_base%/}/coder-rust-install.XXXXXXXXXX")"
 trap 'rm -rf "${tmp_dir}"' EXIT
 archive_path="${tmp_dir}/${archive}"
 extract_dir="${tmp_dir}/extract"

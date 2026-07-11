@@ -15,7 +15,7 @@ const roleLabels: Record<string, string> = {
 const defaultHarnessBindings: HarnessBindings = {
   planning_chat: { profile_id: "planner-conversation" },
   workflow_supervisor: { profile_id: "planner-conversation" },
-  task_execution: { profile_id: "openhands-task-executor-default" },
+  task_execution: { profile_id: "native-code-edit" },
   agent_overrides: {}
 };
 
@@ -108,7 +108,9 @@ export function cleanAgentWorkflowEdge(edge: AgentWorkflowEdge, primaryPlannerId
   return {
     from: edge.from,
     to: edge.to,
-    ...(loopsToPlanner ? { loop: true } : {})
+    ...(edge.on?.trim() ? { on: edge.on.trim() } : {}),
+    ...(edge.handoff ? { handoff: edge.handoff } : {}),
+    ...(edge.loop || loopsToPlanner ? { loop: true } : {})
   };
 }
 

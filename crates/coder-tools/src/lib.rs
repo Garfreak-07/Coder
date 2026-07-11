@@ -1,7 +1,7 @@
 use std::{
     fs,
-    io::{BufRead, BufReader, Read},
-    path::{Path, PathBuf},
+    io::{BufRead, BufReader, Read, Write},
+    path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -16,8 +16,13 @@ pub const DEFAULT_MAX_FILE_RESULTS: usize = 200;
 pub const DEFAULT_MAX_SEARCH_MATCHES: usize = 50;
 pub const DEFAULT_MAX_GIT_OUTPUT_BYTES: usize = 64 * 1024;
 pub const DEFAULT_MAX_PATCH_BYTES: usize = 256 * 1024;
+pub const DEFAULT_MAX_WRITE_FILE_BYTES: usize = 2 * 1024 * 1024;
 pub const DEFAULT_COMMAND_TIMEOUT_SECONDS: u64 = 120;
-pub const DEFAULT_MAX_COMMAND_OUTPUT_BYTES: usize = 8 * 1024;
+pub const MAX_COMMAND_TIMEOUT_SECONDS: u64 = 600;
+// Mirrors Claude Code's EndTruncatingAccumulator default (2 ** 21). This keeps
+// command evidence useful for long test/build failures while still bounding
+// memory and HTTP payload size.
+pub const DEFAULT_MAX_COMMAND_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 
 const SKIPPED_DIRS: &[&str] = &[
     ".git",
@@ -159,9 +164,54 @@ pub struct PatchApplyEvidence {
 }
 
 #[derive(Debug, Clone)]
+pub struct FileWriteRequest {
+    pub path: PathBuf,
+    pub content: String,
+    pub max_bytes: usize,
+    pub source: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileEditRequest {
+    pub path: PathBuf,
+    pub old_string: String,
+    pub new_string: String,
+    pub replace_all: bool,
+    pub max_bytes: usize,
+    pub source: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileEditReplacement {
+    pub old_string: String,
+    pub new_string: String,
+    pub replace_all: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileEditBatchRequest {
+    pub path: PathBuf,
+    pub edits: Vec<FileEditReplacement>,
+    pub max_bytes: usize,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileWriteEvidence {
+    pub repo_root: String,
+    pub path: String,
+    pub status: String,
+    pub bytes_written: usize,
+    pub created: bool,
+    pub source: String,
+    pub evidence_kind: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct CommandRunRequest {
     pub cwd: PathBuf,
     pub argv: Vec<String>,
+    pub stdin: Option<String>,
     pub timeout_seconds: u64,
     pub max_output_bytes: usize,
     pub source: String,
@@ -174,6 +224,7 @@ impl Default for CommandRunRequest {
         Self {
             cwd: PathBuf::from("."),
             argv: Vec::new(),
+            stdin: None,
             timeout_seconds: DEFAULT_COMMAND_TIMEOUT_SECONDS,
             max_output_bytes: DEFAULT_MAX_COMMAND_OUTPUT_BYTES,
             source: "model".to_owned(),
@@ -409,7 +460,7 @@ pub fn preview_patch_file(
     let limit = max_patch_bytes.clamp(1, DEFAULT_MAX_PATCH_BYTES);
     let mut file = fs::File::open(&path)?;
     let mut bytes = Vec::new();
-    file.by_ref()
+    Read::by_ref(&mut file)
         .take((limit + 1) as u64)
         .read_to_end(&mut bytes)?;
     let truncated = bytes.len() > limit;
@@ -489,6 +540,125 @@ pub fn apply_patch_file(
     })
 }
 
+pub fn write_text_file(
+    repo_root: impl AsRef<Path>,
+    request: FileWriteRequest,
+) -> Result<FileWriteEvidence, RepoToolError> {
+    let root = canonical_repo_root(repo_root)?;
+    let (path, relative_path) = resolve_repo_write_path(&root, &request.path)?;
+    let max_bytes = request.max_bytes.clamp(1, DEFAULT_MAX_WRITE_FILE_BYTES);
+    let bytes = request.content.as_bytes();
+    if bytes.len() > max_bytes {
+        return Err(RepoToolError::FileTooLarge {
+            path: relative_path,
+            size_bytes: bytes.len() as u64,
+            max_bytes: max_bytes as u64,
+        });
+    }
+    let created = !path.exists();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, bytes)?;
+    Ok(FileWriteEvidence {
+        repo_root: root.display().to_string(),
+        path: relative_path,
+        status: "written".to_owned(),
+        bytes_written: bytes.len(),
+        created,
+        source: request.source,
+        evidence_kind: "file_write".to_owned(),
+    })
+}
+
+pub fn edit_text_file(
+    repo_root: impl AsRef<Path>,
+    request: FileEditRequest,
+) -> Result<FileWriteEvidence, RepoToolError> {
+    edit_text_file_batch(
+        repo_root,
+        FileEditBatchRequest {
+            path: request.path,
+            edits: vec![FileEditReplacement {
+                old_string: request.old_string,
+                new_string: request.new_string,
+                replace_all: request.replace_all,
+            }],
+            max_bytes: request.max_bytes,
+            source: request.source,
+        },
+    )
+}
+
+pub fn edit_text_file_batch(
+    repo_root: impl AsRef<Path>,
+    request: FileEditBatchRequest,
+) -> Result<FileWriteEvidence, RepoToolError> {
+    let root = canonical_repo_root(repo_root)?;
+    let path = resolve_existing_repo_path(&root, &request.path)?;
+    let relative_path = validate_readable_evidence_path(&root, &path)?;
+    let max_bytes = request.max_bytes.clamp(1, DEFAULT_MAX_WRITE_FILE_BYTES);
+    let metadata = fs::metadata(&path)?;
+    if metadata.len() > max_bytes as u64 {
+        return Err(RepoToolError::FileTooLarge {
+            path: relative_path,
+            size_bytes: metadata.len(),
+            max_bytes: max_bytes as u64,
+        });
+    }
+    if request.edits.is_empty() {
+        return Err(RepoToolError::EditNoOperations(relative_path));
+    }
+    let content = fs::read_to_string(&path).map_err(|source| RepoToolError::ReadText {
+        path: relative_path.clone(),
+        source,
+    })?;
+    let mut edited = content.clone();
+    for edit in request.edits {
+        if edit.old_string.is_empty() {
+            return Err(RepoToolError::EditEmptyOldString(relative_path));
+        }
+        if edit.old_string == edit.new_string {
+            return Err(RepoToolError::EditNoChange(relative_path));
+        }
+        let matches = edited.match_indices(&edit.old_string).count();
+        if matches == 0 {
+            return Err(RepoToolError::EditStringNotFound(relative_path));
+        }
+        if matches > 1 && !edit.replace_all {
+            return Err(RepoToolError::EditStringNotUnique {
+                path: relative_path,
+                matches,
+            });
+        }
+        edited = if edit.replace_all {
+            edited.replace(&edit.old_string, &edit.new_string)
+        } else {
+            edited.replacen(&edit.old_string, &edit.new_string, 1)
+        };
+    }
+    if edited == content {
+        return Err(RepoToolError::EditNoChange(relative_path));
+    }
+    if edited.len() > max_bytes {
+        return Err(RepoToolError::FileTooLarge {
+            path: relative_path,
+            size_bytes: edited.len() as u64,
+            max_bytes: max_bytes as u64,
+        });
+    }
+    fs::write(&path, edited.as_bytes())?;
+    Ok(FileWriteEvidence {
+        repo_root: root.display().to_string(),
+        path: relative_path,
+        status: "written".to_owned(),
+        bytes_written: edited.len(),
+        created: false,
+        source: request.source,
+        evidence_kind: "file_edit".to_owned(),
+    })
+}
+
 pub fn run_command(
     repo_root: impl AsRef<Path>,
     request: CommandRunRequest,
@@ -522,20 +692,32 @@ pub fn run_command(
         });
     }
 
-    let timeout = request
-        .timeout_seconds
-        .clamp(1, DEFAULT_COMMAND_TIMEOUT_SECONDS);
+    let timeout = effective_command_timeout_seconds(request.timeout_seconds);
     let max_output_bytes = request
         .max_output_bytes
         .clamp(1, DEFAULT_MAX_COMMAND_OUTPUT_BYTES);
+    let stdin_mode = if request.stdin.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
     let mut child = Command::new(&request.argv[0])
         .args(&request.argv[1..])
         .current_dir(&workdir)
-        .stdin(Stdio::null())
+        .stdin(stdin_mode)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(RepoToolError::CommandIo)?;
+    if let Some(stdin_text) = request.stdin.as_deref() {
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(error) = stdin.write_all(stdin_text.as_bytes()) {
+                if error.kind() != std::io::ErrorKind::BrokenPipe {
+                    return Err(RepoToolError::CommandIo(error));
+                }
+            }
+        }
+    }
     let started = Instant::now();
     let mut timed_out = false;
     loop {
@@ -584,6 +766,10 @@ pub fn run_command(
         policy,
         evidence_kind: "command_evidence".to_owned(),
     })
+}
+
+fn effective_command_timeout_seconds(requested: u64) -> u64 {
+    requested.clamp(1, MAX_COMMAND_TIMEOUT_SECONDS)
 }
 
 pub fn preview_command(
@@ -1122,6 +1308,48 @@ fn resolve_existing_repo_path(
     Ok(resolved)
 }
 
+fn resolve_repo_write_path(
+    root: &Path,
+    requested_path: impl AsRef<Path>,
+) -> Result<(PathBuf, String), RepoToolError> {
+    let requested = requested_path.as_ref();
+    if requested.is_absolute() {
+        return Err(RepoToolError::PathOutsideRepo(
+            requested.display().to_string(),
+        ));
+    }
+
+    let mut parts = Vec::new();
+    for component in requested.components() {
+        match component {
+            Component::Normal(part) => parts.push(part.to_string_lossy().to_string()),
+            Component::CurDir => {}
+            _ => {
+                return Err(RepoToolError::PathOutsideRepo(
+                    requested.display().to_string(),
+                ));
+            }
+        }
+    }
+    if parts.is_empty() {
+        return Err(RepoToolError::PathOutsideRepo(
+            requested.display().to_string(),
+        ));
+    }
+    let relative_path = parts.join("/");
+    if sensitive_repo_path(&relative_path) {
+        return Err(RepoToolError::SensitivePath(relative_path));
+    }
+    let resolved = root.join(&relative_path);
+    if !resolved.starts_with(root) {
+        return Err(RepoToolError::PathOutsideRepo(relative_path));
+    }
+    if resolved.exists() && !resolved.is_file() {
+        return Err(RepoToolError::NotAFile(relative_path));
+    }
+    Ok((resolved, relative_path))
+}
+
 fn validate_readable_evidence_path(root: &Path, path: &Path) -> Result<String, RepoToolError> {
     let metadata = fs::metadata(path)?;
     let relative_path = relative_display(root, path);
@@ -1247,6 +1475,16 @@ pub enum RepoToolError {
         size_bytes: u64,
         max_bytes: u64,
     },
+    #[error("cannot edit {0}: old_string must not be empty")]
+    EditEmptyOldString(String),
+    #[error("cannot edit {0}: at least one edit is required")]
+    EditNoOperations(String),
+    #[error("cannot edit {0}: old_string and new_string are identical")]
+    EditNoChange(String),
+    #[error("cannot edit {0}: old_string was not found")]
+    EditStringNotFound(String),
+    #[error("cannot edit {path}: old_string matched {matches} times; provide unique context or set replace_all=true")]
+    EditStringNotUnique { path: String, matches: usize },
     #[error("failed to read text from {path}: {source}")]
     ReadText {
         path: String,
@@ -1299,6 +1537,189 @@ mod tests {
     }
 
     #[test]
+    fn write_text_file_creates_repo_file() {
+        let root = temp_repo();
+
+        let evidence = write_text_file(
+            &root,
+            FileWriteRequest {
+                path: PathBuf::from("docs/readme.md"),
+                content: "hello\n".to_owned(),
+                max_bytes: DEFAULT_MAX_WRITE_FILE_BYTES,
+                source: "test".to_owned(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(evidence.path, "docs/readme.md");
+        assert!(evidence.created);
+        assert_eq!(evidence.status, "written");
+        assert_eq!(
+            fs::read_to_string(root.join("docs").join("readme.md")).unwrap(),
+            "hello\n"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn write_text_file_rejects_escape_and_sensitive_paths() {
+        let root = temp_repo();
+
+        let escaped = write_text_file(
+            &root,
+            FileWriteRequest {
+                path: PathBuf::from("../outside.txt"),
+                content: "nope".to_owned(),
+                max_bytes: DEFAULT_MAX_WRITE_FILE_BYTES,
+                source: "test".to_owned(),
+            },
+        )
+        .unwrap_err();
+        let sensitive = write_text_file(
+            &root,
+            FileWriteRequest {
+                path: PathBuf::from(".env"),
+                content: "SECRET=value".to_owned(),
+                max_bytes: DEFAULT_MAX_WRITE_FILE_BYTES,
+                source: "test".to_owned(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(escaped, RepoToolError::PathOutsideRepo(_)));
+        assert!(matches!(sensitive, RepoToolError::SensitivePath(_)));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn edit_text_file_replaces_one_exact_unique_string() {
+        let root = temp_repo();
+        fs::write(
+            root.join("main.js"),
+            "const before = true;\nconst plantType = 'sunflower';\nconst after = true;\n",
+        )
+        .unwrap();
+
+        let evidence = edit_text_file(
+            &root,
+            FileEditRequest {
+                path: PathBuf::from("main.js"),
+                old_string: "const plantType = 'sunflower';".to_owned(),
+                new_string: "const plantType = 's';".to_owned(),
+                replace_all: false,
+                max_bytes: DEFAULT_MAX_WRITE_FILE_BYTES,
+                source: "test".to_owned(),
+            },
+        )
+        .unwrap();
+
+        assert!(!evidence.created);
+        assert_eq!(evidence.evidence_kind, "file_edit");
+        assert_eq!(
+            fs::read_to_string(root.join("main.js")).unwrap(),
+            "const before = true;\nconst plantType = 's';\nconst after = true;\n"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn edit_text_file_requires_unique_context_unless_replace_all_is_set() {
+        let root = temp_repo();
+        fs::write(root.join("main.js"), "plant();\nplant();\n").unwrap();
+        let request = || FileEditRequest {
+            path: PathBuf::from("main.js"),
+            old_string: "plant();".to_owned(),
+            new_string: "grow();".to_owned(),
+            replace_all: false,
+            max_bytes: DEFAULT_MAX_WRITE_FILE_BYTES,
+            source: "test".to_owned(),
+        };
+
+        let error = edit_text_file(&root, request()).unwrap_err();
+        assert!(matches!(
+            error,
+            RepoToolError::EditStringNotUnique { matches: 2, .. }
+        ));
+
+        let mut replace_all = request();
+        replace_all.replace_all = true;
+        edit_text_file(&root, replace_all).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("main.js")).unwrap(),
+            "grow();\ngrow();\n"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn edit_text_file_batch_applies_sequential_edits_with_one_write() {
+        let root = temp_repo();
+        fs::write(root.join("main.js"), "const value = 1;\nshow(value);\n").unwrap();
+
+        let evidence = edit_text_file_batch(
+            &root,
+            FileEditBatchRequest {
+                path: PathBuf::from("main.js"),
+                edits: vec![
+                    FileEditReplacement {
+                        old_string: "const value = 1;".to_owned(),
+                        new_string: "const score = 2;".to_owned(),
+                        replace_all: false,
+                    },
+                    FileEditReplacement {
+                        old_string: "show(value);".to_owned(),
+                        new_string: "show(score);".to_owned(),
+                        replace_all: false,
+                    },
+                ],
+                max_bytes: 1024,
+                source: "test".to_owned(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(root.join("main.js")).unwrap(),
+            "const score = 2;\nshow(score);\n"
+        );
+        assert_eq!(evidence.evidence_kind, "file_edit");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn edit_text_file_batch_is_atomic_when_a_later_edit_fails() {
+        let root = temp_repo();
+        let original = "const value = 1;\nshow(value);\n";
+        fs::write(root.join("main.js"), original).unwrap();
+
+        let error = edit_text_file_batch(
+            &root,
+            FileEditBatchRequest {
+                path: PathBuf::from("main.js"),
+                edits: vec![
+                    FileEditReplacement {
+                        old_string: "const value = 1;".to_owned(),
+                        new_string: "const score = 2;".to_owned(),
+                        replace_all: false,
+                    },
+                    FileEditReplacement {
+                        old_string: "missing();".to_owned(),
+                        new_string: "show(score);".to_owned(),
+                        replace_all: false,
+                    },
+                ],
+                max_bytes: 1024,
+                source: "test".to_owned(),
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, RepoToolError::EditStringNotFound(_)));
+        assert_eq!(fs::read_to_string(root.join("main.js")).unwrap(), original);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn read_file_rejects_large_files() {
         let root = temp_repo();
         fs::write(root.join("large.txt"), "123456").unwrap();
@@ -1335,14 +1756,14 @@ mod tests {
         let root = temp_repo();
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("src").join("app.py"), "one\ntwo\nthree\n").unwrap();
-        fs::write(root.join("src").join("unicode.txt"), "abcédef\n").unwrap();
+        fs::write(root.join("src").join("unicode.txt"), "abc\u{e9}def\n").unwrap();
 
         let by_lines = read_file_range(&root, "src/app.py", 1, 2, 16_000).unwrap();
         let by_chars = read_file_range(&root, "src/unicode.txt", 1, 120, 4).unwrap();
 
         assert_eq!(by_lines.end_line, 2);
         assert!(by_lines.truncated);
-        assert_eq!(by_chars.text, "abcé");
+        assert_eq!(by_chars.text, "abc\u{e9}");
         assert!(by_chars.truncated);
         let _ = fs::remove_dir_all(root);
     }
@@ -1691,6 +2112,19 @@ diff --git a/.env b/.env
     }
 
     #[test]
+    fn command_timeout_uses_claude_default_and_max_bounds() {
+        assert_eq!(
+            effective_command_timeout_seconds(DEFAULT_COMMAND_TIMEOUT_SECONDS),
+            120
+        );
+        assert_eq!(effective_command_timeout_seconds(0), 1);
+        assert_eq!(
+            effective_command_timeout_seconds(MAX_COMMAND_TIMEOUT_SECONDS + 1),
+            600
+        );
+    }
+
+    #[test]
     fn command_preview_reports_approval_key_without_running() {
         let root = temp_repo();
 
@@ -1748,6 +2182,28 @@ diff --git a/.env b/.env
     }
 
     #[test]
+    fn run_command_writes_stdin_to_child_process() {
+        let root = temp_repo();
+
+        let evidence = run_command(
+            &root,
+            CommandRunRequest {
+                argv: platform_cat_args(),
+                stdin: Some("stdin-ok\n".to_owned()),
+                source: "discovered".to_owned(),
+                approved: true,
+                ..CommandRunRequest::default()
+            },
+        )
+        .unwrap();
+
+        assert!(evidence.passed);
+        assert_eq!(evidence.status, "completed");
+        assert!(evidence.output.contains("stdin-ok"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn run_command_rejects_cwd_escape() {
         let root = temp_repo();
 
@@ -1779,9 +2235,15 @@ diff --git a/.env b/.env
     fn temp_repo() -> PathBuf {
         static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("coder-tools-{}-{}", std::process::id(), id));
+        let root = test_tmp_root().join(format!("coder-tools-{}-{}", std::process::id(), id));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    fn test_tmp_root() -> PathBuf {
+        std::env::var_os("CODER_TEST_TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
     }
 
     fn init_git_repo(root: &Path) {
@@ -1812,6 +2274,14 @@ diff --git a/.env b/.env
             ]
         } else {
             vec!["sh".to_owned(), "-c".to_owned(), format!("exit {code}")]
+        }
+    }
+
+    fn platform_cat_args() -> Vec<String> {
+        if cfg!(windows) {
+            vec!["cmd.exe".to_owned(), "/C".to_owned(), "more".to_owned()]
+        } else {
+            vec!["sh".to_owned(), "-c".to_owned(), "cat".to_owned()]
         }
     }
 

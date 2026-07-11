@@ -37,3 +37,5 @@ bash ./scripts/install.sh --dry-run
 The dry-runs do not download or install anything. Non-dry-run mode downloads the
 matching GitHub release archive, verifies that it contains the `coder-rust`
 binary, and installs it into a user-local bin directory.
+Use `-TempDir`, `--temp-dir`, or `CODER_INSTALL_TMPDIR` when installer
+download/extract scratch space should live on a non-system drive.

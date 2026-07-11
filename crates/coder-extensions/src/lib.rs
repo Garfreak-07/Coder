@@ -759,19 +759,6 @@ pub fn builtin_plugin_manifests() -> Vec<PluginManifest> {
             tags: vec!["coding".to_owned(), "files".to_owned()],
             ..PluginManifest::builtin_default()
         },
-        PluginManifest {
-            id: "openhands-task-executor-runtime".to_owned(),
-            name: "OpenHands Task Executor Runtime".to_owned(),
-            description: "Harness runtime provider for coding work items.".to_owned(),
-            extension_type: ExtensionType::HarnessRuntime,
-            operations: vec!["harness_runtime.run_task_execution".to_owned()],
-            tags: vec![
-                "harness_runtime".to_owned(),
-                "executor".to_owned(),
-                "coding".to_owned(),
-            ],
-            ..PluginManifest::builtin_default()
-        },
     ]
 }
 
@@ -933,7 +920,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_plugins_match_python_registry_contract() {
+    fn builtin_plugins_have_stable_native_registry_contract() {
         let plugins = builtin_plugin_manifests();
         let ids = plugins
             .iter()
@@ -943,19 +930,11 @@ mod tests {
             .iter()
             .find(|plugin| plugin.id == "command-runner")
             .unwrap();
-        let openhands_runtime = plugins
-            .iter()
-            .find(|plugin| plugin.id == "openhands-task-executor-runtime")
-            .unwrap();
-
         assert!(ids.contains("command-runner"));
         assert!(ids.contains("filesystem-patch"));
+        assert_eq!(ids.len(), 2);
         assert!(command_runner.external_effect);
         assert!(command_runner.requires_preview);
-        assert_eq!(
-            openhands_runtime.extension_type,
-            ExtensionType::HarnessRuntime
-        );
     }
 
     #[test]

@@ -12,7 +12,8 @@ export const deepSeekProviderPreset: ProviderFormState = {
   default_provider: "deepseek",
   default_model: "deepseek-v4-flash",
   base_url: "https://api.deepseek.com",
-  proxy_url: "http://127.0.0.1:7890",
+  proxy_mode: "direct",
+  proxy_url: "",
   api_key: "",
   mock_mode: false
 };
@@ -21,6 +22,7 @@ const defaultProviderForm: ProviderFormState = {
   default_provider: deepSeekProviderPreset.default_provider,
   default_model: deepSeekProviderPreset.default_model,
   base_url: deepSeekProviderPreset.base_url,
+  proxy_mode: deepSeekProviderPreset.proxy_mode,
   proxy_url: deepSeekProviderPreset.proxy_url,
   api_key: "",
   mock_mode: deepSeekProviderPreset.mock_mode
@@ -42,7 +44,8 @@ export function useProviderSettings(onStatus: (status: string) => void) {
           default_provider: provider,
           default_model: settings.default_model || status.default_model || deepSeekProviderPreset.default_model,
           base_url: settings.base_urls[provider] ?? "",
-          proxy_url: settings.proxy_urls[provider] ?? defaultProxyUrlForProvider(provider),
+          proxy_mode: (settings.proxy_modes ?? {})[provider] ?? defaultProxyModeForProvider(provider),
+          proxy_url: (settings.proxy_urls ?? {})[provider] ?? "",
           api_key: "",
           mock_mode: settings.mock_mode
         });
@@ -57,7 +60,9 @@ export function useProviderSettings(onStatus: (status: string) => void) {
         const merged = { ...current, ...patch };
         if (nextProvider && nextProvider !== current.default_provider) {
           merged.base_url = providerSettings?.base_urls[nextProvider] ?? defaultBaseUrlForProvider(nextProvider);
-          merged.proxy_url = providerSettings?.proxy_urls[nextProvider] ?? defaultProxyUrlForProvider(nextProvider);
+          merged.proxy_mode =
+            (providerSettings?.proxy_modes ?? {})[nextProvider] ?? defaultProxyModeForProvider(nextProvider);
+          merged.proxy_url = (providerSettings?.proxy_urls ?? {})[nextProvider] ?? "";
           merged.api_key = "";
           if (!patch.default_model) {
             merged.default_model = defaultModelForProvider(nextProvider);
@@ -141,12 +146,15 @@ function buildProviderSettingsPayload(
   const provider = providerForm.default_provider.trim().toLowerCase() || "openai";
   const baseUrls = { ...(providerSettings?.base_urls ?? {}) };
   const proxyUrls = { ...(providerSettings?.proxy_urls ?? {}) };
+  const proxyModes = { ...(providerSettings?.proxy_modes ?? {}) };
   if (providerForm.base_url.trim()) {
     baseUrls[provider] = providerForm.base_url.trim();
   } else {
     delete baseUrls[provider];
   }
-  if (providerForm.proxy_url.trim()) {
+  const proxyMode = normalizeProviderProxyMode(providerForm.proxy_mode, provider);
+  proxyModes[provider] = proxyMode;
+  if (proxyMode === "explicit" && providerForm.proxy_url.trim()) {
     proxyUrls[provider] = providerForm.proxy_url.trim();
   } else {
     delete proxyUrls[provider];
@@ -156,6 +164,7 @@ function buildProviderSettingsPayload(
     default_model: providerForm.default_model.trim() || "gpt-4.1-mini",
     base_urls: baseUrls,
     proxy_urls: proxyUrls,
+    proxy_modes: proxyModes,
     mock_mode: providerForm.mock_mode
   };
   if (providerForm.api_key.trim()) {
@@ -171,11 +180,18 @@ function defaultBaseUrlForProvider(provider: string): string {
   return "";
 }
 
-function defaultProxyUrlForProvider(provider: string): string {
+function defaultProxyModeForProvider(provider: string): "direct" | "environment" {
   if (provider === deepSeekProviderPreset.default_provider || provider === "deepseek") {
-    return deepSeekProviderPreset.proxy_url;
+    return "direct";
   }
-  return "";
+  return "environment";
+}
+
+function normalizeProviderProxyMode(mode: string, provider: string): "direct" | "explicit" | "environment" {
+  if (mode === "direct" || mode === "explicit" || mode === "environment") {
+    return mode;
+  }
+  return defaultProxyModeForProvider(provider);
 }
 
 function defaultModelForProvider(provider: string): string {

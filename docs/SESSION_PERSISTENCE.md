@@ -1,80 +1,95 @@
 # Session Persistence
 
-Coder keeps local, inspectable run and planner-session history under the
-repo-local `.coder/` directory. These files are local runtime state, not cloud
-sync state.
+Coder uses a local append-only store. The default root is `.coder` in the
+workspace unless `--store` is passed.
 
 ## Layout
 
 ```text
 .coder/
   sessions/
+    <session_id>.jsonl
+    <session_id>.seq
   runs/
-  timeline/
+    <run_id>/
+      metadata.json
+      project-config.snapshot.json
+      events.jsonl
+      report.json
+      content-replacements.seq
+      repo_evidence/
+      artifacts/
+      checkpoints/
+      subagents/
+  background-tasks/
+    commands/
+    subagents/
   blobs/
-  artifacts/
+  settings/
+    permissions/
   checkpoints/
+    compaction/
+    goals/
   changesets/
   repo-index/
   plugin-cache/
   skill-cache/
-  openhands-events/
   logs/
   tmp/
 ```
 
-`RunStore::ensure_local_layout()` creates the layout. The cache status endpoint
-reports real recursive file counts and byte totals for the cache buckets it
-exposes.
+## Rules
 
-## Append-Only Logs
+- Session and run events are append-only JSONL.
+- Payloads are redacted before persistence.
+- Large payloads should be stored as blobs with bounded previews.
+- Run metadata and config snapshots are immutable evidence for later review.
+- Background command output is tailed and bounded.
+- Subagents keep sidechain state under the run.
+- Checkpoints store resumable state such as compaction and goals.
+- Planner session revisions merge workflow completion into the latest session
+  instead of replacing turns that arrived while work was active.
+- `work_in_progress`, `active_run_id`, and `latest_run_id` expose the run
+  boundary without copying the workflow transcript into Planner history.
+- Local status/cancel/confirmation/guidance turns are persisted separately from
+  provider-backed Planner turns.
 
-- Run events are stored as append-only JSONL at
-  `.coder/runs/<run_id>/events.jsonl`.
-- Planner session lifecycle records are stored as append-only JSONL at
-  `.coder/sessions/<session_id>.jsonl`.
-- Session records store public lifecycle metadata such as mode, readiness,
-  turn counts, and linked run ids. They do not store raw user messages or raw
-  model messages.
+## Bounds
 
-Timeline responses should be projections over run/session state. `.coder/timeline/`
-is reserved for projection caches and must not become a second source of truth.
+- Durable reads reject files over 50MiB.
+- JSONL page and tail reads are capped at 1000 records.
+- Cache usage scans are capped at 1000 filesystem entries.
+- Provider response bodies and pending stream lines are capped at 2MiB.
+- Planner sessions retain at most 64 turns in memory and the live session cache
+  retains at most 200 sessions.
+- Transcript compaction operates on bounded event windows and records its own
+  outcome.
 
-## Large Payloads
+These bounds follow the same first-principles rule used in Claude Code:
+transcripts and write queues must be durable, incremental, and bounded so a long
+session does not grow memory without limit.
 
-Large raw backend payloads should be stored through content-addressed blob refs
-under `.coder/blobs/<prefix>/<sha256>`. JSONL payloads should store slim
-summaries and references instead of full large strings.
+## Secrets
 
-## Cleanup Policy
+Session records reject secret-like keys and redact secret-like payloads. Do not
+persist provider API keys, passwords, private keys, or raw authorization
+headers.
 
-Generic cache cleanup may remove disposable directories:
+## Resume And Compaction
 
-- `.coder/repo-index/`
-- `.coder/plugin-cache/`
-- `.coder/skill-cache/`
-- `.coder/tmp/`
+Planner history and run transcripts can be compacted. Compaction should record:
 
-Generic cleanup must not delete durable history or review data:
+- contract version
+- source window
+- token/size estimate
+- replacement entries
+- circuit breaker state
+- final status
 
-- `.coder/sessions/`
-- `.coder/runs/`
-- `.coder/timeline/`
-- `.coder/blobs/`
-- `.coder/artifacts/`
-- `.coder/checkpoints/`
-- `.coder/changesets/`
-- `.coder/openhands-events/`
-- `.coder/logs/`
+After compaction, only bounded file and skill context is restored into the next
+turn.
 
-Any destructive cleanup for durable history must be explicit, scoped, and
-confirmed by the caller.
-
-## Secret Policy
-
-Provider API keys and other secrets must not be written to `.coder/` JSONL
-files. Session JSONL uses metadata-only records, and the store rejects
-secret-like keys or strings for session record payloads.
-
-Provider credentials belong in the configured provider settings path or
-environment variables, not in run/session/timeline JSONL.
+Provider-backed Planner turn records include transport, fallback status,
+provider request count, estimated tokens, reported input/output/total tokens,
+and cache-read tokens. Local control turns intentionally have no provider
+trace.

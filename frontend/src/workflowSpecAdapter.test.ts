@@ -1,6 +1,6 @@
 import { defaultPlannerLedAgentWorkflow } from "./examples";
 import { readFileSync } from "node:fs";
-import { normalizeRunChangeSetsResponse, normalizeRunTimelineResponse } from "./api";
+import { getLiveAgentRun, normalizeRunChangeSetsResponse, normalizeRunTimelineResponse } from "./api";
 import { AppSidebar } from "./components/AppSidebar";
 import { PlannerChatPage } from "./features/planner-chat/PlannerChatPage";
 import { ReviewChangesCard } from "./features/review-changes/ReviewChangesCard";
@@ -17,6 +17,7 @@ import {
   legacyCanvasToWorkflowSpec,
   parseWorkflowImport,
   validateWorkflowSpec,
+  workflowExportToProjectConfig,
   workflowSpecToLegacyCanvas
 } from "./workflowSpecAdapter";
 
@@ -40,13 +41,24 @@ const assert = {
   }
 };
 
-function test(name: string, run: () => void) {
-  try {
-    run();
-    console.log(`ok - ${name}`);
-  } catch (error) {
-    console.error(`not ok - ${name}`);
-    throw error;
+const tests: Array<{ name: string; run: () => void | Promise<void> }> = [];
+const removedExternalHarnessLabel = "Open" + "Hands";
+const removedExternalHarnessRoute = "/api/v3/" + "open" + "hands";
+const removedExternalBackendEvent = ["backend", "open" + "hands"].join(".");
+
+function test(name: string, run: () => void | Promise<void>) {
+  tests.push({ name, run });
+}
+
+async function runTests() {
+  for (const { name, run } of tests) {
+    try {
+      await run();
+      console.log(`ok - ${name}`);
+    } catch (error) {
+      console.error(`not ok - ${name}`);
+      throw error;
+    }
   }
 }
 
@@ -55,11 +67,12 @@ test("exports legacy planner/executor canvas to Rust workflow config", () => {
   const workflow = config.workflows["default-planner-led"];
 
   assert.equal(config.version, 1);
-  assert.equal(workflow.nodes.length, 2);
-  assert.equal(workflow.nodes[0].id, "planner");
-  assert.equal(workflow.nodes[1].id, "executor");
+  assert.equal(workflow.nodes.length, 3);
+  assert.equal(workflow.nodes[0].id, "executor");
+  assert.equal(workflow.nodes[1].id, "verifier");
+  assert.equal(workflow.nodes[2].id, "workflow-planner");
   assert.equal(workflow.max_rounds, defaultPlannerLedAgentWorkflow.loop_policy.max_auto_rounds);
-  assert.equal(workflow.stop.final_report_agent, defaultPlannerLedAgentWorkflow.primary_planner_id);
+  assert.equal(workflow.stop.final_report_agent, "verifier");
 });
 
 test("roundtrips Rust workflow export back to equivalent legacy canvas", () => {
@@ -70,21 +83,33 @@ test("roundtrips Rust workflow export back to equivalent legacy canvas", () => {
   assert.equal(imported.primary_planner_id, "planner");
   assert.deepEqual(imported.ui?.layout, defaultPlannerLedAgentWorkflow.ui?.layout);
   assert.equal(imported.loop_policy.max_auto_rounds, defaultPlannerLedAgentWorkflow.loop_policy.max_auto_rounds);
-  assert.deepEqual(imported.edges, [
-    { from: "planner", to: "executor" },
-    { from: "executor", to: "planner", loop: true }
-  ]);
+  assert.deepEqual(imported.edges, defaultPlannerLedAgentWorkflow.edges);
 });
 
-test("maps OpenHands harness profiles to OpenHands backend", () => {
+test("roundtrips an optional shared workflow token budget", () => {
+  const workflow: AgentWorkflowSpec = {
+    ...defaultPlannerLedAgentWorkflow,
+    loop_policy: {
+      ...defaultPlannerLedAgentWorkflow.loop_policy,
+      token_budget: 100_000
+    }
+  };
+  const exported = legacyCanvasToWorkflowExport(workflow);
+  const rustWorkflow = exported.workflows[workflow.id];
+  const imported = workflowSpecToLegacyCanvas(exported);
+
+  assert.equal(rustWorkflow.token_budget, 100_000);
+  assert.equal(imported.loop_policy.token_budget, 100_000);
+});
+
+test("maps default task execution harness to native backend", () => {
   const config = legacyCanvasToWorkflowSpec(defaultPlannerLedAgentWorkflow);
   const plannerHarness = config.harnesses["planner-conversation"];
-  const taskHarness = config.harnesses["openhands-task-executor-default"];
+  const taskHarness = config.harnesses["native-code-edit"];
 
   assert.equal(plannerHarness.backend, "planner-model");
-  assert.equal(config.workflows["default-planner-led"].nodes[0].harness, "planner-conversation");
-  assert.equal(taskHarness.backend, "openhands");
-  assert.equal(taskHarness.openhands?.server_url, "http://127.0.0.1:8000");
+  assert.equal(config.workflows["default-planner-led"].nodes[0].harness, "native-code-edit");
+  assert.equal(taskHarness.backend, "native-rust");
   assert.deepEqual(plannerHarness.memory.read, ["user", "project", "run", "repo_facts", "knowledge_hints"]);
   assert.deepEqual(config.agents.executor.memory.read, ["workflow", "run"]);
   assert.deepEqual(taskHarness.memory.read, ["workflow", "run"]);
@@ -103,15 +128,15 @@ test("maps native read-only harness profiles to native Rust backend", () => {
   const config = legacyCanvasToWorkflowSpec(workflow);
 
   assert.equal(config.harnesses["review-only-chat"].backend, "planner-model");
+  assert.equal(config.harnesses["review-only-supervisor"].backend, "planner-model");
   assert.equal(config.harnesses["review-only-task"].backend, "native-rust");
-  assert.equal(config.harnesses["review-only-task"].openhands, null);
   assert.deepEqual(config.harnesses["review-only-task"].memory.read, ["workflow", "run"]);
-  assert.equal(config.workflows["default-planner-led"].nodes[0].harness, "review-only-chat");
+  assert.equal(config.workflows["default-planner-led"].nodes[0].harness, "review-only-task");
 });
 
 test("validates invalid Rust specs with user-facing errors", () => {
   const config = legacyCanvasToWorkflowSpec(defaultPlannerLedAgentWorkflow);
-  delete config.harnesses["openhands-task-executor-default"];
+  delete config.harnesses["native-code-edit"];
 
   const validation = validateWorkflowSpec(config, "default-planner-led");
 
@@ -129,6 +154,25 @@ test("imports future Rust fields without crashing", () => {
   const imported = parseWorkflowImport(exported);
 
   assert.equal(imported.id, defaultPlannerLedAgentWorkflow.id);
+});
+
+test("preserves Rust hook settings in workflow exports", () => {
+  const exported = legacyCanvasToWorkflowExport(defaultPlannerLedAgentWorkflow);
+  exported.disable_all_hooks = true;
+  exported.hooks = {
+    PreToolUse: [
+      {
+        matcher: "Bash",
+        hooks: [{ type: "command", command: "echo check" }]
+      }
+    ]
+  };
+
+  const config = workflowExportToProjectConfig(exported);
+
+  assert.equal(config.disable_all_hooks, true);
+  assert.equal(config.hooks?.PreToolUse?.[0]?.matcher, "Bash");
+  assert.equal(config.hooks?.PreToolUse?.[0]?.hooks[0]?.command, "echo check");
 });
 
 test("imports plain Rust ProjectConfig while preserving max rounds and planner", () => {
@@ -149,8 +193,8 @@ test("maps Rust default workflow response into the legacy canvas model", () => {
 
   assert.equal(imported.id, "default-planner-led");
   assert.equal(imported.name, defaultPlannerLedAgentWorkflow.name);
-  assert.equal(imported.agents.length, 2);
-  assert.equal(imported.edges[1].loop, true);
+  assert.equal(imported.agents.length, 4);
+  assert.equal(imported.edges.at(-1)?.loop, true);
 });
 
 test("roundtrips library save payloads through Rust workflow storage shape", () => {
@@ -201,6 +245,105 @@ test("maps Rust run events into the existing paged event model", () => {
   assert.equal(page.has_more, false);
 });
 
+test("uses Rust run event pagination metadata without local slicing", () => {
+  const page = rustRunEventsToRunEventsPage(
+    {
+      run_id: "run-1",
+      event_count: 5,
+      returned_count: 2,
+      truncated: true,
+      next_after_sequence: 4,
+      events: [
+        {
+          event_id: "evt-3",
+          run_id: "run-1",
+          sequence: 3,
+          timestamp: "2026-06-28T00:00:02Z",
+          kind: "node.started",
+          payload: { node_id: "executor", status: "running" },
+          refs: []
+        },
+        {
+          event_id: "evt-4",
+          run_id: "run-1",
+          sequence: 4,
+          timestamp: "2026-06-28T00:00:03Z",
+          kind: "node.completed",
+          payload: { node_id: "executor", status: "completed" },
+          refs: []
+        }
+      ]
+    },
+    2,
+    2
+  );
+
+  assert.equal(page.events.length, 2);
+  assert.equal(page.events[0].node_id, "executor");
+  assert.equal(page.next_cursor, 4);
+  assert.equal(page.has_more, true);
+});
+
+test("live run detail uses bounded run metadata and paged events", async () => {
+  const calls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    const requestUrl = String(url);
+    calls.push(requestUrl);
+    if (requestUrl.includes("/api/v3/runs/run-live/events")) {
+      return jsonResponse({
+        run_id: "run-live",
+        event_count: 3,
+        returned_count: 1,
+        truncated: true,
+        next_after_sequence: 1,
+        events: [
+          {
+            event_id: "evt-live-1",
+            run_id: "run-live",
+            sequence: 1,
+            timestamp: "2026-06-28T00:00:01Z",
+            kind: "node.started",
+            payload: { node_id: "executor", status: "running" },
+            refs: []
+          }
+        ]
+      });
+    }
+    if (requestUrl.includes("/api/v3/runs/run-live?include_events=false")) {
+      return jsonResponse({
+        run_id: "run-live",
+        metadata: {
+          run_id: "run-live",
+          workflow_id: "planner-led",
+          status: "running",
+          created_at: "2026-06-28T00:00:00Z",
+          updated_at: "2026-06-28T00:00:01Z"
+        },
+        events: [],
+        event_count: 3,
+        returned_count: 0,
+        report: null,
+        repo_evidence_count: 0
+      });
+    }
+    return jsonResponse({ error: `unexpected URL ${requestUrl}` }, 404);
+  }) as typeof fetch;
+
+  try {
+    const detail = await getLiveAgentRun("run-live");
+    assert.equal(detail.id, "run-live");
+    assert.equal(detail.status, "running");
+    assert.equal(detail.events.length, 1);
+    assert.equal(detail.events[0].type, "node.started");
+    assert.ok(calls.some((url) => url.includes("/api/v3/runs/run-live?include_events=false")));
+    assert.ok(calls.some((url) => url.includes("/api/v3/runs/run-live/events?limit=200")));
+    assert.ok(!calls.some((url) => url.endsWith("/api/v3/runs/run-live")));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("frontend API client stays on Rust v3 without Python switch", () => {
   const apiSource = readFileSync("src/api.ts", "utf8");
   const removedV2Route = "/api/" + "v2";
@@ -210,6 +353,8 @@ test("frontend API client stays on Rust v3 without Python switch", () => {
   assert.ok(!apiSource.toLowerCase().includes(removedPythonServer));
   assert.ok(apiSource.includes("/api/v3/planner-chat/sessions"));
   assert.ok(apiSource.includes("legacyCanvasToWorkflowSpec(input.agent_workflow)"));
+  assert.ok(apiSource.includes("include_events=false"));
+  assert.ok(apiSource.includes('params.set("tail", "true")'));
 });
 
 test("Planner Chat API keeps execution behind Start Work", () => {
@@ -222,14 +367,15 @@ test("Planner Chat API keeps execution behind Start Work", () => {
   );
   const startWorkSource = sourceBetween(
     apiSource,
-    "export function startPlannerSessionWork",
+    "export async function startPlannerSessionWork",
     "export function getPlannerChatSession"
   );
 
   assert.ok(chatTurnSource.includes("/api/v3/planner-chat/sessions/${encodeURIComponent(input.session_id)}/turn"));
   assert.ok(chatTurnSource.includes("confirmed: false"));
   assert.ok(chatTurnSource.includes('mode: "discuss"'));
-  assert.ok(chatTurnSource.includes("run_id: null"));
+  assert.ok(chatTurnSource.includes("run_id: mappedSession.run_id"));
+  assert.ok(!chatTurnSource.includes("run_id: null"));
   assert.ok(!chatTurnSource.includes("/api/v3/runs"));
   assert.ok(startWorkSource.includes("/start-work"));
   assert.ok(!startWorkSource.includes('"/api/v3/runs"'));
@@ -244,7 +390,7 @@ test("desktop skeleton keeps API fallback and desktop scripts opt-in", () => {
   const tauriConfig = readFileSync("../src-tauri/tauri.conf.json", "utf8");
   const rootCargo = readFileSync("../Cargo.toml", "utf8");
   const serverSource = readFileSync("../crates/coder-server/src/lib.rs", "utf8");
-  const docs = readFileSync("../docs/DESKTOP_APP_PLAN.md", "utf8");
+  const docs = readFileSync("../README.md", "utf8");
 
   assert.ok(apiSource.includes("VITE_CODER_API_BASE_URL"));
   assert.ok(apiSource.includes("window.CODER_API_BASE_URL"));
@@ -349,7 +495,7 @@ test("Planner Chat renders structured table artifacts as compact cards", () => {
 test("Planner Chat shell exposes polished empty, loading, and Start Work states", () => {
   const emptyTree = renderPlannerChat(null);
   const readyTree = renderPlannerChat(plannerSessionFixture(), { request: "Implement the accepted plan." });
-  const loadingTree = renderPlannerChat(plannerSessionFixture({ run_id: "run-1" }), { runLoading: true });
+  const loadingTree = renderPlannerChat(plannerSessionFixture({ run_id: "run-1" }), { plannerLoading: true });
   const emptyClasses = collectReactTreeClassNames(emptyTree);
   const readyClasses = collectReactTreeClassNames(readyTree);
   const loadingText = collectReactTreeText(loadingTree);
@@ -359,7 +505,7 @@ test("Planner Chat shell exposes polished empty, loading, and Start Work states"
   assert.ok(readyClasses.includes("message-bubble"));
   assert.ok(readyClasses.includes("composer-actions"));
   assert.ok(readyClasses.includes("start-work-action primary-action"));
-  assert.ok(loadingText.includes("Working..."));
+  assert.ok(loadingText.includes("Planner is responding..."));
   assert.ok(loadingClasses.includes("chat-loading-row"));
 });
 
@@ -378,13 +524,29 @@ test("Planner Chat renders legacy sessions without task state", () => {
 });
 
 test("Planner Chat composer disables input only while a request is in flight", () => {
-  const idleTree = renderPlannerChat(null, { request: "hello", runLoading: false });
-  const busyTree = renderPlannerChat(null, { request: "hello", runLoading: true });
+  const idleTree = renderPlannerChat(null, { request: "hello", plannerLoading: false });
+  const busyTree = renderPlannerChat(null, { request: "hello", plannerLoading: true });
   const idleComposer = findElementByPlaceholder(idleTree, "Message the Planner...");
   const busyComposer = findElementByPlaceholder(busyTree, "Message the Planner...");
 
   assert.equal(Boolean(idleComposer?.props?.disabled), false);
   assert.equal(Boolean(busyComposer?.props?.disabled), true);
+});
+
+test("Planner Chat remains available while a workflow runs", () => {
+  const tree = renderPlannerChat(plannerSessionFixture({ status: "running" }), {
+    request: "Plan the next task.",
+    workflowRunning: true
+  });
+  const composer = findElementByPlaceholder(tree, "Message the Planner...");
+  const text = collectReactTreeText(tree);
+  const classNames = collectReactTreeClassNames(tree);
+
+  assert.equal(Boolean(composer?.props?.disabled), false);
+  assert.ok(text.includes("Workflow is running. Planner Chat remains available."));
+  assert.ok(text.includes("Stop work"));
+  assert.ok(classNames.includes("stop-work-action"));
+  assert.ok(!classNames.includes("start-work-action primary-action"));
 });
 
 test("App navigation hides Plugins & Skills outside debug UI", () => {
@@ -400,7 +562,7 @@ test("App navigation hides Plugins & Skills outside debug UI", () => {
     showExtensions: true
   });
   const appSource = readFileSync("src/App.tsx", "utf8");
-  const pluginDocs = readFileSync("../docs/PLUGIN_AND_SKILLS_PAGE.md", "utf8");
+  const architectureDocs = readFileSync("../docs/ARCHITECTURE.md", "utf8");
 
   assert.ok(collectReactTreeText(defaultTree).includes("Planner Chat"));
   assert.ok(collectReactTreeText(defaultTree).includes("Settings"));
@@ -415,8 +577,9 @@ test("App navigation hides Plugins & Skills outside debug UI", () => {
   assert.ok(appSource.includes('activeSection === "extensions" && debugUiEnabled'));
   assert.ok(appSource.includes('get("debug") === "1"'));
   assert.ok(appSource.includes('window.localStorage.getItem("coder_debug_ui") === "1"'));
-  assert.ok(pluginDocs.includes("ordinary product sidebar must not render `Plugins & Skills`"));
-  assert.ok(pluginDocs.includes("Only the debug-gated `showExtensions` path may expose it"));
+  assert.ok(architectureDocs.includes("ordinary product sidebar starts at Planner Chat"));
+  assert.ok(architectureDocs.includes("Plugins & Skills"));
+  assert.ok(architectureDocs.includes("explicit debug UI"));
 });
 
 test("Work timeline renders public ReAct items without raw backend details", () => {
@@ -457,7 +620,7 @@ test("Work timeline renders public ReAct items without raw backend details", () 
   assert.ok(text.includes("Action selected"));
   assert.ok(text.includes("repo_find_files"));
   assert.ok(!text.includes("raw_ref"));
-  assert.ok(!text.includes("backend.openhands"));
+  assert.ok(!text.includes(removedExternalBackendEvent));
 });
 
 test("Work timeline explains a complete run with compact command output", () => {
@@ -565,7 +728,7 @@ test("Work timeline explains a complete run with compact command output", () => 
         "Status: completed\nRequested: Update README.md\nDone: Updated README.md\nChanged files: README.md\nVerification: cargo test: completed exit 0\nEvidence: 1 evidence ref(s) recorded: event_log.\nRemaining risks: No remaining blocker or risk was recorded.\nNext steps: No next step was recorded.",
       changed_files: ["README.md"],
       checks: ["cargo test: completed exit 0"],
-      evidence_refs: [{ kind: "openhands_raw_event", reference: "blob://sha256/raw-final" }],
+      evidence_refs: [{ kind: "native_raw_event", reference: "blob://sha256/raw-final" }],
       blockers: [],
       next_steps: [],
       created_at: "2026-01-01T00:00:10Z"
@@ -606,7 +769,7 @@ test("Work timeline explains a complete run with compact command output", () => 
   assert.ok(classNames.includes("timeline-tone-success"));
   assert.ok(classNames.includes("timeline-tone-warning"));
   assert.ok(!text.includes("raw_ref"));
-  assert.ok(!text.includes("backend.openhands"));
+  assert.ok(!text.includes(removedExternalBackendEvent));
   assert.ok(!text.includes("blob://sha256"));
 });
 
@@ -820,8 +983,12 @@ test("Provider Settings exposes DeepSeek preset and exact test result UI", () =>
 
   assert.ok(panelSource.includes("DeepSeek preset"));
   assert.ok(panelSource.includes("Test Provider"));
+  assert.ok(panelSource.includes("Provider Network"));
+  assert.ok(panelSource.includes("Direct"));
+  assert.ok(panelSource.includes("Current environment"));
+  assert.ok(panelSource.includes("Explicit proxy"));
   assert.ok(panelSource.includes("Provider Proxy URL"));
-  assert.ok(panelSource.includes("proxy configured"));
+  assert.ok(panelSource.includes("explicit proxy"));
   assert.ok(panelSource.includes("Clear API Key"));
   assert.ok(panelSource.includes("showMockMode"));
   assert.ok(panelSource.includes("Test succeeded"));
@@ -833,28 +1000,30 @@ test("Provider Settings exposes DeepSeek preset and exact test result UI", () =>
   assert.ok(panelSource.includes("deepseek"));
   assert.ok(panelSource.includes("openai-compatible"));
   assert.ok(panelSource.includes("custom"));
-  assert.ok(!panelSource.includes("Execution Backend / OpenHands"));
-  assert.ok(!panelSource.includes("OpenHands is the required execution backend"));
+  assert.ok(!panelSource.includes(`Execution Backend / ${removedExternalHarnessLabel}`));
+  assert.ok(!panelSource.includes(`${removedExternalHarnessLabel} is the required execution backend`));
   assert.ok(!panelSource.includes("required executor"));
-  assert.ok(!panelSource.includes("OpenHands enabled"));
-  assert.ok(!panelSource.includes("Allow native fallback when OpenHands is unavailable"));
+  assert.ok(!panelSource.includes(`${removedExternalHarnessLabel} enabled`));
+  assert.ok(!panelSource.includes(`Allow native fallback when ${removedExternalHarnessLabel} is unavailable`));
   assert.ok(!panelSource.includes("native fallback allowed"));
   assert.ok(!panelSource.includes("Session API key / token"));
   assert.ok(!panelSource.includes("Workspace mode"));
-  assert.ok(!panelSource.includes("Test OpenHands"));
-  assert.ok(!panelSource.includes("Clear OpenHands Token"));
+  assert.ok(!panelSource.includes(`Test ${removedExternalHarnessLabel}`));
+  assert.ok(!panelSource.includes(`Clear ${removedExternalHarnessLabel} Token`));
   assert.ok(hookSource.includes('default_provider: "deepseek"'));
   assert.ok(hookSource.includes("deepseek-v4-flash"));
   assert.ok(hookSource.includes("https://api.deepseek.com"));
-  assert.ok(hookSource.includes("http://127.0.0.1:7890"));
+  assert.ok(hookSource.includes('proxy_mode: "direct"'));
+  assert.ok(hookSource.includes("defaultProxyModeForProvider"));
   assert.ok(hookSource.includes("proxy_urls: proxyUrls"));
+  assert.ok(hookSource.includes("proxy_modes: proxyModes"));
   assert.ok(hookSource.includes("api_keys: { [provider]: null }"));
   assert.ok(hookSource.includes("mock_mode: false"));
   assert.ok(hookSource.includes("buildProviderSettingsPayload(providerForm, providerSettings)"));
   assert.ok(hookSource.includes("Saving provider ${provider} before test"));
-  assert.ok(apiSource.includes("/api/v3/openhands/settings"));
-  assert.ok(apiSource.includes("/api/v3/openhands/status"));
-  assert.ok(!appSource.includes("useOpenHandsSettings"));
+  assert.ok(!apiSource.includes(`${removedExternalHarnessRoute}/settings`));
+  assert.ok(!apiSource.includes(`${removedExternalHarnessRoute}/status`));
+  assert.ok(!appSource.includes(`use${removedExternalHarnessLabel}Settings`));
   assert.ok(appSource.includes("showMockMode={debugUiEnabled}"));
   assert.ok(liveSmokeScript.includes("CODER_LIVE_LLM_SMOKE"));
   assert.ok(liveSmokeScript.includes("should_start_workflow"));
@@ -878,21 +1047,17 @@ test("Planner Chat shows provider setup before chat when credentials are missing
   assert.equal(Boolean(composer?.props?.disabled), true);
 });
 
-test("Snake live smoke requires browser gameplay validation", () => {
-  const snakeSmokeScript = readFileSync("../scripts/live-snake-game-smoke.ps1", "utf8");
-  const validationDocs = readFileSync("../docs/RELEASE_CHECKLIST.md", "utf8");
+test("live selftest covers generic runtime boundary probes", () => {
+  const liveSelftestScript = readFileSync("../scripts/live-coder-selftest-suite.ps1", "utf8");
 
-  assert.ok(snakeSmokeScript.includes("Invoke-SnakeBrowserValidation"));
-  assert.ok(snakeSmokeScript.includes("playwright@"));
-  assert.ok(snakeSmokeScript.includes("window.__snakeTestState"));
-  assert.ok(snakeSmokeScript.includes("do not install Playwright"));
-  assert.ok(snakeSmokeScript.includes("Do not create package.json"));
-  assert.ok(snakeSmokeScript.includes("restart-btn"));
-  assert.ok(snakeSmokeScript.includes("no_immediate_game_over"));
-  assert.ok(snakeSmokeScript.includes("direction_key_moves_game"));
-  assert.ok(snakeSmokeScript.includes("opposite-direction reversal"));
-  assert.ok(snakeSmokeScript.includes("restart_works"));
-  assert.ok(validationDocs.includes("Earlier Snake E2E verified file creation and JS syntax only."));
+  assert.ok(liveSelftestScript.includes("Invoke-RuntimeBoundaryProbe"));
+  assert.ok(liveSelftestScript.includes("pre_tool_use_hooks"));
+  assert.ok(liveSelftestScript.includes("command_run"));
+  assert.ok(liveSelftestScript.includes("BashOutputTool"));
+  assert.ok(liveSelftestScript.includes("TaskStop"));
+  assert.ok(liveSelftestScript.includes("agent_subagent"));
+  assert.ok(liveSelftestScript.includes("TaskOutput"));
+  assert.ok(liveSelftestScript.includes("ToolName \"TaskStop\""));
 });
 
 function renderPlannerChat(
@@ -907,10 +1072,11 @@ function renderPlannerChat(
     loadingChangeSetId: null,
     repo: ".",
     request: "",
-    runLoading: false,
+    plannerLoading: false,
     scopesText: "",
     submittedRequest: "",
     timelineItems: [],
+    workflowRunning: false,
     plannerSession,
     plannerStrength: "balanced",
     providerSetupRequired: false,
@@ -923,6 +1089,7 @@ function renderPlannerChat(
     onRequestChange: () => undefined,
     onScopesTextChange: () => undefined,
     onPlannerStrengthChange: () => undefined,
+    onCancelWork: () => undefined,
     onStartWork: () => undefined,
     onSubmitRequest: () => undefined,
     onUndoChangeSet: () => undefined,
@@ -964,6 +1131,7 @@ function plannerSessionFixture(overrides: Partial<PlannerChatSession> = {}): Pla
     generation: 2,
     last_turn: null,
     run_id: null,
+    work_in_progress: false,
     status: "chatting",
     ...overrides
   };
@@ -1018,6 +1186,16 @@ function findElementByPlaceholder(
   return findElementByPlaceholder(element.props?.children, placeholder);
 }
 
+function jsonResponse(payload: unknown, status = 200): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: status >= 200 && status < 300 ? "OK" : "Error",
+    json: async () => payload,
+    text: async () => JSON.stringify(payload)
+  } as Response;
+}
+
 function sourceBetween(source: string, startNeedle: string, endNeedle: string): string {
   const start = source.indexOf(startNeedle);
   const end = source.indexOf(endNeedle, start + startNeedle.length);
@@ -1025,3 +1203,5 @@ function sourceBetween(source: string, startNeedle: string, endNeedle: string): 
   assert.ok(end > start);
   return source.slice(start, end);
 }
+
+await runTests();

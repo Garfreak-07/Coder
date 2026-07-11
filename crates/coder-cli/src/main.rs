@@ -4,12 +4,10 @@ use clap::{Args, Parser, Subcommand};
 use coder_config::{
     load_project_config, validate_project_config, ProjectConfig, ValidationIssue, ValidationLevel,
 };
-use coder_core::{RunId, RunState, RunStatus, WorkflowId};
+use coder_core::RunId;
+#[cfg(test)]
+use coder_core::{RunState, RunStatus, WorkflowId};
 use coder_events::CoderEvent;
-use coder_openhands::{
-    normalize_openhands_event, openhands_final_report, OpenHandsApiPaths, OpenHandsClient,
-    OpenHandsRunStartStrategy, OpenHandsServerConfig,
-};
 use coder_server::{serve, ApiState};
 use coder_store::{RepoEvidenceKind, RepoEvidenceRef, RunStore};
 use coder_tools::{
@@ -20,9 +18,11 @@ use coder_tools::{
 use coder_workflow::{MockWorkflowRunner, WorkflowRunOptions, WorkflowRunner};
 use serde_json::json;
 
+const DEFAULT_STORE: &str = ".coder";
+
 #[derive(Debug, Parser)]
 #[command(name = "coder-rust")]
-#[command(about = "Rust-first Coder control-plane skeleton")]
+#[command(about = "Coder control-plane runtime")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -39,10 +39,6 @@ enum Command {
         #[command(subcommand)]
         command: WorkflowCommand,
     },
-    Openhands {
-        #[command(subcommand)]
-        command: OpenHandsCommand,
-    },
     Runs {
         #[command(subcommand)]
         command: RunsCommand,
@@ -56,7 +52,7 @@ enum Command {
         host: String,
         #[arg(long, default_value_t = 8766)]
         port: u16,
-        #[arg(long, default_value = ".coder-rust-server")]
+        #[arg(long, default_value = DEFAULT_STORE)]
         store: PathBuf,
     },
 }
@@ -86,13 +82,9 @@ enum WorkflowCommand {
         mock: bool,
         #[arg(long, default_value = ".")]
         repo: PathBuf,
-        #[arg(long)]
-        conversation_id: Option<String>,
-        #[arg(long)]
-        create_payload: Option<PathBuf>,
         #[arg(long, default_value = "examples/coder.yaml")]
         config: PathBuf,
-        #[arg(long, default_value = ".coder-rust")]
+        #[arg(long, default_value = DEFAULT_STORE)]
         store: PathBuf,
         workflow_id: String,
         task: String,
@@ -100,46 +92,23 @@ enum WorkflowCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum OpenHandsCommand {
-    Doctor {
-        #[arg(long)]
-        server: String,
-        #[arg(long)]
-        session_api_key_env: Option<String>,
-    },
-    Run {
-        #[arg(long)]
-        server: String,
-        #[arg(long)]
-        session_api_key_env: Option<String>,
-        #[arg(long)]
-        conversation_id: Option<String>,
-        #[arg(long)]
-        create_payload: Option<PathBuf>,
-        #[arg(long, default_value = ".coder-rust-openhands")]
-        store: PathBuf,
-        task: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 enum RunsCommand {
     List {
-        #[arg(long, default_value = ".coder-rust")]
+        #[arg(long, default_value = DEFAULT_STORE)]
         store: PathBuf,
     },
     Show {
-        #[arg(long, default_value = ".coder-rust")]
+        #[arg(long, default_value = DEFAULT_STORE)]
         store: PathBuf,
         run_id: String,
     },
     Evidence {
-        #[arg(long, default_value = ".coder-rust")]
+        #[arg(long, default_value = DEFAULT_STORE)]
         store: PathBuf,
         run_id: String,
     },
     Report {
-        #[arg(long, default_value = ".coder-rust")]
+        #[arg(long, default_value = DEFAULT_STORE)]
         store: PathBuf,
         #[arg(long, default_value_t = false)]
         write: bool,
@@ -258,33 +227,6 @@ struct EvidenceRecordArgs {
     run_id: Option<String>,
 }
 
-#[derive(Debug)]
-struct OpenHandsRecordedRun {
-    workflow_id: String,
-    node_id: Option<String>,
-    harness_id: Option<String>,
-    server_url: String,
-    session_api_key_env: Option<String>,
-    api_paths: OpenHandsApiPaths,
-    run_start_strategy: OpenHandsRunStartStrategy,
-    conversation_id: Option<String>,
-    create_payload: Option<PathBuf>,
-    store: PathBuf,
-    task: String,
-}
-
-#[derive(Debug)]
-struct OpenHandsRecordedRunOutput {
-    run_id: RunId,
-    conversation_id: String,
-    trigger_status: u16,
-    already_running: bool,
-    captured_events: usize,
-    events_written: usize,
-    report_ref: String,
-    websocket_url: String,
-}
-
 fn ensure_valid_config(config: &ProjectConfig) -> anyhow::Result<()> {
     let report = validate_project_config(config);
     if !report.is_pass() {
@@ -359,139 +301,6 @@ fn validation_issue(
         message: message.into(),
         target: target.into(),
     }
-}
-
-async fn run_openhands_recorded(
-    input: OpenHandsRecordedRun,
-) -> anyhow::Result<OpenHandsRecordedRunOutput> {
-    let client = OpenHandsClient::new(OpenHandsServerConfig {
-        server_url: input.server_url,
-        session_api_key_env: input.session_api_key_env,
-        session_api_key: None,
-        api_paths: input.api_paths,
-        run_start_strategy: input.run_start_strategy,
-    });
-    let conversation = match (input.conversation_id, input.create_payload) {
-        (Some(conversation_id), None) => client.attach_conversation(&conversation_id).await?,
-        (None, Some(create_payload)) => {
-            let text = fs::read_to_string(&create_payload)?;
-            let payload = serde_json::from_str(&text)?;
-            client.create_conversation(payload).await?
-        }
-        (Some(_), Some(_)) => {
-            anyhow::bail!("use either --conversation-id or --create-payload, not both");
-        }
-        (None, None) => {
-            anyhow::bail!("OpenHands run requires --conversation-id or --create-payload");
-        }
-    };
-
-    client
-        .send_user_message(&conversation.id, &input.task, Some("coder-rust"))
-        .await?;
-    let trigger = client.trigger_run(&conversation.id).await?;
-    let raw_events = client.fetch_events(&conversation.id, 100).await?;
-    let event_count = raw_events.len();
-
-    let run_id = RunId::new();
-    let store = RunStore::new(input.store);
-    let mut state = RunState::new(run_id.clone(), WorkflowId::new(input.workflow_id.clone()));
-    state.status = RunStatus::Running;
-    store.write_metadata(&state)?;
-
-    let mut sequence = 1;
-    let mut started_payload = json!({
-        "workflow_id": input.workflow_id,
-        "backend": "openhands",
-        "conversation_id": conversation.id.clone(),
-        "task": input.task,
-        "trigger_status": trigger.status,
-        "already_running": trigger.already_running
-    });
-    if let Some(node_id) = input.node_id {
-        started_payload["node_id"] = json!(node_id);
-    }
-    if let Some(harness_id) = input.harness_id {
-        started_payload["harness_id"] = json!(harness_id);
-    }
-    store.append_event(
-        &run_id,
-        &CoderEvent::new(run_id.clone(), sequence, "run.started", started_payload),
-    )?;
-    sequence += 1;
-
-    let mut raw_refs = Vec::new();
-    for (index, raw_event) in raw_events.into_iter().enumerate() {
-        let raw_text = serde_json::to_string(&raw_event)?;
-        let raw_ref = store.write_large_text_ref(&raw_text)?.blob_ref;
-        raw_refs.push(raw_ref.clone());
-        let event = normalize_openhands_event(
-            run_id.clone(),
-            sequence + index as u64,
-            raw_event,
-            Some(raw_ref),
-        );
-        store.append_event(&run_id, &event)?;
-    }
-    sequence += event_count as u64;
-
-    let websocket_url = client.events_websocket_url(&conversation.id)?;
-    let report = openhands_final_report(
-        &run_id,
-        &conversation.id,
-        &trigger,
-        event_count,
-        &websocket_url,
-        &raw_refs,
-    );
-    let report_ref = store.write_report(&run_id, &report)?;
-    store.append_event(
-        &run_id,
-        &CoderEvent::new(
-            run_id.clone(),
-            sequence,
-            "report.created",
-            json!({"report_ref": report_ref.clone()}),
-        ),
-    )?;
-    sequence += 1;
-    store.append_event(
-        &run_id,
-        &CoderEvent::new(
-            run_id.clone(),
-            sequence,
-            "run.completed",
-            json!({
-                "status": "completed",
-                "report_ref": report_ref.clone(),
-                "openhands_events_captured": event_count
-            }),
-        ),
-    )?;
-    state.status = RunStatus::Completed;
-    store.write_metadata(&state)?;
-
-    Ok(OpenHandsRecordedRunOutput {
-        run_id,
-        conversation_id: conversation.id,
-        trigger_status: trigger.status,
-        already_running: trigger.already_running,
-        captured_events: event_count,
-        events_written: event_count + 3,
-        report_ref,
-        websocket_url,
-    })
-}
-
-fn print_openhands_run_output(output: &OpenHandsRecordedRunOutput) {
-    println!("run_id={}", output.run_id);
-    println!("conversation_id={}", output.conversation_id);
-    println!("openhands_run_status={}", output.trigger_status);
-    println!("already_running={}", output.already_running);
-    println!("openhands_events_captured={}", output.captured_events);
-    println!("events_written={}", output.events_written);
-    println!("report_ref={}", output.report_ref);
-    println!("events_websocket_url={}", output.websocket_url);
 }
 
 fn run_list_json(store: &RunStore) -> anyhow::Result<serde_json::Value> {
@@ -752,8 +561,8 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Doctor => {
-            println!("coder-rust: ok");
-            println!("control_plane: rust skeleton");
+            println!("coder: ok");
+            println!("control_plane: rust_api_v3");
         }
         Command::Config {
             command: ConfigCommand::Validate { path },
@@ -795,8 +604,6 @@ async fn main() -> anyhow::Result<()> {
                 WorkflowCommand::Run {
                     mock,
                     repo,
-                    conversation_id,
-                    create_payload,
                     config,
                     store,
                     workflow_id,
@@ -811,11 +618,6 @@ async fn main() -> anyhow::Result<()> {
                 println!("report_ref={}", output.report_ref);
                 println!("summary={}", output.report.summary);
             } else {
-                if conversation_id.is_some() || create_payload.is_some() {
-                    anyhow::bail!(
-                        "workflow run uses configured harness context; use 'openhands run' for --conversation-id or --create-payload"
-                    );
-                }
                 ensure_valid_config(&config)?;
                 let runner = WorkflowRunner::new(config, RunStore::new(store));
                 let mut options = WorkflowRunOptions::new(workflow_id, task);
@@ -825,48 +627,6 @@ async fn main() -> anyhow::Result<()> {
                 println!("report_ref={}", output.report_ref);
                 println!("summary={}", output.report.summary);
             }
-        }
-        Command::Openhands {
-            command:
-                OpenHandsCommand::Doctor {
-                    server,
-                    session_api_key_env,
-                },
-        } => {
-            let client =
-                OpenHandsClient::new(OpenHandsServerConfig::new(server, session_api_key_env));
-            let health = client.health().await?;
-            println!("{}", serde_json::to_string_pretty(&health)?);
-            if !health.available {
-                std::process::exit(1);
-            }
-        }
-        Command::Openhands {
-            command:
-                OpenHandsCommand::Run {
-                    server,
-                    session_api_key_env,
-                    conversation_id,
-                    create_payload,
-                    store,
-                    task,
-                },
-        } => {
-            let output = run_openhands_recorded(OpenHandsRecordedRun {
-                workflow_id: "openhands-cli".to_owned(),
-                node_id: None,
-                harness_id: None,
-                server_url: server,
-                session_api_key_env,
-                api_paths: OpenHandsApiPaths::default(),
-                run_start_strategy: OpenHandsRunStartStrategy::default(),
-                conversation_id,
-                create_payload,
-                store,
-                task,
-            })
-            .await?;
-            print_openhands_run_output(&output);
         }
         Command::Runs {
             command: RunsCommand::List { store },
@@ -1171,6 +931,7 @@ async fn main() -> anyhow::Result<()> {
                 CommandRunRequest {
                     cwd,
                     argv,
+                    stdin: None,
                     timeout_seconds,
                     max_output_bytes,
                     source,
@@ -1204,7 +965,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::Server { host, port, store } => {
             let addr: SocketAddr = format!("{host}:{port}").parse()?;
-            println!("coder-rust server listening on http://{addr}");
+            println!("coder server listening on http://{addr}");
             serve(addr, ApiState::new(RunStore::new(store))).await?;
         }
     }
@@ -1216,6 +977,38 @@ mod tests {
     use clap::CommandFactory;
 
     use super::*;
+
+    #[test]
+    fn cli_default_store_roots_use_product_directory() {
+        let cli = Cli::parse_from(["coder-rust", "server"]);
+        match cli.command {
+            Command::Server { store, .. } => assert_eq!(store, PathBuf::from(DEFAULT_STORE)),
+            _ => panic!("expected server command"),
+        }
+
+        let cli = Cli::parse_from([
+            "coder-rust",
+            "workflow",
+            "run",
+            "--mock",
+            "planner-led",
+            "summarize",
+        ]);
+        match cli.command {
+            Command::Workflow {
+                command: WorkflowCommand::Run { store, .. },
+            } => assert_eq!(store, PathBuf::from(DEFAULT_STORE)),
+            _ => panic!("expected workflow run command"),
+        }
+
+        let cli = Cli::parse_from(["coder-rust", "runs", "list"]);
+        match cli.command {
+            Command::Runs {
+                command: RunsCommand::List { store },
+            } => assert_eq!(store, PathBuf::from(DEFAULT_STORE)),
+            _ => panic!("expected runs list command"),
+        }
+    }
 
     #[test]
     fn workflow_preview_reports_ready_with_backends() {
@@ -1230,7 +1023,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .any(|backend| backend.as_str() == Some("openhands")));
+            .any(|backend| backend.as_str() == Some("native-rust")));
         assert_eq!(preview["issues"].as_array().unwrap().len(), 0);
     }
 
@@ -1542,7 +1335,6 @@ diff --git a/tracked.txt b/tracked.txt
         assert!(root.contains(&"workflow"));
         assert!(root.contains(&"runs"));
         assert!(root.contains(&"server"));
-        assert!(root.contains(&"openhands"));
         assert!(root.contains(&"tools"));
 
         let workflow = find_subcommand(&command, "workflow");
@@ -1557,10 +1349,6 @@ diff --git a/tracked.txt b/tracked.txt
         let runs_commands = subcommand_names(runs);
         assert!(runs_commands.contains(&"list"));
         assert!(runs_commands.contains(&"show"));
-
-        let openhands = find_subcommand(&command, "openhands");
-        let openhands_commands = subcommand_names(openhands);
-        assert!(openhands_commands.contains(&"doctor"));
     }
 
     #[test]
@@ -1598,6 +1386,12 @@ diff --git a/tracked.txt b/tracked.txt
     fn temp_root(prefix: &str) -> PathBuf {
         static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), id))
+        test_tmp_root().join(format!("{}-{}-{}", prefix, std::process::id(), id))
+    }
+
+    fn test_tmp_root() -> PathBuf {
+        std::env::var_os("CODER_TEST_TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
     }
 }

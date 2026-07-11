@@ -1390,7 +1390,7 @@ mod tests {
                   "key": "architecture",
                   "content": "Rust owns the control plane.",
                   "tags": ["rust"],
-                  "evidence_refs": [{"kind": "doc", "reference": "docs/current-feature-inventory.md"}],
+                  "evidence_refs": [{"kind": "doc", "reference": "docs/ARCHITECTURE.md"}],
                   "source_ref": "memory://project/architecture"
                 }
               ]
@@ -1750,7 +1750,7 @@ mod tests {
             tags: vec!["rust".to_owned()],
             evidence_refs: vec![EvidenceRef {
                 kind: "doc".to_owned(),
-                reference: "docs/current-feature-inventory.md".to_owned(),
+                reference: "docs/ARCHITECTURE.md".to_owned(),
             }],
             source_ref: Some("memory://project/architecture".to_owned()),
             trust_level: "local".to_owned(),
@@ -1760,7 +1760,13 @@ mod tests {
     fn temp_path(name: &str) -> PathBuf {
         static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        std::env::temp_dir().join(format!("coder-memory-{}-{}-{name}", std::process::id(), id))
+        test_tmp_root().join(format!("coder-memory-{}-{}-{name}", std::process::id(), id))
+    }
+
+    fn test_tmp_root() -> PathBuf {
+        std::env::var_os("CODER_TEST_TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
     }
 
     fn retrieval_request(

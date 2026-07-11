@@ -23,10 +23,11 @@ interface PlannerChatPageProps {
   loadingChangeSetId: string | null;
   repo: string;
   request: string;
-  runLoading: boolean;
+  plannerLoading: boolean;
   scopesText: string;
   submittedRequest: string;
   timelineItems: TimelineItem[];
+  workflowRunning: boolean;
   plannerSession: PlannerChatSession | null;
   plannerStrength: PlannerStrength;
   providerSetupRequired: boolean;
@@ -39,6 +40,7 @@ interface PlannerChatPageProps {
   onRequestChange: (value: string) => void;
   onScopesTextChange: (value: string) => void;
   onPlannerStrengthChange: (value: PlannerStrength) => void;
+  onCancelWork: () => void;
   onStartWork: () => void;
   onSubmitRequest: () => void;
   onUndoChangeSet: (changeSetId: string) => void;
@@ -52,10 +54,11 @@ export function PlannerChatPage({
   loadingChangeSetId,
   repo,
   request,
-  runLoading,
+  plannerLoading,
   scopesText,
   submittedRequest,
   timelineItems,
+  workflowRunning,
   plannerSession,
   plannerStrength,
   providerSetupRequired,
@@ -68,19 +71,20 @@ export function PlannerChatPage({
   onRequestChange,
   onScopesTextChange,
   onPlannerStrengthChange,
+  onCancelWork,
   onStartWork,
   onSubmitRequest,
   onUndoChangeSet
 }: PlannerChatPageProps) {
-  const inputDisabled = runLoading || providerSetupRequired;
+  const inputDisabled = plannerLoading || providerSetupRequired;
   const canSend = request.trim().length > 0 && !inputDisabled;
   const plannerTaskState = plannerSession?.task_state ?? null;
   const canStartWork =
     Boolean(plannerSession) &&
-    !runLoading &&
+    !plannerLoading &&
+    !workflowRunning &&
     !providerSetupRequired &&
-    plannerTaskState?.readiness === "ready_to_execute" &&
-    !activeRunId;
+    plannerTaskState?.readiness === "ready_to_execute";
   const sessionMessages = plannerSession?.messages ?? [];
   const hasSessionMessages = sessionMessages.length > 0;
   const runIdForTimeline = activeRunId ?? plannerSession?.run_id ?? null;
@@ -139,10 +143,16 @@ export function PlannerChatPage({
                 </article>
               )
             )}
-            {runLoading && (
+            {plannerLoading && (
               <div className="chat-loading-row" role="status">
                 <span className="loading-dot" aria-hidden="true" />
-                Working...
+                Planner is responding...
+              </div>
+            )}
+            {workflowRunning && (
+              <div className="chat-loading-row workflow-running-row" role="status">
+                <span className="loading-dot" aria-hidden="true" />
+                Workflow is running. Planner Chat remains available.
               </div>
             )}
             {reviewStateError && (
@@ -205,15 +215,21 @@ export function PlannerChatPage({
               </select>
             </label>
             <div className="composer-actions">
-              <button
-                className={`start-work-action ${canStartWork ? "primary-action" : ""}`}
-                onClick={startWork}
-                disabled={!canStartWork}
-              >
-                {runLoading ? "Starting..." : "Start Work"}
-              </button>
+              {workflowRunning ? (
+                <button className="stop-work-action" onClick={onCancelWork} disabled={plannerLoading}>
+                  Stop work
+                </button>
+              ) : (
+                <button
+                  className={`start-work-action ${canStartWork ? "primary-action" : ""}`}
+                  onClick={startWork}
+                  disabled={!canStartWork}
+                >
+                  Start Work
+                </button>
+              )}
               <button className={canStartWork ? "" : "primary-action"} onClick={submit} disabled={!canSend}>
-                {runLoading ? "Sending..." : "Send"}
+                {plannerLoading ? "Sending..." : "Send"}
               </button>
             </div>
           </div>

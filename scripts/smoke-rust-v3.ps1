@@ -4,7 +4,7 @@ param(
   [string]$Store = ".coder-rust-smoke",
   [switch]$LiveProvider,
   [string]$Provider = "deepseek",
-  [string]$Model = "deepseek-v4-flash",
+  [string]$Model = "deepseek-chat",
   [string]$BaseUrl = "https://api.deepseek.com",
   [string]$ProxyUrl = ""
 )
@@ -168,7 +168,7 @@ $processEnv = [Environment]::GetEnvironmentVariables("Process")
 if ($processEnv.Contains("Path") -and $processEnv.Contains("PATH")) {
   [Environment]::SetEnvironmentVariable("PATH", $null, "Process")
 }
-[Environment]::SetEnvironmentVariable("CARGO_TARGET_DIR", (Join-Path $repoRoot ".tmp\cargo-target"), "Process")
+[Environment]::SetEnvironmentVariable("CODER_RUNTIME_CACHE_DIR", (Join-Path $repoRoot "tmp\coder-runtime-cache"), "Process")
 
 $cargo = (Get-Command cargo).Source
 $server = Start-Process -FilePath $cargo `

@@ -876,6 +876,43 @@ pub fn code_worker_tool_capabilities() -> Vec<ToolCapability> {
             RiskLevel::Medium,
         ),
         tool_capability(
+            "command_background",
+            "commands",
+            SideEffectLevel::External,
+            RiskLevel::Medium,
+        ),
+        tool_capability(
+            "read_command_output",
+            "runtime_state",
+            SideEffectLevel::Read,
+            RiskLevel::Low,
+        ),
+        tool_capability(
+            "cancel_command_background",
+            "commands",
+            SideEffectLevel::External,
+            RiskLevel::Medium,
+        ),
+        tool_capability(
+            "agent_subagent",
+            "agents",
+            SideEffectLevel::External,
+            RiskLevel::Medium,
+        ),
+        tool_capability(
+            "read_subagent_status",
+            "runtime_state",
+            SideEffectLevel::Read,
+            RiskLevel::Low,
+        ),
+        tool_capability("skill", "skills", SideEffectLevel::Read, RiskLevel::Low),
+        tool_capability(
+            "cancel_subagent_background",
+            "agents",
+            SideEffectLevel::External,
+            RiskLevel::Medium,
+        ),
+        tool_capability(
             "read_tool_output",
             "runtime_state",
             SideEffectLevel::Read,
@@ -916,8 +953,11 @@ fn tool_registry_entry(
 fn required_permission_for_tool(capability: &ToolCapability) -> &'static str {
     match capability.name.as_str() {
         "propose_patch" | "apply_patch_sandbox" => "write_files",
-        "run_command_sandbox" => "run_commands",
-        "inspect_skill_index" | "read_skill_index" => "read_files",
+        "run_command_sandbox" | "command_background" | "cancel_command_background" => {
+            "run_commands"
+        }
+        "agent_subagent" | "cancel_subagent_background" => "child_harness_permissions",
+        "inspect_skill_index" | "read_skill_index" | "skill" => "read_files",
         name if name.contains("memory") => "memory_policy",
         name if name.contains("artifact") || name.contains("report") => "run_artifacts",
         _ if capability.side_effect == SideEffectLevel::Read => "read_files",
@@ -933,6 +973,18 @@ fn approval_behavior_for_tool(
         match capability.name.as_str() {
             "apply_patch_sandbox" => "approval.requested when patch apply is not pre-approved",
             "run_command_sandbox" => "approval.requested for model or risky commands",
+            "command_background" => {
+                "approval.requested before starting model or risky background commands"
+            }
+            "cancel_command_background" => {
+                "approval.requested before cancelling a running command task"
+            }
+            "agent_subagent" => {
+                "approval.requested before spawning a child agent; child tools are rechecked against the parent harness"
+            }
+            "cancel_subagent_background" => {
+                "approval.requested before cancelling a running child agent task"
+            }
             _ => "requires explicit approval before side effects",
         }
     } else {
@@ -944,10 +996,15 @@ fn evidence_for_tool(capability: &ToolCapability) -> &'static str {
     match capability.name.as_str() {
         "read_file" | "search_files" | "inspect_git_diff" => "repo_evidence",
         "propose_patch" | "apply_patch_sandbox" => "repo_evidence + patch_evidence",
-        "run_command_sandbox" => "command_evidence",
+        "run_command_sandbox" | "command_background" => "command_evidence",
+        "read_command_output" => "command_output",
+        "agent_subagent" | "read_subagent_status" | "cancel_subagent_background" => {
+            "subagent_sidechain"
+        }
         "inspect_artifact" | "build_final_report" | "return_execution_result" => "artifact/report",
         "inspect_memory" | "search_workflow_memory" | "search_project_memory" => "memory_event",
         "inspect_skill_index" | "read_skill_index" => "skill_summary",
+        "skill" => "skill.invoked",
         _ => "structured_runtime_event",
     }
 }
@@ -955,6 +1012,13 @@ fn evidence_for_tool(capability: &ToolCapability) -> &'static str {
 fn timeline_item_for_tool(capability: &ToolCapability) -> &'static str {
     match capability.name.as_str() {
         "run_command_sandbox" => "command_execution",
+        "command_background" => "background_command_start",
+        "read_command_output" => "background_command_output",
+        "cancel_command_background" => "background_command_cancel",
+        "agent_subagent" => "subagent_start",
+        "read_subagent_status" => "subagent_status",
+        "cancel_subagent_background" => "subagent_cancel",
+        "skill" => "skill_invoked",
         "propose_patch" | "apply_patch_sandbox" => "file_change / approval",
         "read_file" | "search_files" | "inspect_git_diff" => "tool_call",
         "build_final_report" | "return_execution_result" => "final_summary",
@@ -1174,6 +1238,13 @@ mod tests {
         let patch_tool = registry.get_tool("apply_patch_sandbox").unwrap();
 
         assert!(names.contains("run_command_sandbox"));
+        assert!(names.contains("command_background"));
+        assert!(names.contains("read_command_output"));
+        assert!(names.contains("cancel_command_background"));
+        assert!(names.contains("agent_subagent"));
+        assert!(names.contains("read_subagent_status"));
+        assert!(names.contains("cancel_subagent_background"));
+        assert!(names.contains("skill"));
         assert!(!names.contains("inspect_run_state"));
         assert!(patch_tool.requires_approval);
         assert_eq!(patch_tool.required_permission, "write_files");
@@ -1188,11 +1259,27 @@ mod tests {
     fn tool_registry_low_risk_read_tools_do_not_require_approval() {
         let registry = ToolRegistry::default();
         let read_file = registry.get_tool("read_file").unwrap();
+        let read_command_output = registry.get_tool("read_command_output").unwrap();
+        let read_subagent_status = registry.get_tool("read_subagent_status").unwrap();
+        let skill = registry.get_tool("skill").unwrap();
         let inspect_workflow = registry.get_tool("inspect_workflow").unwrap();
 
         assert!(!read_file.requires_approval);
         assert_eq!(read_file.required_permission, "read_files");
         assert_eq!(read_file.timeline_item, "tool_call");
+        assert!(!read_command_output.requires_approval);
+        assert_eq!(read_command_output.required_permission, "read_files");
+        assert_eq!(
+            read_command_output.timeline_item,
+            "background_command_output"
+        );
+        assert!(!read_subagent_status.requires_approval);
+        assert_eq!(read_subagent_status.required_permission, "read_files");
+        assert_eq!(read_subagent_status.timeline_item, "subagent_status");
+        assert!(!skill.requires_approval);
+        assert_eq!(skill.required_permission, "read_files");
+        assert_eq!(skill.evidence_emitted, "skill.invoked");
+        assert_eq!(skill.timeline_item, "skill_invoked");
         assert!(!inspect_workflow.requires_approval);
     }
 

@@ -1,143 +1,137 @@
 # Provider Setup
 
-Normal users configure model access in the app UI:
+The normal user path is Provider Settings in the app. Environment variables are
+developer/headless fallback only.
 
-1. Open `Settings`.
-2. Choose one provider:
-   - provider: `deepseek`
-   - provider: `openai-compatible`
-   - provider: `custom`
-3. For DeepSeek, use:
-   - base URL: `https://api.deepseek.com`
-   - model: `deepseek-v4-flash`
-   - provider proxy URL: `http://127.0.0.1:7890` when this machine reaches
-     DeepSeek through the local proxy
-4. Paste the provider API key into `API Key`.
-5. Click `Save`, or click `Test Provider` to save the current fields and test
-   them in one step.
+## App Settings
 
-`deepseek-v4-pro` is also supported when the account has access to that model.
-The `DeepSeek preset` button fills the DeepSeek-compatible base URL and model;
-users still provide their own API key.
+Provider Settings can configure:
 
-Provider id `deepseek` uses the OpenAI-compatible chat completions API. The
-separate `openai-compatible` and `custom` provider choices remain available for
-other services with user-provided base URLs and models.
+- default provider
+- default model
+- base URL per provider
+- API key per provider
+- proxy mode per provider: `direct`, `explicit`, or `environment`
+- explicit proxy URL per provider
+- mock mode for local plumbing tests
 
-Planner Chat uses the configured provider in product mode. If provider
-credentials are missing, the Planner returns a setup-required assistant message
-instead of using a fake product response.
+Settings are kept in the local Coder store. API keys must never be committed to
+scripts, docs, examples, or workflow specs.
 
-The `Test Provider` action first saves the current provider, model, base URL,
-provider proxy URL, and API key into the Rust server's in-memory settings, then
-calls the provider. The result shows success or failure, the model used, and
-the sanitized chat completions endpoint. It never displays the API key.
+## Provider Defaults
 
-Provider proxy URLs are per provider. They are used for external provider calls
-such as DeepSeek Planner Chat and provider tests, while local Coder server calls
-and localhost services stay direct. Developer fallback variables are also
-recognized: `CODER_DEEPSEEK_PROXY_URL`, `CODER_PROVIDER_PROXY_URL`,
-`HTTPS_PROXY`, then `HTTP_PROXY`.
+Default base URLs:
 
-Mock mode is for CI and developer debugging only. It is hidden from the normal
-Settings path and is not product-mode Planner behavior.
+- `openai`: `https://api.openai.com/v1`
+- `deepseek`: `https://api.deepseek.com`
+- `moonshot` / `kimi`: `https://api.moonshot.cn/v1`
+- `qwen` / `dashscope`: `https://dashscope.aliyuncs.com/compatible-mode/v1`
+- `groq`: `https://api.groq.com/openai/v1`
+- `openrouter`: `https://openrouter.ai/api/v1`
+- `together`: `https://api.together.xyz/v1`
+- `mistral`: `https://api.mistral.ai/v1`
+- `perplexity`: `https://api.perplexity.ai`
+- `xai`: `https://api.x.ai/v1`
+- `gemini`: `https://generativelanguage.googleapis.com/v1beta/openai`
+- `ollama`: `http://localhost:11434/v1`
 
-API keys are accepted by the Rust server and kept in server memory for this MVP.
-The settings response only returns whether a key is configured and where it came
-from. Plaintext keys must not be written into repository files, run events,
-timeline items, evidence blobs, reports, debug exports, or screenshots.
+DeepSeek and Ollama default to `direct` proxy mode. Other providers default to
+`environment` proxy mode. Set an explicit provider proxy URL only when a
+provider needs it.
 
-Use `Clear API Key` in Settings to remove the current provider key from the
-server's in-memory settings. Leaving the API key field blank during `Save`
-keeps the existing key.
+## Environment Fallback
 
-TODO: replace the in-memory key store with an OS keychain or local secret store
-before public desktop release.
+Credential lookup order:
 
-## Troubleshooting
+1. Provider Settings secret.
+2. Provider-specific environment variable.
+3. `CODER_API_KEY`.
+4. `LLM_API_KEY`.
 
-- `401` or `403`: the API key is missing, expired, copied incorrectly, or does
-  not have access to the selected provider. Re-enter the key in Settings and run
-  `Test Provider` again.
-- `404`, `model not found`, or similar model errors: the model field does not
-  match a model available to the account. For DeepSeek, start with
-  `deepseek-v4-flash`, then switch only after confirming account access.
-- Network, timeout, DNS, or proxy errors: verify the base URL, local proxy, VPN,
-  firewall, and Windows proxy settings. The DeepSeek base URL should normally be
-  `https://api.deepseek.com`. If this machine uses the local proxy, set
-  Provider Proxy URL to `http://127.0.0.1:7890`.
-- Local executor unavailable vs Planner provider unavailable: the local
-  coding-agent executor is required for Start Work. Planner provider errors
-  mean the chat model itself is not configured or reachable. Fix Provider
-  Settings first when Planner Chat cannot answer. If Start Work reports that
-  the required local executor is unavailable, the runtime must start or repair
-  the local executor connection instead of asking the user for executor ports or
-  tokens.
+Provider-specific keys include:
 
-Normal users do not configure OpenHands, executor ports, or executor session
-tokens in Settings. Coder runs OpenHands as an internal executor runtime and
-generates the runtime secret automatically. External OpenHands URLs or tokens
-remain valid only for developer diagnostics and enterprise-managed executor
-servers.
+- `DEEPSEEK_API_KEY`
+- `OPENAI_API_KEY`
+- `MOONSHOT_API_KEY`
+- `DASHSCOPE_API_KEY`
+- `OPENROUTER_API_KEY`
+- `GROQ_API_KEY`
+- `TOGETHER_API_KEY`
+- `MISTRAL_API_KEY`
+- `PERPLEXITY_API_KEY`
+- `XAI_API_KEY`
+- `GEMINI_API_KEY`
 
-## Developer Fallback
+Base URL fallback:
 
-Environment variables remain for CI, smoke tests, and headless development.
-They are fallback paths, not the normal user setup path:
+1. model-specific env field from config
+2. `CODER_BASE_URL`
+3. `LLM_BASE_URL`
+4. provider default
+
+DeepSeek developer fallback:
 
 ```powershell
+$env:DEEPSEEK_API_KEY = Read-Host "DeepSeek API key"
+$env:LLM_API_KEY=$env:DEEPSEEK_API_KEY
 $env:LLM_BASE_URL="https://api.deepseek.com"
-$env:LLM_API_KEY="..."
-$env:LLM_MODEL="deepseek-v4-flash"
+$env:LLM_MODEL="deepseek-chat"
 ```
 
-Provider-specific variables such as `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, or
-`CODER_API_KEY` may also be used by developer tooling. They are fallback paths,
-not the normal user setup path.
+## Proxy Isolation
 
-When a provider key is configured in Settings, that in-memory Settings key wins
-over the environment fallback for the same provider. Clearing the Settings key
-returns the provider to the developer/headless environment fallback if one is
-present.
+Proxy modes:
 
-## Optional Live LLM Smoke
+- `direct`: do not use proxy env vars.
+- `explicit`: use the provider's configured proxy URL.
+- `environment`: use `CODER_{PROVIDER}_PROXY_URL`,
+  `CODER_PROVIDER_PROXY_URL`, `HTTPS_PROXY`, or `HTTP_PROXY`, respecting
+  `NO_PROXY`.
 
-Mock tests prove CI-safe plumbing only. The live smoke proves the product
-Planner path can call a real OpenAI-compatible provider without making CI
-depend on paid credentials:
+This keeps local providers and DeepSeek direct by default while still allowing
+OpenAI-compatible providers to use a developer proxy when required.
+
+## Live Tests
+
+Provider-only live smoke:
 
 ```powershell
 $env:CODER_LIVE_LLM_SMOKE="1"
 powershell -ExecutionPolicy Bypass -File .\scripts\live-llm-smoke.ps1 -SkipIfMissingProvider
 ```
 
-The script starts a temporary Rust API v3 server, configures Provider Settings
-in server memory, sends two Planner Chat turns, verifies chat turns do not
-start execution, and calls Start Work. It returns `skipped` when no provider key
-is available and `-SkipIfMissingProvider` is set. Without
-`CODER_LIVE_LLM_SMOKE=1`, it also returns `skipped` with
-`-SkipIfMissingProvider` so ordinary CI cannot accidentally call a paid
-provider.
-
-For DeepSeek, set one of these first:
+Native full-path live self-test:
 
 ```powershell
-$env:DEEPSEEK_API_KEY="..."
-# or
-$env:LLM_API_KEY="..."
+$env:CODER_SELFTEST_LIVE="1"
+powershell -ExecutionPolicy Bypass -File .\scripts\live-coder-selftest-suite.ps1 -SkipIfMissingLiveConfig
 ```
 
-The key is passed only through the current process environment or in-memory
-provider settings for the temporary server. The script does not write plaintext
-keys to repository files or print them.
-
-For OpenAI or another OpenAI-compatible service, pass the provider, base URL,
-model, and key env name explicitly:
+Open-ended browser cases additionally preflight Coder's owned verifier runtime.
+Developers can prepare the package without modifying a target repo:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\live-llm-smoke.ps1 `
-  -Provider openai `
-  -BaseUrl https://api.openai.com/v1 `
-  -Model gpt-5.5 `
-  -ApiKeyEnv OPENAI_API_KEY
+npm run browser-verifier:install
 ```
+
+Live tests send the temporary task context to the configured provider. They
+should use throwaway work roots and repo-local/F-drive cache paths when large
+artifacts are expected. The smoke scripts use process-scoped environment
+variables for keys; Coder does not write plaintext provider secrets to run
+artifacts or print them in status output.
+
+During Start Work, `native-code-edit` can use the configured provider through
+`native-model-file-write`. The preferred path is an OpenAI-compatible tool-call
+loop for repo/git/write/finish operations. If no tool calls are returned, Coder
+uses the strict JSON file-plan fallback. Rust still owns the side-effect
+boundary: it writes only repo-relative files through the native file tool,
+records `file.written` events, stores repo evidence, and falls back to the
+deterministic native backend when credentials are missing or mock mode is on.
+
+## Secret Hygiene
+
+- Do not put keys in committed scripts.
+- Do not paste keys into docs or workflow JSON.
+- Prefer app Settings for normal use.
+- Prefer process-scoped environment variables for developer smokes.
+- Error messages returned through Provider Settings are redacted.

@@ -21,9 +21,11 @@ outputs/
 .coder-rust*/
 .codex/
 .coder_server*.log
+debug.log
 docs/handoff.md
 .npm-cache/
 .tmp/
+tmp/
 
 dist/
 build/

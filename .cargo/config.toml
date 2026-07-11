@@ -1,0 +1,6 @@
+[build]
+target-dir = "tmp/cargo-target"
+
+[env]
+CODER_TEST_TMPDIR = { value = "tmp/test-tmp", relative = true }
+GIT_CEILING_DIRECTORIES = { value = ".", relative = true }

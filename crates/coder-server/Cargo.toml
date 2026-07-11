@@ -17,6 +17,7 @@ coder-memory.workspace = true
 coder-store.workspace = true
 coder-tools.workspace = true
 coder-workflow.workspace = true
+futures-util.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

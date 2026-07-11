@@ -81,7 +81,7 @@ pub fn redact_payload(value: Value) -> Value {
             let redacted = object
                 .into_iter()
                 .map(|(key, value)| {
-                    let value = if is_secret_key(&key) {
+                    let value = if is_secret_key(&key) && !is_numeric_token_metric(&key, &value) {
                         Value::String("[REDACTED]".to_owned())
                     } else {
                         redact_payload(value)
@@ -119,6 +119,15 @@ fn is_secret_key(key: &str) -> bool {
         || normalized.contains("aws_secret_access_key")
         || normalized.contains("authorization")
         || normalized.contains("cookie")
+}
+
+fn is_numeric_token_metric(key: &str, value: &Value) -> bool {
+    let normalized = key.to_ascii_lowercase();
+    (value.is_number() || value.is_null())
+        && (normalized.ends_with("_tokens")
+            || normalized.ends_with("_token_count")
+            || normalized.ends_with("_token_budget")
+            || normalized == "tokens")
 }
 
 fn contains_secret_marker(text: &str) -> bool {
@@ -197,6 +206,26 @@ mod tests {
         assert_eq!(event.payload["nested"]["Authorization"], "[REDACTED]");
         assert_eq!(event.payload["nested"]["cookie"], "[REDACTED]");
         assert_eq!(event.payload["nested"]["safe"], "visible");
+    }
+
+    #[test]
+    fn numeric_token_metrics_remain_visible_but_string_tokens_are_redacted() {
+        let event = CoderEvent::new(
+            RunId::from_string("run_1"),
+            1,
+            "model.provider_turn.completed",
+            json!({
+                "input_tokens": 1200,
+                "estimated_output_tokens": 300,
+                "session_token": "token-value",
+                "input_tokens_text": "1200"
+            }),
+        );
+
+        assert_eq!(event.payload["input_tokens"], 1200);
+        assert_eq!(event.payload["estimated_output_tokens"], 300);
+        assert_eq!(event.payload["session_token"], "[REDACTED]");
+        assert_eq!(event.payload["input_tokens_text"], "[REDACTED]");
     }
 
     #[test]

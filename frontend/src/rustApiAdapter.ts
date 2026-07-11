@@ -174,6 +174,15 @@ export function rustRunEventsToRunEventsPage(
   limit = 200
 ): RunEventsPage {
   const events = response.events.map(rustCoderEventToRunEvent);
+  if (hasServerEventPagination(response)) {
+    const nextCursor = response.next_after_sequence ?? cursor + events.length;
+    return {
+      events,
+      cursor,
+      next_cursor: nextCursor,
+      has_more: response.truncated ?? nextCursor < (response.event_count ?? nextCursor)
+    };
+  }
   const page = events.slice(cursor, cursor + limit);
   const nextCursor = Math.min(cursor + page.length, events.length);
   return {
@@ -182,6 +191,15 @@ export function rustRunEventsToRunEventsPage(
     next_cursor: nextCursor,
     has_more: nextCursor < events.length
   };
+}
+
+function hasServerEventPagination(response: RustRunEventsResponse): boolean {
+  return (
+    typeof response.event_count === "number" ||
+    typeof response.returned_count === "number" ||
+    typeof response.truncated === "boolean" ||
+    response.next_after_sequence !== undefined
+  );
 }
 
 export function rustCoderEventToRunEvent(event: RustCoderEvent): RunEvent {

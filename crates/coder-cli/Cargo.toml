@@ -15,7 +15,6 @@ clap.workspace = true
 coder-config.workspace = true
 coder-core.workspace = true
 coder-events.workspace = true
-coder-openhands.workspace = true
 coder-server.workspace = true
 coder-store.workspace = true
 coder-tools.workspace = true

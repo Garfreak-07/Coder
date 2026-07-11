@@ -15,6 +15,7 @@ import {
   getAgentWorkflow,
   getDefaultAgentWorkflow,
   getLibrary,
+  getPlannerChatSession,
   getRun,
   getChangeSetDiff,
   getRunChangeSets,
@@ -125,7 +126,8 @@ export function App() {
   } = useProviderSettings(setStatus);
   const [selectedRunDetail, setSelectedRunDetail] = useState<StoredRunDetail | LiveRunDetail | null>(null);
   const [selectedRunKind, setSelectedRunKind] = useState<"live" | "stored" | null>(null);
-  const [runLoading, setRunLoading] = useState(false);
+  const [plannerLoading, setPlannerLoading] = useState(false);
+  const [workflowRunning, setWorkflowRunning] = useState(false);
   const primaryPlannerAgent = useMemo(
     () => agentWorkflow.agents.find((agent) => agent.id === agentWorkflow.primary_planner_id) ?? null,
     [agentWorkflow.agents, agentWorkflow.primary_planner_id]
@@ -151,6 +153,46 @@ export function App() {
     refreshRuntimeInfo();
     refreshProviderInfo();
   }, []);
+
+  useEffect(() => {
+    if (!workflowRunning || !plannerSession?.session_id) return;
+    const sessionId = plannerSession.session_id;
+    let stopped = false;
+    let refreshing = false;
+    const refreshActiveWork = async () => {
+      if (refreshing) return;
+      refreshing = true;
+      try {
+        const session = await getPlannerChatSession(sessionId);
+        if (stopped) return;
+        setPlannerSession(session);
+        if (session.run_id) {
+          setActiveRunId(session.run_id);
+          const timeline = await getRunTimeline(session.run_id);
+          if (!stopped) {
+            setTimelineItems(Array.isArray(timeline.items) ? timeline.items : []);
+          }
+        }
+        if (!session.work_in_progress) {
+          setWorkflowRunning(false);
+          if (session.run_id) {
+            await openStoredRun(session.run_id);
+            refreshRuntimeInfo();
+          }
+        }
+      } catch {
+        // A later poll can recover transient startup and persistence races.
+      } finally {
+        refreshing = false;
+      }
+    };
+    void refreshActiveWork();
+    const timer = window.setInterval(refreshActiveWork, 750);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [workflowRunning, plannerSession?.session_id]);
 
   function refreshLibrary() {
     getLibrary()
@@ -590,7 +632,7 @@ export function App() {
   async function sendPlannerTurn() {
     const requestText = request.trim();
     if (!requestText) return;
-    setRunLoading(true);
+    setPlannerLoading(true);
     setReviewStateError(null);
     setStatus("Sending message to Planner...");
     try {
@@ -635,14 +677,15 @@ export function App() {
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
-      setRunLoading(false);
+      setPlannerLoading(false);
     }
   }
 
   async function startWorkFromPlannerSession() {
     if (!plannerSession) return;
-    setRunLoading(true);
+    setWorkflowRunning(true);
     setStatus("Starting work...");
+    let keepPolling = false;
     try {
       const workflow = normalizeAgentWorkflow(agentWorkflow);
       const validation = await validateAgentWorkflow(workflow);
@@ -665,18 +708,47 @@ export function App() {
         memory_pack_ids: plannerChatWorkflowSummary.memoryPackIds
       });
       setPlannerSession(response.session);
+      keepPolling = Boolean(response.session.work_in_progress || response.status === "running");
       if (response.run_id) {
         setActiveRunId(response.run_id);
-        await openStoredRun(response.run_id);
-        setStatus(response.assistant_message ?? `Work ${response.status}.`);
-        refreshRuntimeInfo();
+        if (keepPolling) {
+          setStatus("Work is running.");
+        } else {
+          await openStoredRun(response.run_id);
+          setStatus(response.assistant_message ?? `Work ${response.status}.`);
+          refreshRuntimeInfo();
+        }
       } else {
         setStatus(response.assistant_message ?? "Planner needs more information.");
       }
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
-      setRunLoading(false);
+      if (!keepPolling) setWorkflowRunning(false);
+    }
+  }
+
+  async function cancelWorkFromPlannerSession() {
+    if (!plannerSession || plannerLoading) return;
+    setPlannerLoading(true);
+    setStatus("Stopping active work...");
+    try {
+      const workflow = normalizeAgentWorkflow(agentWorkflow);
+      const response = await sendPlannerChatTurn({
+        session_id: plannerSession.session_id,
+        message: "Stop the current task.",
+        repo,
+        workflow_id: workflow.id,
+        planner_agent_id: workflow.primary_planner_id,
+        agent_workflow: workflow,
+        scopes: linesToList(scopesText)
+      });
+      setPlannerSession(response.session);
+      setStatus(response.turn.assistant_message);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPlannerLoading(false);
     }
   }
 
@@ -815,7 +887,8 @@ export function App() {
             loadingChangeSetId={loadingChangeSetId}
             repo={repo}
             request={request}
-            runLoading={runLoading}
+            plannerLoading={plannerLoading}
+            workflowRunning={workflowRunning}
             scopesText={scopesText}
             submittedRequest={submittedRequest}
             timelineItems={timelineItems}
@@ -831,6 +904,7 @@ export function App() {
             onRequestChange={setRequest}
             onScopesTextChange={setScopesText}
             onPlannerStrengthChange={updatePlannerStrength}
+            onCancelWork={cancelWorkFromPlannerSession}
             onStartWork={startWorkFromPlannerSession}
             onSubmitRequest={sendPlannerTurn}
             onUndoChangeSet={undoReviewedChangeSet}

@@ -4,6 +4,9 @@
   "private": true,
   "license": "MIT",
   "scripts": {
+    "browser-verifier:check": "node scripts/prepare-browser-verifier-runtime.mjs --check",
+    "browser-verifier:install": "node scripts/prepare-browser-verifier-runtime.mjs --install",
+    "browser-verifier:install-browsers": "node scripts/prepare-browser-verifier-runtime.mjs --install-browsers",
     "desktop:dev": "npx --yes @tauri-apps/cli@2 dev",
     "desktop:build": "npx --yes @tauri-apps/cli@2 build"
   }

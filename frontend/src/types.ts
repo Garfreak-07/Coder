@@ -59,12 +59,14 @@ export interface AgentWorkflowAgent {
 export interface AgentWorkflowEdge {
   from: string;
   to: string;
+  on?: string;
   handoff?: HandoffType | null;
   loop?: boolean;
 }
 
 export interface AgentWorkflowLoopPolicy {
   max_auto_rounds: number;
+  token_budget?: number | null;
   user_can_change: boolean;
 }
 
@@ -381,32 +383,13 @@ export interface RustPermissionPolicy {
   read_files: RustPermissionDecision;
   write_files: RustPermissionDecision;
   run_commands: RustPermissionDecision;
+  child_harness_permissions: RustPermissionDecision;
   network: RustPermissionDecision;
   secrets: RustPermissionDecision;
   publish_external: RustPermissionDecision;
   git_commit: RustPermissionDecision;
   git_push: RustPermissionDecision;
   deploy: RustPermissionDecision;
-}
-
-export type RustOpenHandsAuthHeaderMode = "authorization_bearer" | "x_session_api_key";
-export type RustOpenHandsRunStartStrategy = "post_run_endpoint" | "post_user_event_with_run_true" | "none";
-
-export interface RustOpenHandsApiPaths {
-  api_prefix?: string;
-  conversations_path?: string;
-  events_search_path?: string | null;
-  run_endpoint_path?: string | null;
-  websocket_path_template?: string | null;
-  auth_header?: RustOpenHandsAuthHeaderMode;
-}
-
-export interface RustOpenHandsHarnessConfig {
-  server_url: string;
-  session_api_key_env?: string | null;
-  workspace_mode?: string | null;
-  api_paths?: RustOpenHandsApiPaths;
-  run_start_strategy?: RustOpenHandsRunStartStrategy;
 }
 
 export interface RustVerificationPolicy {
@@ -416,7 +399,6 @@ export interface RustVerificationPolicy {
 
 export interface RustHarnessSpec {
   backend: string;
-  openhands?: RustOpenHandsHarnessConfig | null;
   tools: string[];
   permissions: RustPermissionPolicy;
   memory: RustMemoryAccess;
@@ -443,13 +425,28 @@ export interface RustStopPolicy {
 export interface RustWorkflowSpec {
   name: string;
   max_rounds: number;
+  token_budget?: number | null;
   nodes: RustWorkflowNodeSpec[];
   edges: RustWorkflowEdgeSpec[];
   stop: RustStopPolicy;
 }
 
+export interface RustHookMatcherSpec {
+  matcher?: string | null;
+  hooks: Array<Record<string, unknown>>;
+}
+
+export interface RustHookSettings {
+  PreToolUse?: RustHookMatcherSpec[];
+  PostToolUse?: RustHookMatcherSpec[];
+  PostToolUseFailure?: RustHookMatcherSpec[];
+}
+
 export interface RustProjectConfig {
   version: 1;
+  disable_all_hooks?: boolean;
+  disableAllHooks?: boolean;
+  hooks?: RustHookSettings;
   models: Record<string, RustModelSpec>;
   agents: Record<string, RustAgentSpec>;
   harnesses: Record<string, RustHarnessSpec>;
@@ -534,6 +531,8 @@ export interface RustRunDetail {
   run_id: string;
   metadata?: RustRunState | null;
   events: RustCoderEvent[];
+  event_count?: number;
+  returned_count?: number;
   report?: RustFinalReport | null;
   repo_evidence_count: number;
 }
@@ -550,6 +549,7 @@ export interface RustRunControlResponse {
   control_state: string;
   event_count: number;
   report_ref?: string | null;
+  content_replacement_replay?: RustRunContentReplacementsResponse | null;
 }
 
 export interface RustRunHeartbeatResponse {
@@ -579,6 +579,39 @@ export interface RustRunRepoEvidenceResponse {
 export interface RustRunEventsResponse {
   run_id: string;
   events: RustCoderEvent[];
+  event_count?: number;
+  returned_count?: number;
+  truncated?: boolean;
+  next_after_sequence?: number | null;
+}
+
+export interface RustContentReplacementRecord {
+  kind: string;
+  toolUseId: string;
+  replacement: string;
+}
+
+export interface RustRunContentReplacementEntry {
+  run_id: string;
+  sequence: number;
+  kind: string;
+  created_at: string;
+  replacements: RustContentReplacementRecord[];
+}
+
+export interface RustRunContentReplacementsResponse {
+  contract: string;
+  source: string;
+  policy: string;
+  run_id: string;
+  records_ref: string;
+  records_url: string;
+  records: RustRunContentReplacementEntry[];
+  record_count: number;
+  returned_count: number;
+  replacement_count: number;
+  truncated: boolean;
+  next_after_sequence?: number | null;
 }
 
 export interface RustRunArtifactResponse {
@@ -795,6 +828,22 @@ export interface PlannerChatTurn {
   large_artifacts?: boolean;
 }
 
+export interface PlannerProviderTrace {
+  requested_stream: boolean;
+  response_transport: string;
+  streaming_fallback: boolean;
+  fallback_status?: number | null;
+  finish_reason?: string | null;
+  provider_turns: number;
+  estimated_input_tokens: number;
+  estimated_output_tokens: number;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  total_tokens?: number | null;
+  cache_read_tokens?: number | null;
+  usage_reported: boolean;
+}
+
 export interface PlannerChatMessage {
   role: "user" | "assistant" | "system";
   content: string;
@@ -820,6 +869,7 @@ export interface PlannerChatSession {
   generation: number;
   last_turn?: PlannerChatTurn | null;
   run_id?: string | null;
+  work_in_progress: boolean;
   status: "chatting" | "ready" | "running" | "completed" | "blocked";
 }
 
@@ -837,6 +887,7 @@ export interface PlannerChatTurnResponse {
   artifacts?: PlannerArtifact[];
   structured_artifacts?: PlannerArtifact[];
   large_artifacts?: boolean;
+  provider_trace?: PlannerProviderTrace | null;
 }
 
 export interface PlannerStartWorkResponse {
@@ -959,6 +1010,10 @@ export interface FinalSummaryItem {
 export interface RunTimelineResponse {
   run_id: string;
   items: TimelineItem[];
+  event_count?: number;
+  returned_count?: number;
+  truncated?: boolean;
+  next_after_sequence?: number | null;
 }
 
 export type ChangeSetStatus = "pending_review" | "accepted" | "undone" | "failed_to_undo" | string;
@@ -1039,6 +1094,7 @@ export interface ProviderSettings {
   default_model: string;
   base_urls: Record<string, string>;
   proxy_urls: Record<string, string>;
+  proxy_modes: Record<string, string>;
   api_keys: Record<string, ProviderKeyState>;
   mock_mode: boolean;
 }
@@ -1050,6 +1106,7 @@ export interface ProviderStatusItem {
   credential_source: string;
   base_url?: string | null;
   proxy_url?: string | null;
+  proxy_mode: string;
   mode: string;
 }
 
@@ -1074,38 +1131,10 @@ export interface ProviderFormState {
   default_provider: string;
   default_model: string;
   base_url: string;
+  proxy_mode: "direct" | "explicit" | "environment" | string;
   proxy_url: string;
   api_key: string;
   mock_mode: boolean;
-}
-
-export interface OpenHandsKeyState {
-  configured: boolean;
-  source: string;
-}
-
-export interface OpenHandsSettings {
-  enabled: boolean;
-  server_url: string;
-  workspace_mode: string;
-  allow_native_fallback: boolean;
-  runtime_mode: "managed" | "external" | string;
-  session_api_key: OpenHandsKeyState;
-}
-
-export interface OpenHandsStatus {
-  enabled: boolean;
-  configured: boolean;
-  allow_native_fallback: boolean;
-  runtime_mode: "managed" | "external" | string;
-  status: "connected" | "failed" | "not_configured" | string;
-  server_url: string;
-  workspace_mode: string;
-  credential_configured: boolean;
-  credential_source: string;
-  detail: string;
-  version?: string | null;
-  capabilities: string[];
 }
 
 export interface WorkflowSummary {
@@ -1400,6 +1429,28 @@ export interface CacheBucketStatus {
   entries: number;
   bytes: number;
   stale: boolean;
+  scanned_entries: number;
+  entry_scan_limit: number;
+  truncated: boolean;
+}
+
+export interface BrowserVerifierRuntimeCandidateStatus {
+  source: string;
+  path: string;
+  path_exists: boolean;
+  has_playwright_package: boolean;
+}
+
+export interface BrowserVerifierCacheStatus {
+  status: string;
+  runtime_root: string;
+  browsers_path: string;
+  runtime_cache: CacheBucketStatus;
+  node_path?: string | null;
+  resolved_node_modules?: string | null;
+  candidates: BrowserVerifierRuntimeCandidateStatus[];
+  candidate_count: number;
+  message: string;
 }
 
 export interface CacheStatusResponse {
@@ -1407,4 +1458,5 @@ export interface CacheStatusResponse {
   plugin_cache: CacheBucketStatus;
   skill_cache: CacheBucketStatus;
   blob_store: CacheBucketStatus;
+  browser_verifier: BrowserVerifierCacheStatus;
 }

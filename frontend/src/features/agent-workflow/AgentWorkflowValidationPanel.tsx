@@ -23,7 +23,7 @@ export function AgentWorkflowValidationPanel({ result }: { result: AgentWorkflow
             <div className={`preflight-issue ${issue.level}`} key={`${issue.code}-${issue.target_id ?? "workflow"}-${index}`}>
               <strong>{issue.message}</strong>
               <small>
-                {issue.level.toUpperCase()} · {issue.code} · {issue.target_type}
+                {issue.level.toUpperCase()} | {issue.code} | {issue.target_type}
                 {issue.target_id ? `:${issue.target_id}` : ""}
               </small>
             </div>

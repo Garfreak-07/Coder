@@ -2,26 +2,30 @@ version: 1
 
 models:
   # Provider Settings in the app are the normal user path for provider, model,
-  # API key, base URL, and proxy URL. The env fields below are developer or
-  # headless fallback only.
+  # API key, base URL, network mode, and optional proxy URL. The env fields
+  # below are developer or headless fallback only.
   default:
     provider: deepseek
     model: best
     base_url_env: LLM_BASE_URL
     api_key_env: LLM_API_KEY
-
+  planner_chat:
+    provider: deepseek
+    model: best
+    base_url_env: LLM_BASE_URL
+    api_key_env: LLM_API_KEY
 agents:
   planner:
     role: planner
-    model: default
+    model: planner_chat
     system: |
       You are Coder Planner, the planning half of a Codex-like coding agent.
       You talk to the user, maintain context, decide when repository work is
       ready, and produce concise public progress summaries. Chat is planning and
       conversation only: you do not edit files or run commands in chat.
       Execution starts only after the user clicks Start Work, which hands the
-      task to the OpenHands executor. When ready, say: "I'm ready. Click Start
-      Work and I'll execute this through the OpenHands executor." Do not ask the
+      task to Coder's native executor. When ready, say: "I'm ready. Click Start
+      Work and I'll execute this through the native executor." Do not ask the
       user to switch modes. Do not mention Discuss mode or Work mode. Do not
       expose private chain-of-thought. Summarize what you are checking, why it
       matters, what you found, and what happens next.
@@ -29,6 +33,45 @@ agents:
       read: [user, project, run, repo_facts, knowledge_hints]
       write: [run]
     output_contract: planner_conversation
+    runtime:
+      max_output_tokens: 900
+      context_window_tokens: 200000
+      compact_output_reserve_tokens: 20000
+      autocompact_buffer_tokens: 13000
+      max_output_recovery_attempts: 3
+      max_consecutive_compaction_failures: 3
+      stream_idle_timeout_ms: 90000
+
+  workflow-planner:
+    role: planner
+    model: default
+    system: |
+      You are Coder Workflow Planner, the control loop for Start Work. You do
+      not talk to the user. Read executor and verifier evidence, then choose one
+      control signal: continue for a concrete high-value repair or refinement,
+      finish after verified completion, or blocked when external input is
+      required. Follow
+      the workflow_feedback loop_contract: diagnose the signal, plan the next
+      action, send actionable feedback back to the executor when repair is
+      possible, require verifier evidence before finish, and choose blocked only
+      for user input, external-state dependency, or exhausted bounded progress.
+      Do not spend another round on generic polish, repeated advice, or low
+      marginal gain. For explicit qualitative goals, smoke-test success alone
+      is insufficient; when task-specific review/playtest evidence is absent,
+      request at most one focused refinement. Keep decisions concise and
+      evidence-backed.
+    memory:
+      read: [workflow, run]
+      write: [run]
+    output_contract: workflow_decision
+    runtime:
+      max_output_tokens: 900
+      context_window_tokens: 200000
+      compact_output_reserve_tokens: 20000
+      autocompact_buffer_tokens: 13000
+      max_output_recovery_attempts: 3
+      max_consecutive_compaction_failures: 3
+      stream_idle_timeout_ms: 90000
 
   executor:
     role: executor
@@ -42,15 +85,48 @@ agents:
       read: [workflow, run]
       write: [run]
     output_contract: execution_result
+    runtime:
+      max_output_tokens: 8000
+      # Claude Code's maxTurns is optional. Coder sets an explicit product
+      # bound for its non-interactive Start Work executor.
+      max_turns: 24
+      context_window_tokens: 200000
+      compact_output_reserve_tokens: 20000
+      autocompact_buffer_tokens: 13000
+      max_output_recovery_attempts: 3
+      max_consecutive_compaction_failures: 3
+      stream_idle_timeout_ms: 90000
+
+  verifier:
+    role: verifier
+    model: default
+    system: |
+      You are a read-only verification agent. Your job is to check the work
+      after the executor finishes and report evidence-backed PASS or FAIL
+      signals. Do not edit project files, install dependencies, commit, push, or
+      publish. Prefer concrete checks over narrative review.
+    memory:
+      read: [workflow, run]
+      write: [run]
+    output_contract: verification_result
+    runtime:
+      max_output_tokens: 4096
+      context_window_tokens: 200000
+      compact_output_reserve_tokens: 20000
+      autocompact_buffer_tokens: 13000
+      max_output_recovery_attempts: 3
+      max_consecutive_compaction_failures: 3
+      stream_idle_timeout_ms: 90000
 
 harnesses:
   planner-conversation:
     backend: planner-model
-    tools: [memory_read, knowledge_retrieve, repo_search, read_file, git_diff]
+    tools: []
     permissions:
       read_files: allow
       write_files: deny
       run_commands: deny
+      child_harness_permissions: deny
       network: deny
       secrets: deny
       publish_external: deny
@@ -63,6 +139,26 @@ harnesses:
     verification:
       require_evidence: false
 
+  workflow-planner:
+    backend: planner-model
+    tools: []
+    permissions:
+      read_files: allow
+      write_files: deny
+      run_commands: deny
+      child_harness_permissions: deny
+      network: deny
+      secrets: deny
+      publish_external: deny
+      git_commit: deny
+      git_push: deny
+      deploy: deny
+    memory:
+      read: [workflow, run]
+      write: [run]
+    verification:
+      require_evidence: false
+
   review-only:
     backend: native-rust
     tools: [repo_search, read_file, git_diff]
@@ -70,6 +166,7 @@ harnesses:
       read_files: allow
       write_files: deny
       run_commands: deny
+      child_harness_permissions: ask
       network: deny
       secrets: deny
       publish_external: deny
@@ -80,19 +177,14 @@ harnesses:
       read: [workflow, run]
       write: [run]
 
-  openhands-code-edit:
-    backend: openhands
-    openhands:
-      server_url: ""
-      session_api_key_env:
-      workspace_mode: local
-      api_paths: {}
-      run_start_strategy: post_user_event_with_run_true
-    tools: [terminal, file_editor, task_tracker]
+  native-code-edit:
+    backend: native-rust
+    tools: [repo_find_files, repo_search_text, repo_read_file, repo_read_file_range, git_status, git_diff, agent_subagent, read_subagent_status, cancel_subagent_background, command_preview, command_run, command_background, read_command_output, cancel_command_background, patch_preview, patch_apply, Skill]
     permissions:
       read_files: allow
       write_files: ask
       run_commands: ask
+      child_harness_permissions: ask
       network: ask
       secrets: ask
       publish_external: deny
@@ -105,24 +197,63 @@ harnesses:
     verification:
       require_evidence: true
 
+  browser-verification:
+    backend: browser-verifier
+    tools: [browser_static, gameplay_static, snake_gameplay_static, browser_dynamic, gameplay_browser, snake_gameplay_browser]
+    permissions:
+      read_files: allow
+      write_files: deny
+      run_commands: allow
+      child_harness_permissions: deny
+      network: deny
+      secrets: deny
+      publish_external: deny
+      git_commit: deny
+      git_push: deny
+      deploy: deny
+    memory:
+      read: [workflow, run]
+      write: [run]
+    verification:
+      require_evidence: true
+      allowed_checks: [auto]
+
 workflows:
   planner-led:
-    name: Planner-led Agent Workflow
+    name: Verified Execution Workflow
     max_rounds: 3
     nodes:
-      - id: planner
-        agent: planner
-        harness: planner-conversation
       - id: executor
         agent: executor
-        harness: openhands-code-edit
+        harness: native-code-edit
+      - id: verifier
+        agent: verifier
+        harness: browser-verification
+      - id: workflow-planner
+        agent: workflow-planner
+        harness: workflow-planner
     edges:
-      - from: planner
+      - from: executor
+        to: verifier
+        on: completed
+      - from: executor
+        to: verifier
+        on: blocked
+      - from: verifier
+        to: workflow-planner
+        on: completed
+      - from: verifier
+        to: workflow-planner
+        on: blocked
+      - from: verifier
+        to: workflow-planner
+        on: failed
+      - from: workflow-planner
         to: executor
         on: ready
-      - from: executor
-        to: planner
-        on: completed
+      - from: workflow-planner
+        to: executor
+        on: continue
     stop:
       on_status: [completed, blocked, failed]
-      final_report_agent: planner
+      final_report_agent: verifier

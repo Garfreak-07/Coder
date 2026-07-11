@@ -20,11 +20,10 @@ import type {
   PlannerChatTurn,
   PlannerChatTurnResponse,
   PlannerInteractionMode,
+  PlannerProviderTrace,
   PluginMarketplace,
   PluginMarketplaceListResponse,
   PluginReadResponse,
-  OpenHandsSettings,
-  OpenHandsStatus,
   PlannerArtifact,
   ProviderSettings,
   ProviderStatus,
@@ -59,6 +58,7 @@ import type {
   RustRunCheckpointListResponse,
   RustRunCheckpointResponse,
   RustRunCheckpointWriteResponse,
+  RustRunContentReplacementsResponse,
   RustRunControlResponse,
   RustRunDetail,
   RustRunEventsResponse,
@@ -122,6 +122,9 @@ interface RustPlannerChatSession {
   open_questions?: string[];
   acceptance_criteria?: string[];
   risks?: string[];
+  work_in_progress?: boolean;
+  active_run_id?: string | null;
+  latest_run_id?: string | null;
   turns: Array<{
     role: string;
     content: string;
@@ -174,12 +177,22 @@ interface RustPlannerChatTurnResponse {
   artifacts?: PlannerArtifact[];
   structured_artifacts?: PlannerArtifact[];
   large_artifacts?: boolean;
+  provider_trace?: PlannerProviderTrace | null;
   events?: Array<Record<string, unknown>>;
   run_preview?: {
     status?: string;
     requires_confirmation?: boolean;
     workflow_id?: string;
   } | null;
+}
+
+interface RustPlannerStartWorkResponse {
+  session: RustPlannerChatSession;
+  assistant_message?: string | null;
+  run_id?: string | null;
+  status: string;
+  events_url?: string | null;
+  timeline_url?: string | null;
 }
 
 interface RustRunResponse {
@@ -398,33 +411,13 @@ export async function testProvider(provider: string): Promise<{
   });
 }
 
-export async function getOpenHandsSettings(): Promise<OpenHandsSettings> {
-  const payload = await requestJson<{ settings: OpenHandsSettings }>("/api/v3/openhands/settings");
-  return payload.settings;
-}
-
-export function getOpenHandsStatus(): Promise<OpenHandsStatus> {
-  return requestJson<OpenHandsStatus>("/api/v3/openhands/status");
-}
-
-export async function saveOpenHandsSettings(input: Record<string, unknown>): Promise<{
-  settings: OpenHandsSettings;
-  status: OpenHandsStatus;
-}> {
-  return requestJson("/api/v3/openhands/settings", {
-    method: "POST",
-    headers: jsonHeaders,
-    body: JSON.stringify(input)
-  });
-}
-
 export async function getRuns(): Promise<RunSummaryItem[]> {
   const runs = await getRustRuns();
   return runs.map(rustRunSummaryToRunSummaryItem);
 }
 
 export async function getRun(runId: string, includeEvents = true): Promise<StoredRunDetail> {
-  const detail = await getRustRun(runId);
+  const detail = await getRustRun(runId, includeEvents);
   const mapped = rustRunDetailToStoredRunDetail(detail);
   if (!includeEvents) {
     return {
@@ -439,12 +432,17 @@ export async function getRun(runId: string, includeEvents = true): Promise<Store
 }
 
 export async function getRunEvents(runId: string, cursor = 0, limit = 200): Promise<RunEventsPage> {
-  const payload = await getRustRunEvents(runId);
+  const payload = await getRustRunEvents(runId, cursor, limit);
   return rustRunEventsToRunEventsPage(payload, cursor, limit);
 }
 
-export async function getRunTimeline(runId: string): Promise<RunTimelineResponse> {
-  const payload = await requestJson<Partial<RunTimelineResponse>>(`/api/v3/runs/${encodeURIComponent(runId)}/timeline`);
+export async function getRunTimeline(runId: string, limit = 1000): Promise<RunTimelineResponse> {
+  const params = new URLSearchParams();
+  params.set("tail", "true");
+  params.set("limit", String(limit));
+  const payload = await requestJson<Partial<RunTimelineResponse>>(
+    `/api/v3/runs/${encodeURIComponent(runId)}/timeline?${params}`
+  );
   return normalizeRunTimelineResponse(runId, payload);
 }
 
@@ -485,7 +483,12 @@ export function normalizeRunTimelineResponse(
 ): RunTimelineResponse {
   return {
     run_id: typeof payload?.run_id === "string" ? payload.run_id : fallbackRunId,
-    items: Array.isArray(payload?.items) ? payload.items : []
+    items: Array.isArray(payload?.items) ? payload.items : [],
+    event_count: typeof payload?.event_count === "number" ? payload.event_count : undefined,
+    returned_count: typeof payload?.returned_count === "number" ? payload.returned_count : undefined,
+    truncated: typeof payload?.truncated === "boolean" ? payload.truncated : undefined,
+    next_after_sequence:
+      typeof payload?.next_after_sequence === "number" ? payload.next_after_sequence : undefined
   };
 }
 
@@ -568,15 +571,22 @@ export async function getBlob(runId: string, blobId: string): Promise<BlobDetail
 }
 
 export async function getLiveAgentRun(runId: string): Promise<LiveRunDetail> {
-  const detail = await getRun(runId);
+  const [detail, eventPage] = await Promise.all([
+    getRun(runId, false),
+    getRunEvents(runId)
+  ]);
+  const result = {
+    ...detail.result,
+    events: eventPage.events
+  };
   return {
     id: detail.id,
     workflow_id: detail.workflow_id,
     repo_root: detail.repo_root,
     request: detail.request,
-    status: detail.result.status,
-    events: detail.result.events,
-    result: detail.result,
+    status: result.status,
+    events: eventPage.events,
+    result,
     stored_run_id: detail.id
   };
 }
@@ -721,12 +731,39 @@ export async function getRustRuns(): Promise<RustRunSummary[]> {
   return payload.runs;
 }
 
-export function getRustRun(runId: string): Promise<RustRunDetail> {
-  return requestJson<RustRunDetail>(`/api/v3/runs/${encodeURIComponent(runId)}`);
+export function getRustRun(runId: string, includeEvents = true): Promise<RustRunDetail> {
+  const query = includeEvents ? "" : "?include_events=false";
+  return requestJson<RustRunDetail>(`/api/v3/runs/${encodeURIComponent(runId)}${query}`);
 }
 
-export function getRustRunEvents(runId: string): Promise<RustRunEventsResponse> {
-  return requestJson<RustRunEventsResponse>(`/api/v3/runs/${encodeURIComponent(runId)}/events`);
+export function getRustRunEvents(
+  runId: string,
+  afterSequence = 0,
+  limit = 200
+): Promise<RustRunEventsResponse> {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  if (afterSequence > 0) {
+    params.set("after_sequence", String(afterSequence));
+  }
+  return requestJson<RustRunEventsResponse>(
+    `/api/v3/runs/${encodeURIComponent(runId)}/events?${params}`
+  );
+}
+
+export function getRustRunContentReplacements(
+  runId: string,
+  afterSequence = 0,
+  limit = 200
+): Promise<RustRunContentReplacementsResponse> {
+  const params = new URLSearchParams();
+  params.set("limit", String(limit));
+  if (afterSequence > 0) {
+    params.set("after_sequence", String(afterSequence));
+  }
+  return requestJson<RustRunContentReplacementsResponse>(
+    `/api/v3/runs/${encodeURIComponent(runId)}/content-replacements?${params}`
+  );
 }
 
 export function getRustRunHeartbeat(runId: string): Promise<RustRunHeartbeatResponse> {
@@ -863,7 +900,7 @@ export function sendPlannerChatTurn(input: {
   return sendRustPlannerChatTurn(input);
 }
 
-export function startPlannerSessionWork(input: {
+export async function startPlannerSessionWork(input: {
   session_id: string;
   repo?: string;
   workflow_id: string;
@@ -874,7 +911,7 @@ export function startPlannerSessionWork(input: {
   skill_pack_ids?: string[];
   memory_pack_ids?: string[];
 }): Promise<PlannerStartWorkResponse> {
-  return requestJson<PlannerStartWorkResponse>(
+  const payload = await requestJson<RustPlannerStartWorkResponse>(
     `/api/v3/planner-chat/sessions/${encodeURIComponent(input.session_id)}/start-work`,
     {
       method: "POST",
@@ -891,6 +928,19 @@ export function startPlannerSessionWork(input: {
       })
     }
   );
+  const context = plannerSessionContextFromCreateInput(input);
+  rustPlannerSessionContexts.set(input.session_id, context);
+  const mappedSession = mapRustPlannerSession(payload.session, context);
+  const status = normalizePlannerWorkStatus(payload.status, mappedSession.status);
+  return {
+    ...payload,
+    session: {
+      ...mappedSession,
+      run_id: payload.run_id ?? mappedSession.run_id,
+      status
+    },
+    status
+  };
 }
 
 export function getPlannerChatSession(sessionId: string): Promise<PlannerChatSession> {
@@ -977,7 +1027,7 @@ async function sendRustPlannerChatTurn(input: {
     session_id: input.session_id,
     generation: mappedSession.generation,
     status: mappedSession.status,
-    run_id: null,
+    run_id: mappedSession.run_id,
     turn,
     ready_for_start_work: Boolean(payload.ready_for_start_work ?? payload.ready),
     missing_information: Array.isArray(payload.missing_information) ? payload.missing_information : [],
@@ -986,10 +1036,11 @@ async function sendRustPlannerChatTurn(input: {
     artifacts: normalizePlannerArtifacts(payload.artifacts ?? payload.structured_artifacts),
     structured_artifacts: normalizePlannerArtifacts(payload.structured_artifacts ?? payload.artifacts),
     large_artifacts: Boolean(payload.large_artifacts),
+    provider_trace: payload.provider_trace ?? null,
     session: {
       ...mappedSession,
       last_turn: turn,
-      run_id: null,
+      run_id: mappedSession.run_id,
       status: mappedSession.status
     }
   };
@@ -1090,6 +1141,12 @@ function mapRustPlannerSession(
   const latestAssistant = [...session.turns].reverse().find((turn) => turn.role === "assistant");
   const taskState = rustPlannerTaskState(session, context?.scopes ?? []);
   const ready = rustReadinessIsReady(session.readiness, session.ready);
+  const workInProgress = Boolean(session.work_in_progress);
+  const runId = typeof session.active_run_id === "string"
+    ? session.active_run_id
+    : typeof session.latest_run_id === "string"
+      ? session.latest_run_id
+      : null;
   return {
     session_id: session.session_id,
     workflow_id: session.workflow_id,
@@ -1128,9 +1185,18 @@ function mapRustPlannerSession(
             : null
         }
       : null,
-    run_id: null,
-    status: ready ? "ready" : session.readiness === "blocked" ? "blocked" : "chatting"
+    run_id: runId,
+    work_in_progress: workInProgress,
+    status: workInProgress ? "running" : ready ? "ready" : session.readiness === "blocked" ? "blocked" : "chatting"
   };
+}
+
+function normalizePlannerWorkStatus(
+  status: string,
+  fallback: PlannerChatSession["status"]
+): PlannerChatSession["status"] {
+  if (status === "running" || status === "completed" || status === "blocked") return status;
+  return fallback;
 }
 
 function mapRustPlannerTurn(

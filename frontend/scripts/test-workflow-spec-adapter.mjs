@@ -1,13 +1,16 @@
 import { build } from "esbuild";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-const outfile = resolve("node_modules/.cache/coder/workflowSpecAdapter.test.mjs");
+const frontendRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+process.chdir(frontendRoot);
+
+const outfile = resolve(frontendRoot, "node_modules/.cache/coder/workflowSpecAdapter.test.mjs");
 mkdirSync(dirname(outfile), { recursive: true });
 
 await build({
-  entryPoints: ["src/workflowSpecAdapter.test.ts"],
+  entryPoints: [resolve(frontendRoot, "src/workflowSpecAdapter.test.ts")],
   outfile,
   bundle: true,
   platform: "node",

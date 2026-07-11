@@ -598,6 +598,17 @@ label {
   min-width: 120px;
 }
 
+.stop-work-action {
+  min-width: 120px;
+  border-color: #dc2626;
+  background: #7f1d1d;
+  color: #fef2f2;
+}
+
+.stop-work-action:hover {
+  background: #991b1b;
+}
+
 .work-timeline,
 .review-changes-card {
   background: #0f1724;
@@ -951,6 +962,29 @@ label {
 
 .cache-bucket strong {
   color: #f8fafc;
+}
+
+.runtime-status {
+  background: #0f172a;
+  border: 1px solid #263244;
+  border-radius: 8px;
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 10px;
+}
+
+.runtime-status strong {
+  color: #f8fafc;
+}
+
+.runtime-status span {
+  color: #cbd5e1;
+  overflow-wrap: anywhere;
+}
+
+.runtime-status code {
+  justify-self: start;
 }
 
 .workflow-page {
@@ -1562,17 +1596,8 @@ label {
   border-color: #166534;
 }
 
-.provider-test-failed,
-.openhands-status-failed {
+.provider-test-failed {
   border-color: #7f1d1d;
-}
-
-.openhands-status-connected {
-  border-color: #166534;
-}
-
-.openhands-status-not_configured {
-  border-color: #713f12;
 }
 
 .status-pill {

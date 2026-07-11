@@ -2,6 +2,7 @@ param(
     [string]$Version = "latest",
     [string]$Repository = "Garfreak-07/Coder",
     [string]$InstallDir = "",
+    [string]$TempDir = "",
     [switch]$DryRun
 )
 
@@ -60,8 +61,20 @@ function Resolve-InstallDir {
     return Join-Path $HOME ".local/bin"
 }
 
+function Resolve-InstallerTempDir {
+    param([string]$Requested)
+    if ($Requested) {
+        return $Requested
+    }
+    if ($env:CODER_INSTALL_TMPDIR) {
+        return $env:CODER_INSTALL_TMPDIR
+    }
+    return [System.IO.Path]::GetTempPath()
+}
+
 $target = Resolve-Target
 $installRoot = Resolve-InstallDir $InstallDir
+$tempBase = Resolve-InstallerTempDir $TempDir
 $releaseBase = if ($Version -eq "latest") {
     "https://github.com/$Repository/releases/latest/download"
 } else {
@@ -73,6 +86,7 @@ Write-Host "coder-rust installer"
 Write-Host "Target: $($target.Target)"
 Write-Host "Archive: $($target.Archive)"
 Write-Host "InstallDir: $installRoot"
+Write-Host "TempDir: $tempBase"
 Write-Host "URL: $assetUrl"
 
 if ($DryRun) {
@@ -80,7 +94,8 @@ if ($DryRun) {
     exit 0
 }
 
-$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("coder-rust-install-" + [System.Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force -Path $tempBase | Out-Null
+$tempRoot = Join-Path $tempBase ("coder-rust-install-" + [System.Guid]::NewGuid().ToString("N"))
 $archivePath = Join-Path $tempRoot $target.Archive
 $extractDir = Join-Path $tempRoot "extract"
 New-Item -ItemType Directory -Force -Path $tempRoot, $extractDir, $installRoot | Out-Null

@@ -1,7 +1,7 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
 };
 
@@ -19,6 +19,7 @@ use time::OffsetDateTime;
 const MAX_REPO_EVIDENCE_STRING_CHARS: usize = 16_000;
 const MAX_REPO_EVIDENCE_LIST_ITEMS: usize = 300;
 const MAX_REPO_EVIDENCE_JSON_CHARS: usize = 256_000;
+const MAX_DURABLE_READ_BYTES: u64 = 50 * 1024 * 1024;
 const REPO_EVIDENCE_SECRET_MARKERS: &[&str] = &[
     "deepseek_api_key",
     "llm_api_key",
@@ -31,18 +32,24 @@ const REPO_EVIDENCE_SECRET_MARKERS: &[&str] = &[
 const LOCAL_STORE_DIRS: &[&str] = &[
     "sessions",
     "runs",
+    "background-tasks",
     "timeline",
     "blobs",
     "artifacts",
+    "settings",
     "checkpoints",
     "changesets",
     "repo-index",
     "plugin-cache",
     "skill-cache",
-    "openhands-events",
     "logs",
     "tmp",
 ];
+const DISPOSABLE_CACHE_DIRS: &[&str] = &["repo-index", "plugin-cache", "skill-cache", "tmp"];
+const COMPACTION_STATE_DIR: &str = "checkpoints/compaction";
+const GOAL_STATE_DIR: &str = "checkpoints/goals";
+pub const MAX_DURABLE_JSONL_PAGE_LIMIT: usize = 1000;
+pub const MAX_CACHE_USAGE_SCAN_ENTRIES: usize = MAX_DURABLE_JSONL_PAGE_LIMIT;
 
 #[derive(Debug, Clone)]
 pub struct RunStore {
@@ -77,6 +84,51 @@ impl RunStore {
         read_json_optional(self.safe_run_dir(run_id)?.join("metadata.json"))
     }
 
+    pub fn write_run_config_snapshot<T: Serialize>(
+        &self,
+        run_id: &RunId,
+        value: &T,
+    ) -> Result<String, StoreError> {
+        let path = self
+            .safe_run_dir(run_id)?
+            .join("project-config.snapshot.json");
+        write_json(&path, value)?;
+        Ok(format!(
+            "run-config://runs/{}/project-config.snapshot.json",
+            run_id.as_str()
+        ))
+    }
+
+    pub fn read_run_config_snapshot_json(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<Value>, StoreError> {
+        read_json_optional(
+            self.safe_run_dir(run_id)?
+                .join("project-config.snapshot.json"),
+        )
+    }
+
+    pub fn write_permission_settings<T: Serialize>(
+        &self,
+        destination: &str,
+        value: &T,
+    ) -> Result<String, StoreError> {
+        reject_session_record_secret_like_json(&serde_json::to_value(value)?)?;
+        let safe_destination = safe_file_name(destination)?;
+        let path = self.permission_settings_path(&safe_destination);
+        write_json(&path, value)?;
+        Ok(format!("settings://permissions/{safe_destination}.json"))
+    }
+
+    pub fn read_permission_settings<T: DeserializeOwned>(
+        &self,
+        destination: &str,
+    ) -> Result<Option<T>, StoreError> {
+        let safe_destination = safe_file_name(destination)?;
+        read_json_optional(self.permission_settings_path(&safe_destination))
+    }
+
     pub fn list_run_summaries(&self) -> Result<Vec<StoredRunSummary>, StoreError> {
         let runs_dir = self.root.join("runs");
         if !runs_dir.exists() {
@@ -98,7 +150,7 @@ impl RunStore {
 
             let run_id = RunId::from_string(run_name.clone());
             let metadata = self.read_metadata(&run_id)?;
-            let event_count = self.read_events(&run_id)?.len();
+            let event_count = self.event_count(&run_id)?;
             let has_report = self.read_report(&run_id)?.is_some();
             let repo_evidence_count = self.repo_evidence_count(&run_id)?;
             summaries.push(StoredRunSummary {
@@ -125,19 +177,21 @@ impl RunStore {
 
     pub fn read_events(&self, run_id: &RunId) -> Result<Vec<CoderEvent>, StoreError> {
         let path = self.safe_run_dir(run_id)?.join("events.jsonl");
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        let file = fs::File::open(path)?;
-        let reader = BufReader::new(file);
-        let mut events = Vec::new();
-        for line in reader.lines() {
-            let line = line?;
-            if !line.trim().is_empty() {
-                events.push(CoderEvent::from_jsonl_line(&line)?);
-            }
-        }
-        Ok(events)
+        read_jsonl_records(path)
+    }
+
+    pub fn read_events_page(
+        &self,
+        run_id: &RunId,
+        options: DurableJsonlPageOptions,
+    ) -> Result<DurableJsonlPage<CoderEvent>, StoreError> {
+        let path = self.safe_run_dir(run_id)?.join("events.jsonl");
+        read_jsonl_page(path, options, |event: &CoderEvent| event.sequence)
+    }
+
+    pub fn event_count(&self, run_id: &RunId) -> Result<usize, StoreError> {
+        let path = self.safe_run_dir(run_id)?.join("events.jsonl");
+        count_jsonl_records(path)
     }
 
     pub fn append_session_record(
@@ -168,6 +222,21 @@ impl RunStore {
         Ok(())
     }
 
+    pub fn append_session_record_next(
+        &self,
+        session_id: &str,
+        kind: impl Into<String>,
+        payload: Value,
+    ) -> Result<u64, StoreError> {
+        let session_id = safe_file_name(session_id)?;
+        let kind = kind.into();
+        reject_session_record_secret_like_text(&kind)?;
+        reject_session_record_secret_like_json(&payload)?;
+        let sequence = self.next_session_sequence(&session_id)?;
+        self.append_session_record(&session_id, sequence, kind, payload)?;
+        Ok(sequence)
+    }
+
     pub fn read_session_records(
         &self,
         session_id: &str,
@@ -177,19 +246,256 @@ impl RunStore {
             .root
             .join("sessions")
             .join(format!("{session_id}.jsonl"));
-        if !path.exists() {
-            return Ok(Vec::new());
+        read_jsonl_records(path)
+    }
+
+    pub fn read_session_records_page(
+        &self,
+        session_id: &str,
+        options: DurableJsonlPageOptions,
+    ) -> Result<DurableJsonlPage<SessionJsonlRecord>, StoreError> {
+        let session_id = safe_file_name(session_id)?;
+        let path = self
+            .root
+            .join("sessions")
+            .join(format!("{session_id}.jsonl"));
+        read_jsonl_page(path, options, |record: &SessionJsonlRecord| record.sequence)
+    }
+
+    pub fn append_subagent_transcript_record_next(
+        &self,
+        run_id: &RunId,
+        agent_id: &str,
+        parent_sequence: Option<u64>,
+        kind: impl Into<String>,
+        payload: Value,
+    ) -> Result<u64, StoreError> {
+        let safe_agent_id = safe_file_name(agent_id)?;
+        let kind = kind.into();
+        reject_session_record_secret_like_text(&kind)?;
+        reject_session_record_secret_like_json(&payload)?;
+        let sequence = self.next_subagent_sequence(run_id, &safe_agent_id)?;
+        let record = SubagentTranscriptRecord {
+            run_id: run_id.as_str().to_owned(),
+            agent_id: safe_agent_id.clone(),
+            sequence,
+            parent_sequence,
+            kind,
+            created_at: OffsetDateTime::now_utc(),
+            payload,
+        };
+        let path = self.subagent_transcript_path(run_id, &safe_agent_id)?;
+        ensure_parent(&path)?;
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        writeln!(file, "{}", serde_json::to_string(&record)?)?;
+        Ok(sequence)
+    }
+
+    pub fn read_subagent_transcript_records(
+        &self,
+        run_id: &RunId,
+        agent_id: &str,
+    ) -> Result<Vec<SubagentTranscriptRecord>, StoreError> {
+        let safe_agent_id = safe_file_name(agent_id)?;
+        let path = self.subagent_transcript_path(run_id, &safe_agent_id)?;
+        read_jsonl_records(path)
+    }
+
+    pub fn read_subagent_transcript_records_page(
+        &self,
+        run_id: &RunId,
+        agent_id: &str,
+        options: DurableJsonlPageOptions,
+    ) -> Result<DurableJsonlPage<SubagentTranscriptRecord>, StoreError> {
+        let safe_agent_id = safe_file_name(agent_id)?;
+        let path = self.subagent_transcript_path(run_id, &safe_agent_id)?;
+        read_jsonl_page(path, options, |record: &SubagentTranscriptRecord| {
+            record.sequence
+        })
+    }
+
+    pub fn append_run_content_replacement_record_next(
+        &self,
+        run_id: &RunId,
+        replacements: Vec<ContentReplacementRecord>,
+    ) -> Result<u64, StoreError> {
+        reject_session_record_secret_like_json(&serde_json::to_value(&replacements)?)?;
+        let sequence = self.next_run_content_replacement_sequence(run_id)?;
+        let record = RunContentReplacementEntry {
+            run_id: run_id.as_str().to_owned(),
+            sequence,
+            kind: "content-replacement".to_owned(),
+            created_at: OffsetDateTime::now_utc(),
+            replacements,
+        };
+        let path = self.run_content_replacements_path(run_id)?;
+        ensure_parent(&path)?;
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        writeln!(file, "{}", serde_json::to_string(&record)?)?;
+        Ok(sequence)
+    }
+
+    pub fn read_run_content_replacement_records(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Vec<RunContentReplacementEntry>, StoreError> {
+        read_jsonl_records(self.run_content_replacements_path(run_id)?)
+    }
+
+    pub fn read_run_content_replacement_records_page(
+        &self,
+        run_id: &RunId,
+        options: DurableJsonlPageOptions,
+    ) -> Result<DurableJsonlPage<RunContentReplacementEntry>, StoreError> {
+        read_jsonl_page(
+            self.run_content_replacements_path(run_id)?,
+            options,
+            |record: &RunContentReplacementEntry| record.sequence,
+        )
+    }
+
+    pub fn write_subagent_metadata(
+        &self,
+        run_id: &RunId,
+        agent_id: &str,
+        metadata: &SubagentMetadata,
+    ) -> Result<String, StoreError> {
+        let safe_agent_id = safe_file_name(agent_id)?;
+        reject_session_record_secret_like_json(&serde_json::to_value(metadata)?)?;
+        let path = self.subagent_metadata_path(run_id, &safe_agent_id)?;
+        write_json(&path, metadata)?;
+        Ok(format!(
+            "subagent://runs/{}/subagents/agent-{safe_agent_id}.meta.json",
+            run_id.as_str()
+        ))
+    }
+
+    pub fn read_subagent_metadata(
+        &self,
+        run_id: &RunId,
+        agent_id: &str,
+    ) -> Result<Option<SubagentMetadata>, StoreError> {
+        let safe_agent_id = safe_file_name(agent_id)?;
+        read_json_optional(self.subagent_metadata_path(run_id, &safe_agent_id)?)
+    }
+
+    pub fn write_subagent_background_task_record(
+        &self,
+        record: &SubagentBackgroundTaskRecord,
+    ) -> Result<String, StoreError> {
+        let safe_task_id = safe_file_name(&record.task_id)?;
+        reject_session_record_secret_like_json(&serde_json::to_value(record)?)?;
+        let path = self.subagent_background_task_record_path(&safe_task_id);
+        write_json(&path, record)?;
+        Ok(format!("background-task://subagents/{safe_task_id}.json"))
+    }
+
+    pub fn read_subagent_background_task_record(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<SubagentBackgroundTaskRecord>, StoreError> {
+        let safe_task_id = safe_file_name(task_id)?;
+        read_json_optional(self.subagent_background_task_record_path(&safe_task_id))
+    }
+
+    pub fn write_command_background_task_record(
+        &self,
+        record: &CommandBackgroundTaskRecord,
+    ) -> Result<String, StoreError> {
+        let safe_task_id = safe_file_name(&record.task_id)?;
+        reject_session_record_secret_like_json(&serde_json::to_value(record)?)?;
+        let path = self.command_background_task_record_path(&safe_task_id);
+        write_json(&path, record)?;
+        Ok(format!("background-task://commands/{safe_task_id}.json"))
+    }
+
+    pub fn read_command_background_task_record(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<CommandBackgroundTaskRecord>, StoreError> {
+        let safe_task_id = safe_file_name(task_id)?;
+        read_json_optional(self.command_background_task_record_path(&safe_task_id))
+    }
+
+    pub fn write_command_background_output_tail(
+        &self,
+        task_id: &str,
+        output: &[u8],
+    ) -> Result<String, StoreError> {
+        let safe_task_id = safe_file_name(task_id)?;
+        if output.len() as u64 > MAX_DURABLE_READ_BYTES {
+            return Err(StoreError::DurableReadLimitExceeded {
+                path: self
+                    .command_background_output_path(&safe_task_id)
+                    .display()
+                    .to_string(),
+                bytes: output.len() as u64,
+                max_bytes: MAX_DURABLE_READ_BYTES,
+            });
         }
-        let file = fs::File::open(path)?;
-        let reader = BufReader::new(file);
-        let mut records = Vec::new();
-        for line in reader.lines() {
-            let line = line?;
-            if !line.trim().is_empty() {
-                records.push(serde_json::from_str(&line)?);
-            }
-        }
-        Ok(records)
+        let path = self.command_background_output_path(&safe_task_id);
+        ensure_parent(&path)?;
+        fs::write(&path, output)?;
+        Ok(format!(
+            "background-task-output://commands/{safe_task_id}.output"
+        ))
+    }
+
+    pub fn read_command_background_output_tail(
+        &self,
+        task_id: &str,
+        max_bytes: usize,
+    ) -> Result<CommandBackgroundOutputTail, StoreError> {
+        let safe_task_id = safe_file_name(task_id)?;
+        let path = self.command_background_output_path(&safe_task_id);
+        let (bytes, total_bytes, truncated) = read_file_tail_bytes(&path, max_bytes)?;
+        Ok(CommandBackgroundOutputTail {
+            output: String::from_utf8_lossy(&bytes).to_string(),
+            bytes: total_bytes,
+            truncated,
+        })
+    }
+
+    fn next_session_sequence(&self, session_id: &str) -> Result<u64, StoreError> {
+        let path = self.root.join("sessions").join(format!("{session_id}.seq"));
+        ensure_parent(&path)?;
+        let next = match fs::read_to_string(&path) {
+            Ok(text) => text.trim().parse::<u64>().ok().unwrap_or(0) + 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 1,
+            Err(error) => return Err(StoreError::Io(error)),
+        };
+        write_json(&path, &next)?;
+        Ok(next)
+    }
+
+    fn next_subagent_sequence(
+        &self,
+        run_id: &RunId,
+        safe_agent_id: &str,
+    ) -> Result<u64, StoreError> {
+        let path = self
+            .subagent_dir(run_id)?
+            .join(format!("agent-{safe_agent_id}.seq"));
+        ensure_parent(&path)?;
+        let next = match fs::read_to_string(&path) {
+            Ok(text) => text.trim().parse::<u64>().ok().unwrap_or(0) + 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 1,
+            Err(error) => return Err(StoreError::Io(error)),
+        };
+        write_json(&path, &next)?;
+        Ok(next)
+    }
+
+    fn next_run_content_replacement_sequence(&self, run_id: &RunId) -> Result<u64, StoreError> {
+        let path = self.safe_run_dir(run_id)?.join("content-replacements.seq");
+        ensure_parent(&path)?;
+        let next = match fs::read_to_string(&path) {
+            Ok(text) => text.trim().parse::<u64>().ok().unwrap_or(0) + 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 1,
+            Err(error) => return Err(StoreError::Io(error)),
+        };
+        write_json(&path, &next)?;
+        Ok(next)
     }
 
     pub fn write_report(&self, run_id: &RunId, report: &FinalReport) -> Result<String, StoreError> {
@@ -208,6 +514,7 @@ impl RunStore {
 
         let mut checks = Vec::new();
         let mut blockers = Vec::new();
+        let mut verification_blockers = Vec::new();
         let mut changed_file_seen = BTreeSet::new();
         let mut patch_ref_seen = BTreeSet::new();
         let mut evidence_ref_seen = BTreeSet::new();
@@ -272,8 +579,11 @@ impl RunStore {
                         .get("passed")
                         .and_then(|value| value.as_bool())
                         .unwrap_or(event.kind == "command.completed");
+                    let cancelled = status == "cancelled";
                     if !passed {
-                        if event
+                        if cancelled {
+                            continue;
+                        } else if event
                             .payload
                             .get("timed_out")
                             .and_then(|value| value.as_bool())
@@ -303,9 +613,34 @@ impl RunStore {
                         blockers.push(format!("Patch failed: {patch_file}"));
                     }
                 }
+                "verification.started" => {
+                    completed.push("Verification started".to_owned());
+                }
+                "verification.completed" => {
+                    verification_blockers.clear();
+                    let summary = verification_summary(&event.payload)
+                        .unwrap_or_else(|| "completed".to_owned());
+                    completed.push(format!("Verification {summary}"));
+                    checks.push(format!("verification: {summary}"));
+                    for check in verification_check_summaries(&event.payload) {
+                        checks.push(format!("verification: {check}"));
+                    }
+                }
+                "verification.failed" => {
+                    let reason = payload_string(&event.payload, "reason")
+                        .or_else(|| verification_summary(&event.payload))
+                        .unwrap_or_else(|| "verification failed".to_owned());
+                    checks.push(format!("verification: failed - {reason}"));
+                    if reason.contains("requires evidence") {
+                        verification_blockers.push(format!("Verification blocked: {reason}"));
+                    } else {
+                        verification_blockers.push(format!("Verification failed: {reason}"));
+                    }
+                }
                 _ => {}
             }
         }
+        blockers.extend(verification_blockers);
 
         for reference in repo_evidence {
             let ref_id = reference.ref_id;
@@ -337,6 +672,9 @@ impl RunStore {
                             }
                         }
                     }
+                    Some("file_write") => {
+                        collect_patch_files(&payload, &mut changed_file_seen);
+                    }
                     _ => {}
                 }
             }
@@ -346,9 +684,6 @@ impl RunStore {
         }
         if let Some(summary) = plan_context_summary(plan_context.as_ref()) {
             checks.push(format!("plan_context: {summary}"));
-        }
-        for criterion in plan_acceptance_criteria(plan_context.as_ref()) {
-            checks.push(format!("acceptance: {criterion}"));
         }
         for (kind, reference) in evidence_ref_seen {
             evidence_refs.push(coder_core::EvidenceRef { kind, reference });
@@ -361,10 +696,9 @@ impl RunStore {
             || events.iter().any(|event| event.kind == "run.cancelled");
         let status = if cancelled {
             ReportStatus::Cancelled
-        } else if blockers
-            .iter()
-            .any(|blocker| blocker.contains("requires approval:"))
-        {
+        } else if blockers.iter().any(|blocker| {
+            blocker.contains("requires approval:") || blocker.contains("Verification blocked:")
+        }) {
             ReportStatus::Blocked
         } else if !blockers.is_empty() {
             ReportStatus::Failed
@@ -445,6 +779,7 @@ impl RunStore {
             if !index_path.exists() {
                 continue;
             }
+            reject_file_over_read_limit(&index_path, MAX_DURABLE_READ_BYTES)?;
             let file = fs::File::open(&index_path)?;
             let reader = BufReader::new(file);
             for line in reader.lines() {
@@ -458,7 +793,7 @@ impl RunStore {
                 }
                 let payload_path = PathBuf::from(&record.payload_path);
                 ensure_path_under(&payload_path, &evidence_dir)?;
-                let payload_text = fs::read_to_string(payload_path)?;
+                let payload_text = read_text_with_limit(&payload_path, MAX_DURABLE_READ_BYTES)?;
                 return Ok(serde_json::from_str(&payload_text)?);
             }
         }
@@ -472,6 +807,7 @@ impl RunStore {
             return Ok(Vec::new());
         }
 
+        reject_file_over_read_limit(&index_path, MAX_DURABLE_READ_BYTES)?;
         let file = fs::File::open(index_path)?;
         let reader = BufReader::new(file);
         let mut records = Vec::new();
@@ -525,7 +861,7 @@ impl RunStore {
                 name: safe_name,
             });
         }
-        let text = fs::read_to_string(path)?;
+        let text = read_text_with_limit(&path, MAX_DURABLE_READ_BYTES)?;
         Ok(serde_json::from_str(&text)?)
     }
 
@@ -559,7 +895,7 @@ impl RunStore {
                 name: safe_name,
             });
         }
-        let text = fs::read_to_string(path)?;
+        let text = read_text_with_limit(&path, MAX_DURABLE_READ_BYTES)?;
         Ok(serde_json::from_str(&text)?)
     }
 
@@ -610,6 +946,7 @@ impl RunStore {
         if !path.exists() {
             return Err(StoreError::BlobNotFound(safe_digest));
         }
+        reject_file_over_read_limit(&path, MAX_DURABLE_READ_BYTES)?;
         Ok(fs::read(path)?)
     }
 
@@ -639,9 +976,168 @@ impl RunStore {
         cache_bucket_usage_at(&self.root.join(relative_dir))
     }
 
+    pub fn clear_disposable_caches(&self) -> Result<CacheCleanupSummary, StoreError> {
+        self.ensure_local_layout()?;
+        let mut summary = CacheCleanupSummary::default();
+        for relative_dir in DISPOSABLE_CACHE_DIRS {
+            let relative_path = Path::new(relative_dir);
+            ensure_safe_store_relative_path(relative_path)?;
+            let path = self.root.join(relative_path);
+            let usage = cache_bucket_usage_at(&path)?;
+            remove_path_if_exists(&path)?;
+            fs::create_dir_all(&path)?;
+            summary.directories.push((*relative_dir).to_owned());
+            summary.entries += usage.entries;
+            summary.bytes += usage.bytes;
+            summary.entry_scan_limit = summary.entry_scan_limit.max(usage.entry_scan_limit);
+            summary.truncated |= usage.truncated;
+        }
+        Ok(summary)
+    }
+
+    pub fn read_compaction_circuit_state(
+        &self,
+        scope_id: &str,
+    ) -> Result<Option<CompactionCircuitState>, StoreError> {
+        let safe_scope_id = safe_file_name(scope_id)?;
+        read_json_optional(
+            self.root
+                .join(COMPACTION_STATE_DIR)
+                .join(format!("{safe_scope_id}.json")),
+        )
+    }
+
+    pub fn record_compaction_circuit_outcome(
+        &self,
+        scope_id: &str,
+        max_consecutive_failures: u8,
+        succeeded: bool,
+    ) -> Result<CompactionCircuitState, StoreError> {
+        let safe_scope_id = safe_file_name(scope_id)?;
+        let path = self
+            .root
+            .join(COMPACTION_STATE_DIR)
+            .join(format!("{safe_scope_id}.json"));
+        let previous = read_json_optional::<CompactionCircuitState>(&path)?;
+        let previous_failures = previous
+            .as_ref()
+            .map(|state| state.consecutive_failures)
+            .unwrap_or(0);
+        let consecutive_failures = if succeeded {
+            0
+        } else {
+            previous_failures.saturating_add(1)
+        };
+        let state = CompactionCircuitState {
+            scope_id: safe_scope_id,
+            max_consecutive_failures,
+            consecutive_failures,
+            circuit_breaker_open: max_consecutive_failures > 0
+                && consecutive_failures >= max_consecutive_failures,
+            updated_at: OffsetDateTime::now_utc(),
+        };
+        write_json(&path, &state)?;
+        Ok(state)
+    }
+
+    pub fn read_goal_state_json(&self, session_id: &str) -> Result<Option<Value>, StoreError> {
+        let safe_session_id = safe_file_name(session_id)?;
+        read_json_optional(
+            self.root
+                .join(GOAL_STATE_DIR)
+                .join(format!("{safe_session_id}.json")),
+        )
+    }
+
+    pub fn write_goal_state_json(
+        &self,
+        session_id: &str,
+        value: &Value,
+    ) -> Result<String, StoreError> {
+        reject_session_record_secret_like_json(value)?;
+        let safe_session_id = safe_file_name(session_id)?;
+        let path = self
+            .root
+            .join(GOAL_STATE_DIR)
+            .join(format!("{safe_session_id}.json"));
+        write_json(&path, value)?;
+        Ok(format!("goal://sessions/{safe_session_id}.json"))
+    }
+
+    pub fn delete_goal_state(&self, session_id: &str) -> Result<bool, StoreError> {
+        let safe_session_id = safe_file_name(session_id)?;
+        let path = self
+            .root
+            .join(GOAL_STATE_DIR)
+            .join(format!("{safe_session_id}.json"));
+        if !path.exists() {
+            return Ok(false);
+        }
+        fs::remove_file(path)?;
+        Ok(true)
+    }
+
     fn safe_run_dir(&self, run_id: &RunId) -> Result<PathBuf, StoreError> {
         let safe_run_id = safe_store_segment(run_id.as_str(), "run_id")?;
         Ok(self.root.join("runs").join(safe_run_id))
+    }
+
+    fn run_content_replacements_path(&self, run_id: &RunId) -> Result<PathBuf, StoreError> {
+        Ok(self
+            .safe_run_dir(run_id)?
+            .join("content-replacements.jsonl"))
+    }
+
+    fn subagent_dir(&self, run_id: &RunId) -> Result<PathBuf, StoreError> {
+        Ok(self.safe_run_dir(run_id)?.join("subagents"))
+    }
+
+    fn subagent_transcript_path(
+        &self,
+        run_id: &RunId,
+        safe_agent_id: &str,
+    ) -> Result<PathBuf, StoreError> {
+        Ok(self
+            .subagent_dir(run_id)?
+            .join(format!("agent-{safe_agent_id}.jsonl")))
+    }
+
+    fn subagent_metadata_path(
+        &self,
+        run_id: &RunId,
+        safe_agent_id: &str,
+    ) -> Result<PathBuf, StoreError> {
+        Ok(self
+            .subagent_dir(run_id)?
+            .join(format!("agent-{safe_agent_id}.meta.json")))
+    }
+
+    fn subagent_background_task_record_path(&self, safe_task_id: &str) -> PathBuf {
+        self.root
+            .join("background-tasks")
+            .join("subagents")
+            .join(format!("{safe_task_id}.json"))
+    }
+
+    fn command_background_task_record_path(&self, safe_task_id: &str) -> PathBuf {
+        self.root
+            .join("background-tasks")
+            .join("commands")
+            .join(format!("{safe_task_id}.json"))
+    }
+
+    fn command_background_output_path(&self, safe_task_id: &str) -> PathBuf {
+        self.root
+            .join("background-tasks")
+            .join("commands")
+            .join(format!("{safe_task_id}.output"))
+    }
+
+    fn permission_settings_path(&self, safe_destination: &str) -> PathBuf {
+        self.root
+            .join("settings")
+            .join("permissions")
+            .join(format!("{safe_destination}.json"))
     }
 
     pub fn repo_evidence_count(&self, run_id: &RunId) -> Result<usize, StoreError> {
@@ -654,15 +1150,16 @@ pub struct LocalStoreLayout {
     pub root: PathBuf,
     pub sessions: PathBuf,
     pub runs: PathBuf,
+    pub background_tasks: PathBuf,
     pub timeline: PathBuf,
     pub blobs: PathBuf,
     pub artifacts: PathBuf,
+    pub settings: PathBuf,
     pub checkpoints: PathBuf,
     pub changesets: PathBuf,
     pub repo_index: PathBuf,
     pub plugin_cache: PathBuf,
     pub skill_cache: PathBuf,
-    pub openhands_events: PathBuf,
     pub logs: PathBuf,
     pub tmp: PathBuf,
 }
@@ -673,15 +1170,16 @@ impl LocalStoreLayout {
             root: root.to_path_buf(),
             sessions: root.join("sessions"),
             runs: root.join("runs"),
+            background_tasks: root.join("background-tasks"),
             timeline: root.join("timeline"),
             blobs: root.join("blobs"),
             artifacts: root.join("artifacts"),
+            settings: root.join("settings"),
             checkpoints: root.join("checkpoints"),
             changesets: root.join("changesets"),
             repo_index: root.join("repo-index"),
             plugin_cache: root.join("plugin-cache"),
             skill_cache: root.join("skill-cache"),
-            openhands_events: root.join("openhands-events"),
             logs: root.join("logs"),
             tmp: root.join("tmp"),
         }
@@ -699,10 +1197,196 @@ pub struct SessionJsonlRecord {
     pub payload: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SubagentTranscriptRecord {
+    pub run_id: String,
+    pub agent_id: String,
+    pub sequence: u64,
+    #[serde(default)]
+    pub parent_sequence: Option<u64>,
+    pub kind: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    #[serde(default)]
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContentReplacementRecord {
+    pub kind: String,
+    #[serde(rename = "toolUseId")]
+    pub tool_use_id: String,
+    pub replacement: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RunContentReplacementEntry {
+    pub run_id: String,
+    pub sequence: u64,
+    pub kind: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    #[serde(default)]
+    pub replacements: Vec<ContentReplacementRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubagentMetadata {
+    pub agent_type: String,
+    pub parent_agent_id: String,
+    pub parent_harness_id: String,
+    pub invocation_kind: String,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub terminal_record_kind: Option<String>,
+    #[serde(default)]
+    pub last_sequence: Option<u64>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub worktree_path: Option<String>,
+    #[serde(default)]
+    pub transcript_ref: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentBackgroundTaskRecord {
+    pub task_id: String,
+    pub run_id: String,
+    pub agent_id: String,
+    pub status: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub metadata_ref: String,
+    pub transcript_ref: String,
+    #[serde(default)]
+    pub report: Option<FinalReport>,
+    #[serde(default)]
+    pub event_count: usize,
+    #[serde(default)]
+    pub events_truncated: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandBackgroundTaskRecord {
+    pub task_id: String,
+    #[serde(default)]
+    pub run_id: Option<String>,
+    pub repo_root: String,
+    pub cwd: String,
+    pub argv: Vec<String>,
+    pub command: String,
+    pub approval_key: String,
+    pub policy: Value,
+    pub status: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub output_ref: String,
+    #[serde(default)]
+    pub output_bytes: u64,
+    #[serde(default)]
+    pub output_truncated: bool,
+    pub max_output_bytes: usize,
+    #[serde(default)]
+    pub result: Option<Value>,
+    #[serde(default)]
+    pub evidence_ref: Option<RepoEvidenceRef>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandBackgroundOutputTail {
+    pub output: String,
+    pub bytes: u64,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DurableJsonlPageOptions {
+    pub after_sequence: Option<u64>,
+    pub limit: usize,
+    pub tail: bool,
+}
+
+impl DurableJsonlPageOptions {
+    pub fn new(limit: usize) -> Result<Self, StoreError> {
+        Self::with_after_sequence(None, limit)
+    }
+
+    pub fn with_after_sequence(
+        after_sequence: Option<u64>,
+        limit: usize,
+    ) -> Result<Self, StoreError> {
+        if limit == 0 || limit > MAX_DURABLE_JSONL_PAGE_LIMIT {
+            return Err(StoreError::DurableJsonlPageLimitOutOfRange {
+                limit,
+                max: MAX_DURABLE_JSONL_PAGE_LIMIT,
+            });
+        }
+        Ok(Self {
+            after_sequence,
+            limit,
+            tail: false,
+        })
+    }
+
+    pub fn tail(limit: usize) -> Result<Self, StoreError> {
+        if limit == 0 || limit > MAX_DURABLE_JSONL_PAGE_LIMIT {
+            return Err(StoreError::DurableJsonlPageLimitOutOfRange {
+                limit,
+                max: MAX_DURABLE_JSONL_PAGE_LIMIT,
+            });
+        }
+        Ok(Self {
+            after_sequence: None,
+            limit,
+            tail: true,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DurableJsonlPage<T> {
+    pub records: Vec<T>,
+    pub total_records: usize,
+    pub matching_records: usize,
+    pub returned_records: usize,
+    pub truncated: bool,
+    pub next_after_sequence: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CacheBucketUsage {
     pub entries: usize,
     pub bytes: u64,
+    pub scanned_entries: usize,
+    pub entry_scan_limit: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CacheCleanupSummary {
+    pub directories: Vec<String>,
+    pub entries: usize,
+    pub bytes: u64,
+    pub entry_scan_limit: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompactionCircuitState {
+    pub scope_id: String,
+    pub max_consecutive_failures: u8,
+    pub consecutive_failures: u8,
+    pub circuit_breaker_open: bool,
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -774,6 +1458,14 @@ pub enum StoreError {
     SessionRecordSecretLikeText,
     #[error("repo evidence payload is over limit {max_chars} chars")]
     RepoEvidencePayloadTooLarge { max_chars: usize },
+    #[error("durable read over limit: {path} is {bytes} bytes, max {max_bytes} bytes")]
+    DurableReadLimitExceeded {
+        path: String,
+        bytes: u64,
+        max_bytes: u64,
+    },
+    #[error("durable JSONL page limit {limit} is out of range, max {max}")]
+    DurableJsonlPageLimitOutOfRange { limit: usize, max: usize },
     #[error("repo evidence not found: {0}")]
     RepoEvidenceNotFound(String),
     #[error("repo evidence payload path escaped repo_evidence directory: {0}")]
@@ -793,6 +1485,141 @@ fn write_json(path: impl AsRef<Path>, value: &impl Serialize) -> Result<(), Stor
     ensure_parent(path)?;
     fs::write(path, serde_json::to_string_pretty(value)?)?;
     Ok(())
+}
+
+fn reject_file_over_read_limit(path: &Path, max_bytes: u64) -> Result<(), StoreError> {
+    let bytes = fs::metadata(path)?.len();
+    if bytes > max_bytes {
+        return Err(StoreError::DurableReadLimitExceeded {
+            path: path.display().to_string(),
+            bytes,
+            max_bytes,
+        });
+    }
+    Ok(())
+}
+
+fn read_text_with_limit(path: &Path, max_bytes: u64) -> Result<String, StoreError> {
+    reject_file_over_read_limit(path, max_bytes)?;
+    Ok(fs::read_to_string(path)?)
+}
+
+fn read_jsonl_records<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<Vec<T>, StoreError> {
+    let path = path.as_ref();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    reject_file_over_read_limit(path, MAX_DURABLE_READ_BYTES)?;
+    let file = fs::File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut records = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        if !line.trim().is_empty() {
+            records.push(serde_json::from_str(&line)?);
+        }
+    }
+    Ok(records)
+}
+
+fn read_jsonl_page<T, F>(
+    path: impl AsRef<Path>,
+    options: DurableJsonlPageOptions,
+    sequence_of: F,
+) -> Result<DurableJsonlPage<T>, StoreError>
+where
+    T: DeserializeOwned,
+    F: Fn(&T) -> u64,
+{
+    let path = path.as_ref();
+    if !path.exists() {
+        return Ok(DurableJsonlPage {
+            records: Vec::new(),
+            total_records: 0,
+            matching_records: 0,
+            returned_records: 0,
+            truncated: false,
+            next_after_sequence: None,
+        });
+    }
+    reject_file_over_read_limit(path, MAX_DURABLE_READ_BYTES)?;
+    let file = fs::File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut records = Vec::new();
+    let mut tail_records = VecDeque::new();
+    let mut total_records = 0;
+    let mut matching_records = 0;
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        total_records += 1;
+        let record = serde_json::from_str::<T>(&line)?;
+        if options
+            .after_sequence
+            .map(|after| sequence_of(&record) <= after)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        matching_records += 1;
+        if options.tail {
+            if tail_records.len() == options.limit {
+                tail_records.pop_front();
+            }
+            tail_records.push_back(record);
+        } else if records.len() < options.limit {
+            records.push(record);
+        }
+    }
+
+    if options.tail {
+        records = tail_records.into_iter().collect();
+    }
+    let returned_records = records.len();
+    let next_after_sequence = records.last().map(sequence_of);
+    Ok(DurableJsonlPage {
+        records,
+        total_records,
+        matching_records,
+        returned_records,
+        truncated: matching_records > returned_records,
+        next_after_sequence,
+    })
+}
+
+fn count_jsonl_records(path: impl AsRef<Path>) -> Result<usize, StoreError> {
+    let path = path.as_ref();
+    if !path.exists() {
+        return Ok(0);
+    }
+    reject_file_over_read_limit(path, MAX_DURABLE_READ_BYTES)?;
+    let file = fs::File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut count = 0;
+    for line in reader.lines() {
+        if !line?.trim().is_empty() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn read_file_tail_bytes(path: &Path, max_bytes: usize) -> Result<(Vec<u8>, u64, bool), StoreError> {
+    if !path.exists() {
+        return Ok((Vec::new(), 0, false));
+    }
+    let max_bytes = max_bytes.clamp(1, MAX_DURABLE_READ_BYTES as usize);
+    let metadata = fs::metadata(path)?;
+    let total_bytes = metadata.len();
+    let offset = total_bytes.saturating_sub(max_bytes as u64);
+    let mut file = fs::File::open(path)?;
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok((bytes, total_bytes, offset > 0))
 }
 
 fn redact_final_report(report: &mut FinalReport) {
@@ -820,6 +1647,39 @@ fn payload_string(payload: &Value, key: &str) -> Option<String> {
         .get(key)
         .and_then(|value| value.as_str())
         .map(str::to_owned)
+}
+
+fn verification_summary(payload: &Value) -> Option<String> {
+    if let Some(summary) = payload_string(payload, "summary") {
+        return Some(summary);
+    }
+    let status = payload_string(payload, "status").filter(|value| !value.trim().is_empty())?;
+    let total_refs = payload
+        .pointer("/evidence/total_refs")
+        .and_then(|value| value.as_u64());
+    Some(match total_refs {
+        Some(total_refs) => format!("{status} with {total_refs} evidence ref(s)"),
+        None => status,
+    })
+}
+
+fn verification_check_summaries(payload: &Value) -> Vec<String> {
+    payload
+        .get("checks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|check| {
+            let name = payload_string(check, "name")?;
+            let status = payload_string(check, "status").unwrap_or_else(|| "completed".to_owned());
+            let detail = payload_string(check, "detail").unwrap_or_default();
+            if detail.trim().is_empty() {
+                Some(format!("{name} {status}"))
+            } else {
+                Some(format!("{name} {status} - {detail}"))
+            }
+        })
+        .collect()
 }
 
 fn collect_patch_files(payload: &Value, files: &mut BTreeSet<String>) {
@@ -878,36 +1738,6 @@ fn plan_context_summary(plan_context: Option<&Value>) -> Option<String> {
     }
 }
 
-fn plan_acceptance_criteria(plan_context: Option<&Value>) -> Vec<String> {
-    let Some(plan_context) = plan_context else {
-        return Vec::new();
-    };
-    let direct = string_array(plan_context.get("acceptance_criteria"));
-    if !direct.is_empty() {
-        return direct;
-    }
-    string_array(
-        plan_context
-            .get("plan_draft")
-            .and_then(|plan| plan.get("acceptance_criteria")),
-    )
-}
-
-fn string_array(value: Option<&Value>) -> Vec<String> {
-    value
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|item| !item.is_empty())
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 fn read_json_optional<T: DeserializeOwned>(
     path: impl AsRef<Path>,
 ) -> Result<Option<T>, StoreError> {
@@ -915,13 +1745,27 @@ fn read_json_optional<T: DeserializeOwned>(
     if !path.exists() {
         return Ok(None);
     }
-    let text = fs::read_to_string(path)?;
+    let text = read_text_with_limit(path, MAX_DURABLE_READ_BYTES)?;
     Ok(Some(serde_json::from_str(&text)?))
 }
 
 fn ensure_parent(path: &Path) -> Result<(), StoreError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<(), StoreError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(StoreError::Io(error)),
+    };
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
     }
     Ok(())
 }
@@ -1071,15 +1915,32 @@ fn reject_session_record_secret_like_json(value: &Value) -> Result<(), StoreErro
 }
 
 fn cache_bucket_usage_at(path: &Path) -> Result<CacheBucketUsage, StoreError> {
-    let mut usage = CacheBucketUsage::default();
-    accumulate_cache_bucket_usage(path, &mut usage)?;
+    cache_bucket_usage_at_with_limit(path, MAX_CACHE_USAGE_SCAN_ENTRIES)
+}
+
+fn cache_bucket_usage_at_with_limit(
+    path: &Path,
+    entry_scan_limit: usize,
+) -> Result<CacheBucketUsage, StoreError> {
+    let mut usage = CacheBucketUsage {
+        entry_scan_limit: entry_scan_limit.max(1),
+        ..CacheBucketUsage::default()
+    };
+    accumulate_cache_bucket_usage(path, &mut usage, false)?;
     Ok(usage)
 }
 
 fn accumulate_cache_bucket_usage(
     path: &Path,
     usage: &mut CacheBucketUsage,
+    count_path: bool,
 ) -> Result<(), StoreError> {
+    if usage.truncated {
+        return Ok(());
+    }
+    if count_path && !record_cache_usage_scan_entry(usage) {
+        return Ok(());
+    }
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1091,13 +1952,25 @@ fn accumulate_cache_bucket_usage(
         usage.bytes += metadata.len();
     } else if file_type.is_dir() {
         for entry in fs::read_dir(path)? {
-            accumulate_cache_bucket_usage(&entry?.path(), usage)?;
+            accumulate_cache_bucket_usage(&entry?.path(), usage, true)?;
+            if usage.truncated {
+                break;
+            }
         }
     } else if file_type.is_symlink() {
         usage.entries += 1;
         usage.bytes += metadata.len();
     }
     Ok(())
+}
+
+fn record_cache_usage_scan_entry(usage: &mut CacheBucketUsage) -> bool {
+    if usage.scanned_entries >= usage.entry_scan_limit {
+        usage.truncated = true;
+        return false;
+    }
+    usage.scanned_entries += 1;
+    true
 }
 
 fn compact_string(value: &str, limit: usize) -> String {
@@ -1150,6 +2023,72 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "run.started");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn event_log_page_supports_after_sequence_and_tail_without_full_vec() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run_page");
+        for sequence in 1..=5 {
+            store
+                .append_event(
+                    &run_id,
+                    &CoderEvent::new(
+                        run_id.clone(),
+                        sequence,
+                        format!("event.{sequence}"),
+                        json!({"sequence": sequence}),
+                    ),
+                )
+                .unwrap();
+        }
+
+        let page = store
+            .read_events_page(
+                &run_id,
+                DurableJsonlPageOptions::with_after_sequence(Some(2), 2).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(page.total_records, 5);
+        assert_eq!(page.matching_records, 3);
+        assert_eq!(page.returned_records, 2);
+        assert_eq!(page.next_after_sequence, Some(4));
+        assert_eq!(
+            page.records
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+        assert!(page.truncated);
+
+        let tail = store
+            .read_events_page(&run_id, DurableJsonlPageOptions::tail(2).unwrap())
+            .unwrap();
+        assert_eq!(
+            tail.records
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![4, 5]
+        );
+        assert_eq!(tail.next_after_sequence, Some(5));
+        assert!(tail.truncated);
+        assert_eq!(store.event_count(&run_id).unwrap(), 5);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn durable_jsonl_page_limit_is_bounded() {
+        assert!(matches!(
+            DurableJsonlPageOptions::new(0).unwrap_err(),
+            StoreError::DurableJsonlPageLimitOutOfRange { .. }
+        ));
+        assert!(matches!(
+            DurableJsonlPageOptions::tail(MAX_DURABLE_JSONL_PAGE_LIMIT + 1).unwrap_err(),
+            StoreError::DurableJsonlPageLimitOutOfRange { .. }
+        ));
     }
 
     #[test]
@@ -1233,6 +2172,426 @@ mod tests {
     }
 
     #[test]
+    fn session_record_next_sequence_uses_persistent_sidecar() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+
+        let first = store
+            .append_session_record_next(
+                "session_1",
+                "session.created",
+                json!({"workflow_id": "planner-led"}),
+            )
+            .unwrap();
+        let second = store
+            .append_session_record_next(
+                "session_1",
+                "session.turn.completed",
+                json!({"turn_count": 2}),
+            )
+            .unwrap();
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        let records = store.read_session_records("session_1").unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].sequence, 1);
+        assert_eq!(records[1].sequence, 2);
+        let sequence_text =
+            fs::read_to_string(root.join("sessions").join("session_1.seq")).unwrap();
+        assert_eq!(sequence_text.trim(), "2");
+        let error = store
+            .append_session_record_next(
+                "session_1",
+                "session.turn.completed",
+                json!({"api_key": "redacted"}),
+            )
+            .unwrap_err();
+        assert!(matches!(error, StoreError::SessionRecordSecretLikeText));
+        let sequence_text =
+            fs::read_to_string(root.join("sessions").join("session_1.seq")).unwrap();
+        assert_eq!(sequence_text.trim(), "2");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn session_records_page_reads_incremental_records() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        for index in 1..=4 {
+            store
+                .append_session_record(
+                    "session_page",
+                    index,
+                    "session.turn.completed",
+                    json!({"index": index}),
+                )
+                .unwrap();
+        }
+
+        let page = store
+            .read_session_records_page(
+                "session_page",
+                DurableJsonlPageOptions::with_after_sequence(Some(1), 2).unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(page.total_records, 4);
+        assert_eq!(page.matching_records, 3);
+        assert_eq!(page.returned_records, 2);
+        assert_eq!(page.next_after_sequence, Some(3));
+        assert_eq!(
+            page.records
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn subagent_transcript_and_metadata_use_run_scoped_sidecars() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run_subagents");
+
+        let first = store
+            .append_subagent_transcript_record_next(
+                &run_id,
+                "agent-1",
+                None,
+                "subagent.started",
+                json!({"prompt": "review files"}),
+            )
+            .unwrap();
+        let second = store
+            .append_subagent_transcript_record_next(
+                &run_id,
+                "agent-1",
+                Some(first),
+                "subagent.message",
+                json!({"summary": "looked at src/lib.rs"}),
+            )
+            .unwrap();
+        let metadata = SubagentMetadata {
+            agent_type: "code-reviewer".to_owned(),
+            parent_agent_id: "executor".to_owned(),
+            parent_harness_id: "native-code-edit".to_owned(),
+            invocation_kind: "spawn".to_owned(),
+            status: Some("completed".to_owned()),
+            terminal_record_kind: Some("subagent.completed".to_owned()),
+            last_sequence: Some(second),
+            error: None,
+            description: Some("review implementation".to_owned()),
+            worktree_path: None,
+            transcript_ref: Some(
+                "subagent://runs/run_subagents/subagents/agent-agent-1.jsonl".to_owned(),
+            ),
+        };
+        let metadata_ref = store
+            .write_subagent_metadata(&run_id, "agent-1", &metadata)
+            .unwrap();
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert_eq!(
+            metadata_ref,
+            "subagent://runs/run_subagents/subagents/agent-agent-1.meta.json"
+        );
+        let records = store
+            .read_subagent_transcript_records(&run_id, "agent-1")
+            .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].sequence, 1);
+        assert_eq!(records[1].parent_sequence, Some(1));
+        assert_eq!(records[1].payload["summary"], "looked at src/lib.rs");
+        let loaded = store
+            .read_subagent_metadata(&run_id, "agent-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded, metadata);
+        let sequence_text = fs::read_to_string(
+            root.join("runs")
+                .join("run_subagents")
+                .join("subagents")
+                .join("agent-agent-1.seq"),
+        )
+        .unwrap();
+        assert_eq!(sequence_text.trim(), "2");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn subagent_background_task_record_roundtrips() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let record = SubagentBackgroundTaskRecord {
+            task_id: "task-123".to_owned(),
+            run_id: "run_subagents".to_owned(),
+            agent_id: "agent-1".to_owned(),
+            status: "running".to_owned(),
+            created_at_ms: 1000,
+            updated_at_ms: 1000,
+            metadata_ref: "subagent://runs/run_subagents/subagents/agent-agent-1.meta.json"
+                .to_owned(),
+            transcript_ref: "subagent://runs/run_subagents/subagents/agent-agent-1.jsonl"
+                .to_owned(),
+            report: None,
+            event_count: 0,
+            events_truncated: false,
+            error: None,
+        };
+
+        let task_ref = store
+            .write_subagent_background_task_record(&record)
+            .unwrap();
+        assert_eq!(task_ref, "background-task://subagents/task-123.json");
+        let loaded = store
+            .read_subagent_background_task_record("task-123")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.task_id, record.task_id);
+        assert_eq!(loaded.run_id, record.run_id);
+        assert_eq!(loaded.agent_id, record.agent_id);
+        assert_eq!(loaded.status, "running");
+        assert_eq!(loaded.event_count, 0);
+        assert!(root
+            .join("background-tasks")
+            .join("subagents")
+            .join("task-123.json")
+            .exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn command_background_task_record_and_output_tail_roundtrips() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let record = CommandBackgroundTaskRecord {
+            task_id: "cmd-123".to_owned(),
+            run_id: Some("run_cmd".to_owned()),
+            repo_root: ".".to_owned(),
+            cwd: ".".to_owned(),
+            argv: vec!["echo".to_owned(), "hello".to_owned()],
+            command: "echo hello".to_owned(),
+            approval_key: "approval-1".to_owned(),
+            policy: json!({"allowed": true}),
+            status: "running".to_owned(),
+            created_at_ms: 1000,
+            updated_at_ms: 1000,
+            output_ref: "background-task-output://commands/cmd-123.output".to_owned(),
+            output_bytes: 0,
+            output_truncated: false,
+            max_output_bytes: 16,
+            result: None,
+            evidence_ref: None,
+            error: None,
+        };
+
+        let task_ref = store.write_command_background_task_record(&record).unwrap();
+        let output_ref = store
+            .write_command_background_output_tail("cmd-123", b"0123456789abcdef")
+            .unwrap();
+
+        assert_eq!(task_ref, "background-task://commands/cmd-123.json");
+        assert_eq!(
+            output_ref,
+            "background-task-output://commands/cmd-123.output"
+        );
+        let loaded = store
+            .read_command_background_task_record("cmd-123")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.task_id, record.task_id);
+        assert_eq!(loaded.command, "echo hello");
+        let full = store
+            .read_command_background_output_tail("cmd-123", 64)
+            .unwrap();
+        assert_eq!(full.output, "0123456789abcdef");
+        assert_eq!(full.bytes, 16);
+        assert!(!full.truncated);
+        let tail = store
+            .read_command_background_output_tail("cmd-123", 6)
+            .unwrap();
+        assert_eq!(tail.output, "abcdef");
+        assert_eq!(tail.bytes, 16);
+        assert!(tail.truncated);
+        assert!(root
+            .join("background-tasks")
+            .join("commands")
+            .join("cmd-123.json")
+            .exists());
+        assert!(root
+            .join("background-tasks")
+            .join("commands")
+            .join("cmd-123.output")
+            .exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn subagent_transcript_page_reads_tail_records() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run_subagent_page");
+        for index in 1..=4 {
+            store
+                .append_subagent_transcript_record_next(
+                    &run_id,
+                    "agent-1",
+                    None,
+                    "subagent.message",
+                    json!({"index": index}),
+                )
+                .unwrap();
+        }
+
+        let page = store
+            .read_subagent_transcript_records_page(
+                &run_id,
+                "agent-1",
+                DurableJsonlPageOptions::tail(2).unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(page.total_records, 4);
+        assert_eq!(page.matching_records, 4);
+        assert_eq!(
+            page.records
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+        assert!(page.truncated);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn run_content_replacement_records_roundtrip_and_reject_secrets() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run_replacements");
+
+        let first = store
+            .append_run_content_replacement_record_next(
+                &run_id,
+                vec![ContentReplacementRecord {
+                    kind: "tool-result".to_owned(),
+                    tool_use_id: "toolu-1".to_owned(),
+                    replacement: "<persisted-output>preview</persisted-output>".to_owned(),
+                }],
+            )
+            .unwrap();
+        let second = store
+            .append_run_content_replacement_record_next(
+                &run_id,
+                vec![ContentReplacementRecord {
+                    kind: "tool-result".to_owned(),
+                    tool_use_id: "toolu-2".to_owned(),
+                    replacement: "<persisted-output>preview 2</persisted-output>".to_owned(),
+                }],
+            )
+            .unwrap();
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        let records = store.read_run_content_replacement_records(&run_id).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, "content-replacement");
+        assert_eq!(records[0].replacements[0].tool_use_id, "toolu-1");
+        let page = store
+            .read_run_content_replacement_records_page(
+                &run_id,
+                DurableJsonlPageOptions::tail(1).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(page.records[0].sequence, 2);
+        let sequence_text = fs::read_to_string(
+            root.join("runs")
+                .join("run_replacements")
+                .join("content-replacements.seq"),
+        )
+        .unwrap();
+        assert_eq!(sequence_text.trim(), "2");
+
+        let error = store
+            .append_run_content_replacement_record_next(
+                &run_id,
+                vec![ContentReplacementRecord {
+                    kind: "tool-result".to_owned(),
+                    tool_use_id: "toolu-secret".to_owned(),
+                    replacement: "api_key should not persist".to_owned(),
+                }],
+            )
+            .unwrap_err();
+        assert!(matches!(error, StoreError::SessionRecordSecretLikeText));
+        let sequence_text = fs::read_to_string(
+            root.join("runs")
+                .join("run_replacements")
+                .join("content-replacements.seq"),
+        )
+        .unwrap();
+        assert_eq!(sequence_text.trim(), "2");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn subagent_sidecars_reject_unsafe_agent_ids_and_secret_like_payloads() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run_subagents");
+
+        let path_error = store
+            .append_subagent_transcript_record_next(
+                &run_id,
+                "../escape",
+                None,
+                "subagent.started",
+                json!({}),
+            )
+            .unwrap_err();
+        assert!(matches!(path_error, StoreError::InvalidFileName(_)));
+
+        let secret_error = store
+            .append_subagent_transcript_record_next(
+                &run_id,
+                "agent-1",
+                None,
+                "subagent.message",
+                json!({"api_key": "redacted"}),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            secret_error,
+            StoreError::SessionRecordSecretLikeText
+        ));
+
+        let metadata = SubagentMetadata {
+            agent_type: "reviewer".to_owned(),
+            parent_agent_id: "executor".to_owned(),
+            parent_harness_id: "native".to_owned(),
+            invocation_kind: "spawn".to_owned(),
+            status: Some("running".to_owned()),
+            terminal_record_kind: None,
+            last_sequence: None,
+            error: None,
+            description: Some("contains password marker".to_owned()),
+            worktree_path: None,
+            transcript_ref: None,
+        };
+        let metadata_error = store
+            .write_subagent_metadata(&run_id, "agent-1", &metadata)
+            .unwrap_err();
+        assert!(matches!(
+            metadata_error,
+            StoreError::SessionRecordSecretLikeText
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn cache_bucket_usage_counts_real_files_and_bytes() {
         let root = temp_root();
         let store = RunStore::new(&root);
@@ -1251,6 +2610,57 @@ mod tests {
         assert_eq!(repo_index_usage.bytes, 4);
         assert_eq!(missing_usage.entries, 0);
         assert_eq!(missing_usage.bytes, 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cache_bucket_usage_stops_at_scan_limit() {
+        let root = temp_root();
+        let cache_dir = root.join("repo-index");
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::write(cache_dir.join("first.txt"), b"1234").unwrap();
+        fs::create_dir_all(cache_dir.join("empty-dir")).unwrap();
+        fs::write(cache_dir.join("second.txt"), b"5678").unwrap();
+
+        let usage = cache_bucket_usage_at_with_limit(&cache_dir, 2).unwrap();
+
+        assert_eq!(usage.scanned_entries, 2);
+        assert_eq!(usage.entry_scan_limit, 2);
+        assert!(usage.truncated);
+        assert!(usage.entries <= 2);
+        assert!(usage.bytes <= 8);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clear_disposable_caches_preserves_durable_store_data() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        store.ensure_local_layout().unwrap();
+
+        fs::write(root.join("repo-index").join("index.jsonl"), b"repo").unwrap();
+        fs::write(root.join("tmp").join("scratch.txt"), b"tmp").unwrap();
+        fs::write(root.join("logs").join("server.log"), b"log").unwrap();
+        store.write_blob(b"blob").unwrap();
+        store
+            .append_session_record("session-1", 1, "session.created", json!({}))
+            .unwrap();
+
+        let summary = store.clear_disposable_caches().unwrap();
+
+        assert_eq!(
+            summary.directories,
+            vec!["repo-index", "plugin-cache", "skill-cache", "tmp"]
+        );
+        assert_eq!(summary.entries, 2);
+        assert_eq!(summary.bytes, 7);
+        assert!(root.join("repo-index").exists());
+        assert!(root.join("tmp").exists());
+        assert!(!root.join("repo-index").join("index.jsonl").exists());
+        assert!(!root.join("tmp").join("scratch.txt").exists());
+        assert!(root.join("logs").join("server.log").exists());
+        assert!(root.join("sessions").join("session-1.jsonl").exists());
+        assert_eq!(store.cache_bucket_usage("blobs").unwrap().entries, 1);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1297,6 +2707,84 @@ mod tests {
             .write_artifact(&run_id, "bad*name.json", &json!({"bad": true}))
             .unwrap_err();
         assert!(matches!(wildcard_error, StoreError::InvalidFileName(_)));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn compaction_circuit_state_persists_failures_and_resets_on_success() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+
+        let first = store
+            .record_compaction_circuit_outcome("run-compact", 3, false)
+            .unwrap();
+        let second = store
+            .record_compaction_circuit_outcome("run-compact", 3, false)
+            .unwrap();
+        let third = store
+            .record_compaction_circuit_outcome("run-compact", 3, false)
+            .unwrap();
+
+        assert_eq!(first.consecutive_failures, 1);
+        assert_eq!(second.consecutive_failures, 2);
+        assert_eq!(third.consecutive_failures, 3);
+        assert!(third.circuit_breaker_open);
+        let persisted = store
+            .read_compaction_circuit_state("run-compact")
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.consecutive_failures, 3);
+        assert!(persisted.circuit_breaker_open);
+
+        let reset = store
+            .record_compaction_circuit_outcome("run-compact", 3, true)
+            .unwrap();
+        assert_eq!(reset.consecutive_failures, 0);
+        assert!(!reset.circuit_breaker_open);
+        let invalid = store
+            .record_compaction_circuit_outcome("../escape", 3, false)
+            .unwrap_err();
+        assert!(matches!(invalid, StoreError::InvalidFileName(_)));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn goal_state_json_roundtrips_deletes_and_rejects_unsafe_or_secret_like_state() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let state = json!({
+            "session_id": "session-1",
+            "objective": "Ship the goal runtime",
+            "status": "active",
+            "token_budget": 100,
+            "tokens_used": 5
+        });
+
+        assert!(store.read_goal_state_json("session-1").unwrap().is_none());
+        let reference = store.write_goal_state_json("session-1", &state).unwrap();
+        assert_eq!(reference, "goal://sessions/session-1.json");
+        assert_eq!(
+            store.read_goal_state_json("session-1").unwrap().unwrap(),
+            state
+        );
+        assert!(store.delete_goal_state("session-1").unwrap());
+        assert!(store.read_goal_state_json("session-1").unwrap().is_none());
+        assert!(!store.delete_goal_state("session-1").unwrap());
+
+        let invalid_write = store
+            .write_goal_state_json("../escape", &json!({"objective": "safe"}))
+            .unwrap_err();
+        let invalid_read = store.read_goal_state_json("../escape").unwrap_err();
+        let secret_write = store
+            .write_goal_state_json("session-secret", &json!({"objective": "api_key=abc"}))
+            .unwrap_err();
+
+        assert!(matches!(invalid_write, StoreError::InvalidFileName(_)));
+        assert!(matches!(invalid_read, StoreError::InvalidFileName(_)));
+        assert!(matches!(
+            secret_write,
+            StoreError::SessionRecordSecretLikeText
+        ));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1376,6 +2864,111 @@ mod tests {
         assert_eq!(loaded, b"same content");
         assert!(matches!(missing, StoreError::BlobNotFound(_)));
         assert!(matches!(invalid, StoreError::InvalidBlobDigest(_)));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn durable_read_limit_rejects_oversized_files() {
+        let root = temp_root();
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("oversized.jsonl");
+        fs::write(&path, "12345").unwrap();
+
+        let error = reject_file_over_read_limit(&path, 4).unwrap_err();
+
+        assert!(matches!(
+            error,
+            StoreError::DurableReadLimitExceeded {
+                bytes: 5,
+                max_bytes: 4,
+                ..
+            }
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn durable_json_sidecar_reads_reject_oversized_files() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run_oversized_sidecars");
+        let mut state = RunState::new(run_id.clone(), coder_core::WorkflowId::new("workflow"));
+        state.status = coder_core::RunStatus::Completed;
+        store.write_metadata(&state).unwrap();
+        store
+            .write_artifact(&run_id, "summary.json", &json!({"status": "ok"}))
+            .unwrap();
+        store
+            .write_checkpoint(&run_id, "resume.json", &json!({"step": 1}))
+            .unwrap();
+        store
+            .write_subagent_metadata(
+                &run_id,
+                "agent-1",
+                &SubagentMetadata {
+                    agent_type: "reviewer".to_owned(),
+                    parent_agent_id: "executor".to_owned(),
+                    parent_harness_id: "native".to_owned(),
+                    invocation_kind: "spawn".to_owned(),
+                    status: Some("running".to_owned()),
+                    terminal_record_kind: None,
+                    last_sequence: None,
+                    error: None,
+                    description: None,
+                    worktree_path: None,
+                    transcript_ref: None,
+                },
+            )
+            .unwrap();
+
+        let oversized_paths = [
+            root.join("runs")
+                .join("run_oversized_sidecars")
+                .join("metadata.json"),
+            root.join("runs")
+                .join("run_oversized_sidecars")
+                .join("artifacts")
+                .join("summary.json"),
+            root.join("runs")
+                .join("run_oversized_sidecars")
+                .join("checkpoints")
+                .join("resume.json"),
+            root.join("runs")
+                .join("run_oversized_sidecars")
+                .join("subagents")
+                .join("agent-agent-1.meta.json"),
+        ];
+        for path in &oversized_paths {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_len(MAX_DURABLE_READ_BYTES + 1)
+                .unwrap();
+        }
+
+        assert!(matches!(
+            store.read_metadata(&run_id).unwrap_err(),
+            StoreError::DurableReadLimitExceeded { .. }
+        ));
+        assert!(matches!(
+            store
+                .read_artifact_json(&run_id, "summary.json")
+                .unwrap_err(),
+            StoreError::DurableReadLimitExceeded { .. }
+        ));
+        assert!(matches!(
+            store
+                .read_checkpoint_json(&run_id, "resume.json")
+                .unwrap_err(),
+            StoreError::DurableReadLimitExceeded { .. }
+        ));
+        assert!(matches!(
+            store
+                .read_subagent_metadata(&run_id, "agent-1")
+                .unwrap_err(),
+            StoreError::DurableReadLimitExceeded { .. }
+        ));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1526,6 +3119,40 @@ mod tests {
     }
 
     #[test]
+    fn evidence_report_does_not_fail_on_cancelled_command_event() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run-1");
+        store
+            .append_event(
+                &run_id,
+                &CoderEvent::new(
+                    run_id.clone(),
+                    1,
+                    "command.failed",
+                    json!({
+                        "command": "powershell Start-Sleep -Seconds 30",
+                        "status": "cancelled",
+                        "passed": false,
+                        "returncode": 1,
+                        "timed_out": false
+                    }),
+                ),
+            )
+            .unwrap();
+
+        let report = store.build_evidence_report(&run_id).unwrap();
+
+        assert_eq!(report.status, ReportStatus::Completed);
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.contains("cancelled exit 1")));
+        assert!(report.blockers.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn evidence_report_includes_plan_context_from_run_started() {
         let root = temp_root();
         let store = RunStore::new(&root);
@@ -1556,7 +3183,7 @@ mod tests {
             .checks
             .iter()
             .any(|check| check == "plan_context: Update Planner loop"));
-        assert!(report
+        assert!(!report
             .checks
             .iter()
             .any(|check| check == "acceptance: final report cites plan context"));
@@ -1636,6 +3263,167 @@ mod tests {
             .summary
             .contains("Next steps: No next step was recorded."));
         assert!(!report.summary.contains("repo-evidence://"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn evidence_report_includes_completed_verification_events() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run-1");
+        store
+            .append_event(
+                &run_id,
+                &CoderEvent::new(
+                    run_id.clone(),
+                    1,
+                    "verification.completed",
+                    json!({
+                        "status": "completed",
+                        "summary": "browser gameplay passed",
+                        "evidence": {"total_refs": 1}
+                    }),
+                )
+                .with_ref("browser_validation", "blob://sha256/browser-proof"),
+            )
+            .unwrap();
+
+        let report = store.build_evidence_report(&run_id).unwrap();
+
+        assert_eq!(report.status, ReportStatus::Completed);
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check == "verification: browser gameplay passed"));
+        assert!(report
+            .summary
+            .contains("Verification: verification: browser gameplay passed"));
+        assert!(report.evidence_refs.iter().any(|reference| {
+            reference.kind == "browser_validation"
+                && reference.reference == "blob://sha256/browser-proof"
+        }));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn evidence_report_expands_verification_check_payloads() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run-1");
+        store
+            .append_event(
+                &run_id,
+                &CoderEvent::new(
+                    run_id.clone(),
+                    1,
+                    "verification.completed",
+                    json!({
+                        "status": "completed",
+                        "summary": "browser verification passed",
+                        "checks": [
+                            {
+                                "name": "snake_gameplay_browser.restart_score",
+                                "status": "passed",
+                                "detail": "restart reset visible score"
+                            }
+                        ]
+                    }),
+                ),
+            )
+            .unwrap();
+
+        let report = store.build_evidence_report(&run_id).unwrap();
+
+        assert!(report.checks.iter().any(|check| {
+            check
+                == "verification: snake_gameplay_browser.restart_score passed - restart reset visible score"
+        }));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn evidence_report_blocks_on_missing_required_verification_evidence() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run-1");
+        store
+            .append_event(
+                &run_id,
+                &CoderEvent::new(
+                    run_id.clone(),
+                    1,
+                    "verification.failed",
+                    json!({
+                        "status": "failed",
+                        "reason": "verification requires evidence refs before completion, but the backend returned none",
+                        "evidence": {"total_refs": 0}
+                    }),
+                ),
+            )
+            .unwrap();
+
+        let report = store.build_evidence_report(&run_id).unwrap();
+
+        assert_eq!(report.status, ReportStatus::Blocked);
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.contains("verification: failed")));
+        assert!(report
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("Verification blocked")));
+        assert!(report
+            .summary
+            .contains("Remaining risks: Verification blocked"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn evidence_report_clears_repaired_verification_failure() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run-1");
+        store
+            .append_event(
+                &run_id,
+                &CoderEvent::new(
+                    run_id.clone(),
+                    1,
+                    "verification.failed",
+                    json!({
+                        "status": "blocked",
+                        "reason": "browser_dynamic.playwright missing"
+                    }),
+                ),
+            )
+            .unwrap();
+        store
+            .append_event(
+                &run_id,
+                &CoderEvent::new(
+                    run_id.clone(),
+                    2,
+                    "verification.completed",
+                    json!({
+                        "status": "completed",
+                        "summary": "browser verification passed"
+                    }),
+                ),
+            )
+            .unwrap();
+
+        let report = store.build_evidence_report(&run_id).unwrap();
+
+        assert_eq!(report.status, ReportStatus::Completed);
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.contains("browser_dynamic.playwright missing")));
+        assert!(report.blockers.is_empty());
+        assert!(report
+            .summary
+            .contains("Remaining risks: No remaining blocker or risk was recorded."));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2055,9 +3843,70 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn repo_evidence_reads_reject_oversized_index_and_payload() {
+        let root = temp_root();
+        let store = RunStore::new(&root);
+        let run_id = RunId::from_string("run-1");
+        let reference = store
+            .write_repo_evidence(
+                &run_id,
+                RepoEvidenceKind::RepoRead,
+                "repo",
+                Vec::new(),
+                "read",
+                json!({"snippet": "safe"}),
+            )
+            .unwrap();
+        let payload_path = PathBuf::from(&reference.payload_path);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&payload_path)
+            .unwrap()
+            .set_len(MAX_DURABLE_READ_BYTES + 1)
+            .unwrap();
+
+        let payload_error = store.read_repo_evidence(&reference.ref_id).unwrap_err();
+        assert!(matches!(
+            payload_error,
+            StoreError::DurableReadLimitExceeded { .. }
+        ));
+
+        fs::write(&payload_path, "{}").unwrap();
+        let index_path = root
+            .join("runs")
+            .join("run-1")
+            .join("repo_evidence")
+            .join("index.jsonl");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&index_path)
+            .unwrap()
+            .set_len(MAX_DURABLE_READ_BYTES + 1)
+            .unwrap();
+
+        let read_index_error = store.read_repo_evidence(&reference.ref_id).unwrap_err();
+        assert!(matches!(
+            read_index_error,
+            StoreError::DurableReadLimitExceeded { .. }
+        ));
+        let list_index_error = store.list_repo_evidence(&run_id).unwrap_err();
+        assert!(matches!(
+            list_index_error,
+            StoreError::DurableReadLimitExceeded { .. }
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn temp_root() -> PathBuf {
         static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        std::env::temp_dir().join(format!("coder-store-{}-{}", std::process::id(), id))
+        test_tmp_root().join(format!("coder-store-{}-{}", std::process::id(), id))
+    }
+
+    fn test_tmp_root() -> PathBuf {
+        std::env::var_os("CODER_TEST_TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
     }
 }

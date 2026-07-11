@@ -11,13 +11,14 @@ coder-config.workspace = true
 coder-core.workspace = true
 coder-events.workspace = true
 coder-harness.workspace = true
-coder-openhands.workspace = true
 coder-store.workspace = true
 coder-tools.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
 time.workspace = true
+tokio.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tokio.workspace = true

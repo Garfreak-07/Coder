@@ -1,13 +1,13 @@
 {
   "id": "default-planner-led",
-  "version": "0.4",
-  "name": "Planner-led Agent Workflow",
-  "description": "Planner decides. Executor executes, verifies, and returns execution evidence. Runtime graph details stay hidden.",
+  "version": "0.5",
+  "name": "Verified Execution Workflow",
+  "description": "The approved chat plan goes to the executor, verification supplies evidence, and the workflow Planner makes a bounded finish-or-improve decision.",
   "primary_planner_id": "planner",
   "agents": [
     {
       "id": "planner",
-      "name": "Planner Agent",
+      "name": "Chat Planner Agent",
       "role": "planner",
       "model_tier": "best",
       "can_talk_to_human": true,
@@ -18,6 +18,19 @@
         "judge_risk",
         "make_next_decision",
         "round_summarize"
+      ]
+    },
+    {
+      "id": "workflow-planner",
+      "name": "Workflow Planner Agent",
+      "role": "planner",
+      "model_tier": "best",
+      "can_talk_to_human": false,
+      "capabilities": [
+        "read_execution_evidence",
+        "read_verification_result",
+        "decide_continue_or_finish",
+        "route_repair"
       ]
     },
     {
@@ -33,17 +46,36 @@
         "optional_check_command",
         "return_execution_result"
       ]
+    },
+    {
+      "id": "verifier",
+      "name": "Verifier Agent",
+      "role": "verifier",
+      "model_tier": "standard",
+      "can_talk_to_human": false,
+      "capabilities": [
+        "read_outputs",
+        "run_safe_checks",
+        "return_verification_result"
+      ]
     }
   ],
   "edges": [
-    { "from": "planner", "to": "executor" },
-    { "from": "executor", "to": "planner", "loop": true }
+    { "from": "executor", "to": "verifier", "on": "completed" },
+    { "from": "executor", "to": "verifier", "on": "blocked" },
+    { "from": "verifier", "to": "workflow-planner", "on": "completed" },
+    { "from": "verifier", "to": "workflow-planner", "on": "failed" },
+    { "from": "verifier", "to": "workflow-planner", "on": "blocked" },
+    { "from": "workflow-planner", "to": "executor", "on": "ready" },
+    { "from": "workflow-planner", "to": "executor", "on": "continue", "loop": true }
   ],
   "loop_policy": { "max_auto_rounds": 3, "user_can_change": true },
   "ui": {
     "layout": {
       "planner": { "x": 60, "y": 120 },
-      "executor": { "x": 360, "y": 120 }
+      "workflow-planner": { "x": 300, "y": 120 },
+      "executor": { "x": 560, "y": 120 },
+      "verifier": { "x": 820, "y": 120 }
     }
   }
 }

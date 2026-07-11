@@ -1,36 +1,86 @@
 # Capability Boundary Matrix
 
-External capabilities must enter Coder through a harness, a registered tool, and
-the existing approval/evidence pipeline. This matrix is the audit record for the
-v1 boundary pass.
+This matrix defines which Coder surface owns each capability, which permission
+controls it, and what evidence should be produced.
 
-| Capability | Tool name / entry point | Harness permission | Approval behavior | Evidence emitted | Timeline item |
-| --- | --- | --- | --- | --- | --- |
-| MCP tool calls | `mcp:{server_id}:{tool_name}` | MCP server manifest + explicit approval | MCP calls are blocked until approved; unknown tools require approval before rejection | `mcp_tool` event with blob refs for large output | `tool_call` / `approval` |
-| Skills | `skill.lifecycle`, `skill.auto_update` | Skill manifest side-effect policy | External-effect skills must require preview; auto-update is limited to official low-risk skills | skill summary / validation report | `executor_step` |
-| Plugin backend | `plugin:{operation}:{risk}` | Plugin manifest capability policy | Unknown, medium/high-risk, permissioned, or external-effect operations require approval | plugin validation / extension policy result | `tool_call` / `approval` |
-| Commands | `run_command_sandbox` | `run_commands` | Model or risky commands emit `approval.requested`; approved commands run bounded in repo cwd | `command_evidence` repo evidence and command events | `command_execution` / `approval` |
-| Patch preview | `propose_patch` | `write_files` | Preview is read-only; unsafe patch paths are rejected | `repo_evidence` patch preview | `file_change` |
-| Patch apply | `apply_patch_sandbox` | `write_files` | Model patch apply requires approval before writing | `repo_evidence + patch_evidence` and patch events | `file_change` / `approval` |
-| Repo find/search | `search_files` | `read_files` | Allowed inside assigned harness; sensitive/runtime dirs are skipped | `repo_evidence` | `tool_call` |
-| Repo read | `read_file` | `read_files` | Allowed inside assigned harness; sensitive, binary, oversized, and escaping paths are rejected | `repo_evidence` | `tool_call` |
-| Git status/diff | `inspect_git_diff` | `read_files` | Read-only; output is bounded | `repo_evidence` | `tool_call` |
-| OpenHands executor | `openhands-code-edit` harness | `write_files`, `run_commands`, `network`, `secrets` as configured | Configured harness uses `ask` for side effects; raw events are normalized and secret-redacted | OpenHands event refs and blob-backed raw event evidence | `reasoning_summary`, `executor_step`, `tool_call`, `file_change` |
-| Network | Harness backend only | `network` | Default is `deny`; OpenHands sample uses `ask`; no standalone network page/tool | backend-specific evidence or blocked status | `executor_step` / `approval` |
-| Secrets | Provider settings / harness backend | `secrets` | Default is `deny`; provider keys are in-memory or env fallback and are never returned in full | redacted provider status; no JSONL plaintext keys | setup/status only, no raw secret timeline |
-| Git commit | no direct public tool | `git_commit` | Default is `deny`; must be added as a registered harness tool before use | none today | none today |
-| Git push | no direct public tool | `git_push` | Default is `deny`; must be added as a registered harness tool before use | none today | none today |
-| Deploy | no direct public tool | `deploy` | Default is `deny`; must be added as a registered harness tool before use | none today | none today |
+| Capability | Owner | Permission | Boundary | Evidence |
+| --- | --- | --- | --- | --- |
+| Planner Chat | `planner-conversation` harness | read-only | No file writes, commands, network, secrets, commits, pushes, or deploys; remains available during Start Work | session records, revision, readiness state, provider token trace |
+| Active-run conversation control | Planner API local router | none | Status, cancel, pure confirmation, and queued guidance do not call the Planner model | local-control session record, run control/guidance event |
+| Workflow control | `workflow-planner` harness | read-only | Invoked only after verifier failure/blocking; chooses continue or external-state blocked from existing evidence | workflow decision events, final report inputs |
+| Repo search/read | native tools | `read_files` | Path normalization, bounded reads, max result counts | repo evidence refs |
+| Git status/diff | native tools | `read_files` | Read-only git inspection | repo evidence refs |
+| Command preview | native tools | `run_commands` | Command shape can be inspected without execution | tool event |
+| Command run | native tools | `run_commands` | Approval and sandbox policy before execution | command evidence, stdout/stderr refs, exit code |
+| Background command | native tools | `run_commands` | Long command returns task id, output is tailed and cancellable | background-task refs and output refs |
+| Exact text edit | native model tool | `write_files` | Existing UTF-8 file only; exact `old_string`; unique match unless `replace_all=true`; repo-relative and sensitive-path checks | file-write event and repo evidence ref |
+| Tool hook | shared model-tool pipeline | underlying `run_commands`/`network` policy; prompt and agent hooks use provider settings | Command, webhook, prompt, and isolated read-only agent hooks run from the immutable run config snapshot; async rewake is agent-scoped | hook phase events, async hook status, rewake notification/delivery events |
+| Patch preview | native tools | `write_files` | Patch is parsed and bounded before apply | patch preview evidence |
+| Patch apply | native tools | `write_files` | Approval before mutation when policy is `ask` | patch apply evidence and changeset |
+| Subagent | native subagent runtime | `child_harness_permissions` | Child inherits only allowed tools and scoped permissions | sidechain transcript, task status |
+| Skill | native skill tool | selected tool permissions | Skill modifiers can grant scoped next-turn read/command/model/effort context, never overriding deny | skill invocation event and modifier attachment |
+| Browser verification | `browser-verification` harness | read-only plus verifier command runtime | Uses Coder-owned verifier runtime paths | verifier result and browser evidence |
+| Provider call | provider runtime | `secrets`, provider settings | API key redaction, proxy isolation, response caps | provider status/test trace |
+| Run pause/resume/cancel | active run watch channel | run ownership | Signals only active in-process runs; inactive pause/resume conflicts, cancellation drops the active future | run control event and terminal report |
+| Memory write | Planner-owned memory APIs | planner/write scope | Long-term writes are proposed/confirmed, not executor-owned | memory proposal/confirmation records |
+| Publish/commit/push/deploy | none in default executor | `publish_external`, `git_commit`, `git_push`, `deploy` | Denied by default | blocked permission event |
 
-## Runtime Rules
+## Permission Rules
 
-- Server tool endpoints call the registered tool boundary before execution.
-- Registered tool entries expose `required_permission`, `approval_behavior`,
-  `evidence_emitted`, and `timeline_item` through `/api/v3/harness/tools`.
-- Low-risk read tools are allowed only inside their assigned harness and still
-  emit bounded evidence.
-- Write, command, network, secret, publish, commit, push, and deploy abilities
-  must not appear as standalone UI actions unless they are backed by a registered
-  harness tool and approval behavior.
-- Public timeline items are projections over events and evidence. They must not
-  expose raw backend payloads or provider secrets.
+Permission decisions are `allow`, `ask`, or `deny`. Deny always wins. Temporary
+session grants from skill modifiers, hooks, or approvals are scoped and must not
+expand beyond the active harness tool pool.
+
+`Agent(type)` rules are content-aware. Denying one subagent type does not deny
+the whole subagent tool unless the broader tool rule also denies it.
+
+## Evidence Rules
+
+An executor summary is valid only when it points to evidence:
+
+- command id, exit code, and bounded output
+- patch preview/apply evidence
+- repo evidence ref
+- blob/artifact/checkpoint ref
+- background task status
+- subagent sidechain status
+- verifier result
+
+Raw provider or tool payloads must be redacted before persistence. Large values
+should be stored as blobs with bounded previews.
+
+## Timeline Projection
+
+The public timeline should show:
+
+- planner readiness and Start Work boundary
+- executor tool calls and outcomes
+- command progress and background handoff
+- file changes and changesets
+- verifier checks and repair signals
+- final report status
+
+Planner provider traces and Executor provider events retain numeric token usage
+and cache-read metrics. Secret-like string values remain redacted; numeric
+metrics must not be removed by secret redaction.
+
+It should not expose secrets, raw provider request bodies, or unbounded
+transcripts.
+
+## Default Harness Posture
+
+`native-code-edit` defaults to:
+
+- read files: allow
+- write files: ask
+- run commands: ask
+- child harness permissions: ask
+- network: ask
+- secrets: ask
+- publish external: deny
+- git commit: deny
+- git push: deny
+- deploy: deny
+
+This keeps the executor useful while requiring an explicit boundary crossing for
+side effects.

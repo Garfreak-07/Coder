@@ -64,9 +64,21 @@ export function ProviderSettingsPanel({
           />
         </label>
         <label>
+          Provider Network
+          <select
+            value={form.proxy_mode}
+            onChange={(event) => onChange({ proxy_mode: event.target.value })}
+          >
+            <option value="direct">Direct</option>
+            <option value="environment">Current environment</option>
+            <option value="explicit">Explicit proxy</option>
+          </select>
+        </label>
+        <label>
           Provider Proxy URL
           <input
             placeholder="Optional, e.g. http://127.0.0.1:7890"
+            disabled={form.proxy_mode !== "explicit"}
             value={form.proxy_url}
             onChange={(event) => onChange({ proxy_url: event.target.value })}
           />
@@ -97,7 +109,7 @@ export function ProviderSettingsPanel({
             <span>{currentStatus.credential_source}</span>
             <span>{currentStatus.configured ? "configured" : "missing"}</span>
             <span>{currentStatus.base_url ?? "default URL"}</span>
-            <span>{currentStatus.proxy_url ? "proxy configured" : "direct network"}</span>
+            <span>{providerNetworkLabel(currentStatus.proxy_mode, currentStatus.proxy_url)}</span>
           </div>
         )}
         {testResult && (
@@ -121,4 +133,14 @@ export function ProviderSettingsPanel({
       </div>
     </div>
   );
+}
+
+function providerNetworkLabel(mode: string, proxyUrl?: string | null): string {
+  if (mode === "explicit") {
+    return proxyUrl ? "explicit proxy" : "explicit proxy missing URL";
+  }
+  if (mode === "environment") {
+    return proxyUrl ? "environment proxy" : "environment direct";
+  }
+  return "direct network";
 }

@@ -1,6 +1,7 @@
 import type {
   AgentModelTier,
   AgentWorkflowAgent,
+  AgentWorkflowEdge,
   AgentWorkflowRole,
   AgentWorkflowSpec,
   AgentWorkflowValidationIssue,
@@ -45,6 +46,7 @@ const readonlyPermissions: RustPermissionPolicy = {
   read_files: "allow",
   write_files: "deny",
   run_commands: "deny",
+  child_harness_permissions: "deny",
   network: "deny",
   secrets: "deny",
   publish_external: "deny",
@@ -57,6 +59,7 @@ const taskPermissions: RustPermissionPolicy = {
   read_files: "allow",
   write_files: "ask",
   run_commands: "ask",
+  child_harness_permissions: "ask",
   network: "ask",
   secrets: "ask",
   publish_external: "deny",
@@ -93,8 +96,11 @@ export function legacyCanvasToWorkflowSpec(agentWorkflow: AgentWorkflowSpec): Ru
     agents[agent.id] = rustAgentSpecFor(agent, modelId);
   }
 
-  const nodes = workflow.agents.map((agent) => {
-    const mode = agent.id === workflow.primary_planner_id ? "planning_chat" : "task_execution";
+  const executionAgents = workflow.agents
+    .filter((agent) => agent.id !== workflow.primary_planner_id)
+    .sort((left, right) => executionAgentPriority(left) - executionAgentPriority(right));
+  const nodes = executionAgents.map((agent) => {
+    const mode: HarnessMode = agent.role === "planner" ? "workflow_supervisor" : "task_execution";
     const binding = harnessBindingForAgent(workflow, agent.id, mode);
     harnesses[binding.profile_id] = rustHarnessSpecFor(binding, mode);
     return {
@@ -109,18 +115,28 @@ export function legacyCanvasToWorkflowSpec(agentWorkflow: AgentWorkflowSpec): Ru
     harnesses[planningChatBinding.profile_id] = rustHarnessSpecFor(planningChatBinding, "planning_chat");
   }
 
+  const executionNodeIds = new Set(nodes.map((node) => node.id));
+  const finalReportAgent =
+    executionAgents.find((agent) => agent.id.toLowerCase().includes("verifier"))?.id ??
+    executionAgents.at(-1)?.id ??
+    workflow.primary_planner_id;
   const rustWorkflow: RustWorkflowSpec = {
     name: workflow.name,
     max_rounds: workflow.loop_policy.max_auto_rounds,
+    ...(workflow.loop_policy.token_budget != null
+      ? { token_budget: workflow.loop_policy.token_budget }
+      : {}),
     nodes,
-    edges: workflow.edges.map((edge) => ({
-      from: edge.from,
-      to: edge.to,
-      on: transitionForLegacyEdge(workflow, edge.from, edge.to)
-    })),
+    edges: workflow.edges
+      .filter((edge) => executionNodeIds.has(edge.from) && executionNodeIds.has(edge.to))
+      .map((edge) => ({
+        from: edge.from,
+        to: edge.to,
+        on: transitionForLegacyEdge(workflow, edge)
+      })),
     stop: {
       on_status: ["completed", "blocked", "failed"],
-      final_report_agent: workflow.primary_planner_id
+      final_report_agent: finalReportAgent
     }
   };
 
@@ -158,18 +174,36 @@ export function workflowSpecToLegacyCanvas(input: RustProjectConfig | RustWorkfl
   }
 
   const legacy = exportEnvelope?.legacy_agent_workflow;
+  const workflowAgentIds = new Set(workflow.nodes.map((node) => node.agent));
+  const detachedPlannerId = Object.entries(config.agents).find(
+    ([agentId, agent]) => agent.role === "planner" && !workflowAgentIds.has(agentId)
+  )?.[0];
   const primaryPlannerId =
     legacy?.primary_planner_id ??
+    detachedPlannerId ??
     workflow.nodes.find((node) => config.agents[node.agent]?.role === "planner")?.id ??
     workflow.nodes[0]?.id ??
     "planner";
-  const nodes = workflow.nodes.length > 0 ? workflow.nodes : [{ id: primaryPlannerId, agent: primaryPlannerId, harness: "review-only" }];
+  const nodes = workflow.nodes.length > 0
+    ? workflow.nodes
+    : [{ id: "executor", agent: "executor", harness: "review-only" }];
 
-  const agents = nodes.map((node) => {
+  const executionAgents = nodes.map((node) => {
     const rustAgent = config.agents[node.agent] ?? config.agents[node.id];
     const previous = legacy?.agents.find((agent) => agent.id === node.id || agent.id === node.agent);
     return legacyAgentForNode(node.id, rustAgent, previous, node.id === primaryPlannerId);
   });
+  const primaryPlanner = nodes.some((node) => node.id === primaryPlannerId)
+    ? []
+    : [
+        legacyAgentForNode(
+          primaryPlannerId,
+          config.agents[primaryPlannerId],
+          legacy?.agents.find((agent) => agent.id === primaryPlannerId),
+          true
+        )
+      ];
+  const agents = [...primaryPlanner, ...executionAgents];
 
   return normalizeAgentWorkflow({
     id: selectedWorkflowId,
@@ -181,11 +215,13 @@ export function workflowSpecToLegacyCanvas(input: RustProjectConfig | RustWorkfl
     edges: workflow.edges.map((edge) => ({
       from: edge.from,
       to: edge.to,
-      ...(edge.to === primaryPlannerId ? { loop: true } : {})
+      on: edge.on,
+      ...(edge.to === primaryPlannerId || edge.on === "continue" ? { loop: true } : {})
     })),
-    harness_bindings: legacy?.harness_bindings ?? harnessBindingsForWorkflow(nodes, primaryPlannerId),
+    harness_bindings: legacy?.harness_bindings ?? harnessBindingsForWorkflow(nodes, primaryPlannerId, agents),
     loop_policy: {
       max_auto_rounds: workflow.max_rounds || legacy?.loop_policy.max_auto_rounds || 3,
+      token_budget: workflow.token_budget ?? legacy?.loop_policy.token_budget ?? null,
       user_can_change: true
     },
     ui: exportEnvelope?.ui ?? legacy?.ui ?? { layout: {} }
@@ -196,6 +232,9 @@ export function workflowExportToProjectConfig(input: RustProjectConfig | RustWor
   if (isRustWorkflowExport(input)) {
     return {
       version: 1,
+      disable_all_hooks: input.disable_all_hooks,
+      disableAllHooks: input.disableAllHooks,
+      hooks: input.hooks,
       models: input.models,
       agents: input.agents,
       harnesses: input.harnesses,
@@ -232,6 +271,9 @@ export function validateWorkflowSpec(config: RustProjectConfig, workflowId: stri
   if (workflow.max_rounds < 1 || workflow.max_rounds > 20) {
     issues.push(issue("error", "workflow_max_rounds_out_of_range", "Max rounds must be between 1 and 20.", "workflow", workflowId));
   }
+  if (workflow.token_budget != null && (!Number.isSafeInteger(workflow.token_budget) || workflow.token_budget <= 0)) {
+    issues.push(issue("error", "workflow_token_budget_invalid", "Token budget must be a positive integer.", "workflow", workflowId));
+  }
   if (workflow.nodes.length === 0) {
     issues.push(issue("error", "workflow_nodes_empty", "Workflow must contain at least one agent.", "workflow", workflowId));
   }
@@ -253,12 +295,6 @@ export function validateWorkflowSpec(config: RustProjectConfig, workflowId: stri
   for (const [agentId, agent] of Object.entries(config.agents)) {
     if (!config.models[agent.model]) {
       issues.push(issue("error", "agent_model_not_found", `Agent '${agentId}' references missing model '${agent.model}'.`, "agent", agentId));
-    }
-  }
-
-  for (const [harnessId, harness] of Object.entries(config.harnesses)) {
-    if (harness.backend === "openhands" && !harness.openhands) {
-      issues.push(issue("error", "openhands_config_missing", `OpenHands harness '${harnessId}' needs server config.`, "harness", harnessId));
     }
   }
 
@@ -331,21 +367,18 @@ function rustAgentSpecFor(agent: AgentWorkflowAgent, model: string): RustAgentSp
 
 function rustHarnessSpecFor(binding: HarnessModeBinding, mode: HarnessMode): RustHarnessSpec {
   const backend = backendForBinding(binding, mode);
-  const taskMode = mode === "task_execution";
+  const taskMode = mode === "task_execution" && backend === "native-rust";
+  const browserMode = backend === "browser-verifier";
   const plannerChatMode = mode === "planning_chat";
   return {
     backend,
-    openhands:
-      backend === "openhands"
-        ? {
-            server_url: "http://127.0.0.1:8000",
-            session_api_key_env: "SESSION_API_KEY",
-            workspace_mode: "local"
-          }
-        : null,
-    tools: toolsForHarness(backend, mode),
-    permissions: taskMode ? { ...taskPermissions } : { ...readonlyPermissions },
-    memory: taskMode
+    tools: toolsForHarness(mode, backend),
+    permissions: taskMode
+      ? { ...taskPermissions }
+      : browserMode
+        ? { ...readonlyPermissions, run_commands: "allow" }
+        : { ...readonlyPermissions },
+    memory: taskMode || browserMode
       ? {
           read: ["workflow", "run"],
           write: ["run"]
@@ -360,29 +393,50 @@ function rustHarnessSpecFor(binding: HarnessModeBinding, mode: HarnessMode): Rus
           write: ["workflow", "run"]
         },
     verification: {
-      require_evidence: taskMode,
-      allowed_checks: taskMode ? ["cargo test", "npm run build"] : []
+      require_evidence: taskMode || browserMode,
+      allowed_checks: taskMode ? ["cargo test", "npm run build"] : browserMode ? ["auto"] : []
     }
   };
 }
 
-function toolsForHarness(backend: string, mode: HarnessMode): string[] {
-  if (backend === "openhands" && mode === "task_execution") {
-    return ["terminal", "file_editor", "task_tracker"];
-  }
+function toolsForHarness(mode: HarnessMode, backend: string): string[] {
   if (mode === "planning_chat") {
     return ["memory_read", "knowledge_retrieve", "repo_search", "read_file", "git_diff"];
   }
+  if (backend === "browser-verifier") {
+    return ["browser_static", "gameplay_static", "browser_dynamic", "gameplay_browser"];
+  }
   if (mode === "task_execution") {
-    return ["repo_search", "read_file", "git_diff", "apply_patch", "run_command"];
+    return [
+      "repo_find_files",
+      "repo_search_text",
+      "repo_read_file",
+      "repo_read_file_range",
+      "git_status",
+      "git_diff",
+      "agent_subagent",
+      "read_subagent_status",
+      "cancel_subagent_background",
+      "command_preview",
+      "command_run",
+      "command_background",
+      "read_command_output",
+      "cancel_command_background",
+      "patch_preview",
+      "patch_apply",
+      "Skill"
+    ];
   }
   return ["repo_search", "read_file", "git_diff"];
 }
 
 function backendForBinding(binding: HarnessModeBinding, mode: HarnessMode): string {
   if (mode === "planning_chat") return "planner-model";
-  const marker = `${binding.profile_id} ${binding.provider_id ?? ""}`.toLowerCase();
-  if (marker.includes("openhands")) return "openhands";
+  const profileId = binding.profile_id.toLowerCase();
+  if (mode === "workflow_supervisor" || profileId.includes("workflow-planner")) {
+    return "planner-model";
+  }
+  if (profileId.includes("browser")) return "browser-verifier";
   return "native-rust";
 }
 
@@ -392,16 +446,18 @@ function harnessBindingForAgent(workflow: AgentWorkflowSpec, agentId: string, mo
   const binding = workflow.harness_bindings?.[mode];
   if (binding?.profile_id) return binding;
   return {
-    profile_id: mode === "planning_chat" ? "planner-conversation" : mode === "task_execution" ? "openhands-task-executor-default" : "openhands-workflow-supervisor-default"
+    profile_id: mode === "planning_chat" ? "planner-conversation" : mode === "task_execution" ? "native-code-edit" : "workflow-planner"
   };
 }
 
 function harnessBindingsForWorkflow(
   nodes: Array<{ id: string; agent: string; harness: string }>,
-  primaryPlannerId: string
+  primaryPlannerId: string,
+  agents: AgentWorkflowAgent[]
 ): NonNullable<AgentWorkflowSpec["harness_bindings"]> {
-  const primaryHarness = nodes.find((node) => node.id === primaryPlannerId)?.harness ?? "planner-conversation";
-  const taskHarness = nodes.find((node) => node.id !== primaryPlannerId)?.harness ?? "openhands-task-executor-default";
+  const roleById = new Map(agents.map((agent) => [agent.id, agent.role]));
+  const primaryHarness = nodes.find((node) => roleById.get(node.id) === "planner")?.harness ?? "workflow-planner";
+  const taskHarness = nodes.find((node) => roleById.get(node.id) !== "planner")?.harness ?? "native-code-edit";
   return {
     planning_chat: { profile_id: "planner-conversation" },
     workflow_supervisor: { profile_id: primaryHarness },
@@ -410,7 +466,9 @@ function harnessBindingsForWorkflow(
       nodes.map((node) => [
         node.id,
         {
-          [node.id === primaryPlannerId ? "workflow_supervisor" : "task_execution"]: {
+          [roleById.get(node.id) === "planner" && node.id !== primaryPlannerId
+            ? "workflow_supervisor"
+            : "task_execution"]: {
             profile_id: node.harness
           }
         }
@@ -419,9 +477,9 @@ function harnessBindingsForWorkflow(
   };
 }
 
-function transitionForLegacyEdge(workflow: AgentWorkflowSpec, from: string, to: string): string {
-  const edge = workflow.edges.find((candidate) => candidate.from === from && candidate.to === to);
-  if (edge?.handoff === "execution_result" || edge?.loop || to === workflow.primary_planner_id) return "completed";
+function transitionForLegacyEdge(workflow: AgentWorkflowSpec, edge: AgentWorkflowEdge): string {
+  if (edge?.on?.trim()) return edge.on.trim();
+  if (edge?.handoff === "execution_result" || edge?.loop || edge.to === workflow.primary_planner_id) return "completed";
   if (edge?.handoff === "planner_decision" || edge?.handoff === "round_summary") return "completed";
   return "ready";
 }
@@ -440,7 +498,7 @@ function legacyAgentForNode(
     role_card: previous?.role_card ?? (role === "executor" ? "executor" : undefined),
     purpose: previous?.purpose ?? rustAgent?.system ?? "",
     model_tier: previous?.model_tier ?? tierFromModelRef(rustAgent?.model, role),
-    can_talk_to_human: previous?.can_talk_to_human ?? role === "planner",
+    can_talk_to_human: previous?.can_talk_to_human ?? primary,
     capabilities: previous?.capabilities ?? (role === "planner" ? plannerCapabilities : executorCapabilities),
     runtime_profile_id: previous?.runtime_profile_id,
     skill_pack_ids: [...(previous?.skill_pack_ids ?? [])],
@@ -458,6 +516,12 @@ function displayNameForAgent(id: string, role: AgentWorkflowRole): string {
   if (role === "planner") return "Planner";
   if (role === "executor") return "Executor";
   return id;
+}
+
+function executionAgentPriority(agent: AgentWorkflowAgent): number {
+  if (agent.id.toLowerCase().includes("verifier")) return 1;
+  if (agent.role === "planner") return 2;
+  return 0;
 }
 
 function modelRefForTier(tier: AgentModelTier): string {
