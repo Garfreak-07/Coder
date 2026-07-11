@@ -58,8 +58,8 @@ import {
 import {
   isRustProjectConfig,
   isRustWorkflowExport,
-  legacyCanvasToWorkflowExport,
-  legacyCanvasToWorkflowSpec,
+  canvasToWorkflowExport,
+  canvasToWorkflowSpec,
   parseWorkflowImport,
   validateRustCanvasConfig,
   workflowExportToProjectConfig
@@ -386,7 +386,7 @@ export function App() {
 
   function exportWorkflow() {
     const workflow = normalizeAgentWorkflow(agentWorkflow);
-    const exported = legacyCanvasToWorkflowExport(workflow);
+    const exported = canvasToWorkflowExport(workflow);
     const validation = validateRustCanvasConfig(exported, exported.workflow_id);
     setAgentWorkflowValidation(validation);
     downloadJson(`${workflow.id || "agent-workflow"}.coder-workflow.json`, exported);
@@ -407,7 +407,7 @@ export function App() {
         const rustConfig =
           isRustWorkflowExport(raw) || isRustProjectConfig(raw)
             ? workflowExportToProjectConfig(raw)
-            : legacyCanvasToWorkflowSpec(imported);
+            : canvasToWorkflowSpec(imported);
         const rustWorkflowId =
           isRustWorkflowExport(raw)
             ? raw.workflow_id

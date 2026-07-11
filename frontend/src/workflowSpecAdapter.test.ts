@@ -13,12 +13,12 @@ import {
   rustRunEventsToRunEventsPage
 } from "./rustApiAdapter";
 import {
-  legacyCanvasToWorkflowExport,
-  legacyCanvasToWorkflowSpec,
+  canvasToWorkflowExport,
+  canvasToWorkflowSpec,
   parseWorkflowImport,
   validateWorkflowSpec,
   workflowExportToProjectConfig,
-  workflowSpecToLegacyCanvas
+  workflowSpecToCanvas
 } from "./workflowSpecAdapter";
 
 const assert = {
@@ -42,9 +42,6 @@ const assert = {
 };
 
 const tests: Array<{ name: string; run: () => void | Promise<void> }> = [];
-const removedExternalHarnessLabel = "Open" + "Hands";
-const removedExternalHarnessRoute = "/api/v3/" + "open" + "hands";
-const removedExternalBackendEvent = ["backend", "open" + "hands"].join(".");
 
 function test(name: string, run: () => void | Promise<void>) {
   tests.push({ name, run });
@@ -62,8 +59,8 @@ async function runTests() {
   }
 }
 
-test("exports legacy planner/executor canvas to Rust workflow config", () => {
-  const config = legacyCanvasToWorkflowSpec(defaultPlannerLedAgentWorkflow);
+test("exports planner/executor canvas to Rust workflow config", () => {
+  const config = canvasToWorkflowSpec(defaultPlannerLedAgentWorkflow);
   const workflow = config.workflows["default-planner-led"];
 
   assert.equal(config.version, 1);
@@ -75,9 +72,9 @@ test("exports legacy planner/executor canvas to Rust workflow config", () => {
   assert.equal(workflow.stop.final_report_agent, "verifier");
 });
 
-test("roundtrips Rust workflow export back to equivalent legacy canvas", () => {
-  const exported = legacyCanvasToWorkflowExport(defaultPlannerLedAgentWorkflow);
-  const imported = workflowSpecToLegacyCanvas(exported);
+test("roundtrips Rust workflow export back to an equivalent canvas", () => {
+  const exported = canvasToWorkflowExport(defaultPlannerLedAgentWorkflow);
+  const imported = workflowSpecToCanvas(exported);
 
   assert.equal(imported.id, defaultPlannerLedAgentWorkflow.id);
   assert.equal(imported.primary_planner_id, "planner");
@@ -94,16 +91,16 @@ test("roundtrips an optional shared workflow token budget", () => {
       token_budget: 100_000
     }
   };
-  const exported = legacyCanvasToWorkflowExport(workflow);
+  const exported = canvasToWorkflowExport(workflow);
   const rustWorkflow = exported.workflows[workflow.id];
-  const imported = workflowSpecToLegacyCanvas(exported);
+  const imported = workflowSpecToCanvas(exported);
 
   assert.equal(rustWorkflow.token_budget, 100_000);
   assert.equal(imported.loop_policy.token_budget, 100_000);
 });
 
 test("maps default task execution harness to native backend", () => {
-  const config = legacyCanvasToWorkflowSpec(defaultPlannerLedAgentWorkflow);
+  const config = canvasToWorkflowSpec(defaultPlannerLedAgentWorkflow);
   const plannerHarness = config.harnesses["planner-conversation"];
   const taskHarness = config.harnesses["native-code-edit"];
 
@@ -125,7 +122,7 @@ test("maps native read-only harness profiles to native Rust backend", () => {
       agent_overrides: {}
     }
   };
-  const config = legacyCanvasToWorkflowSpec(workflow);
+  const config = canvasToWorkflowSpec(workflow);
 
   assert.equal(config.harnesses["review-only-chat"].backend, "planner-model");
   assert.equal(config.harnesses["review-only-supervisor"].backend, "planner-model");
@@ -135,7 +132,7 @@ test("maps native read-only harness profiles to native Rust backend", () => {
 });
 
 test("validates invalid Rust specs with user-facing errors", () => {
-  const config = legacyCanvasToWorkflowSpec(defaultPlannerLedAgentWorkflow);
+  const config = canvasToWorkflowSpec(defaultPlannerLedAgentWorkflow);
   delete config.harnesses["native-code-edit"];
 
   const validation = validateWorkflowSpec(config, "default-planner-led");
@@ -146,8 +143,8 @@ test("validates invalid Rust specs with user-facing errors", () => {
 });
 
 test("imports future Rust fields without crashing", () => {
-  const exported = legacyCanvasToWorkflowExport(defaultPlannerLedAgentWorkflow) as ReturnType<
-    typeof legacyCanvasToWorkflowExport
+  const exported = canvasToWorkflowExport(defaultPlannerLedAgentWorkflow) as ReturnType<
+    typeof canvasToWorkflowExport
   > & { future_field: { keep: true } };
   exported.future_field = { keep: true };
 
@@ -157,7 +154,7 @@ test("imports future Rust fields without crashing", () => {
 });
 
 test("preserves Rust hook settings in workflow exports", () => {
-  const exported = legacyCanvasToWorkflowExport(defaultPlannerLedAgentWorkflow);
+  const exported = canvasToWorkflowExport(defaultPlannerLedAgentWorkflow);
   exported.disable_all_hooks = true;
   exported.hooks = {
     PreToolUse: [
@@ -176,15 +173,15 @@ test("preserves Rust hook settings in workflow exports", () => {
 });
 
 test("imports plain Rust ProjectConfig while preserving max rounds and planner", () => {
-  const config: RustProjectConfig = legacyCanvasToWorkflowSpec(defaultPlannerLedAgentWorkflow);
-  const imported = workflowSpecToLegacyCanvas(config, "default-planner-led");
+  const config: RustProjectConfig = canvasToWorkflowSpec(defaultPlannerLedAgentWorkflow);
+  const imported = workflowSpecToCanvas(config, "default-planner-led");
 
   assert.equal(imported.primary_planner_id, "planner");
   assert.equal(imported.loop_policy.max_auto_rounds, defaultPlannerLedAgentWorkflow.loop_policy.max_auto_rounds);
 });
 
-test("maps Rust default workflow response into the legacy canvas model", () => {
-  const config = legacyCanvasToWorkflowSpec(defaultPlannerLedAgentWorkflow);
+test("maps Rust default workflow response into the canvas model", () => {
+  const config = canvasToWorkflowSpec(defaultPlannerLedAgentWorkflow);
   const imported = rustDefaultWorkflowToAgentWorkflow({
     workflow_id: "default-planner-led",
     config,
@@ -344,15 +341,11 @@ test("live run detail uses bounded run metadata and paged events", async () => {
   }
 });
 
-test("frontend API client stays on Rust v3 without Python switch", () => {
+test("frontend API client uses the Rust v3 planner and run surfaces", () => {
   const apiSource = readFileSync("src/api.ts", "utf8");
-  const removedV2Route = "/api/" + "v2";
-  const removedPythonServer = "fast" + "api";
 
-  assert.ok(!apiSource.includes(removedV2Route));
-  assert.ok(!apiSource.toLowerCase().includes(removedPythonServer));
   assert.ok(apiSource.includes("/api/v3/planner-chat/sessions"));
-  assert.ok(apiSource.includes("legacyCanvasToWorkflowSpec(input.agent_workflow)"));
+  assert.ok(apiSource.includes("canvasToWorkflowSpec(input.agent_workflow)"));
   assert.ok(apiSource.includes("include_events=false"));
   assert.ok(apiSource.includes('params.set("tail", "true")'));
 });
@@ -414,7 +407,7 @@ test("run summary recognizes backend approval request events", () => {
   assert.ok(appSource.includes("isApprovalRequestEvent"));
 });
 
-test("Planner Chat page uses Start Work timeline and hides legacy draft controls", () => {
+test("Planner Chat page uses Start Work timeline and hides draft controls", () => {
   const source = readFileSync("src/features/planner-chat/PlannerChatPage.tsx", "utf8");
   const css = readFileSync("src/styles.css", "utf8");
   const legacyDraftLabel = ["Draft", "Plan"].join(" ");
@@ -509,7 +502,7 @@ test("Planner Chat shell exposes polished empty, loading, and Start Work states"
   assert.ok(loadingClasses.includes("chat-loading-row"));
 });
 
-test("Planner Chat renders legacy sessions without task state", () => {
+test("Planner Chat renders stored sessions without task state", () => {
   const legacySession = {
     ...plannerSessionFixture(),
     task_state: undefined
@@ -620,7 +613,6 @@ test("Work timeline renders public ReAct items without raw backend details", () 
   assert.ok(text.includes("Action selected"));
   assert.ok(text.includes("repo_find_files"));
   assert.ok(!text.includes("raw_ref"));
-  assert.ok(!text.includes(removedExternalBackendEvent));
 });
 
 test("Work timeline explains a complete run with compact command output", () => {
@@ -769,7 +761,6 @@ test("Work timeline explains a complete run with compact command output", () => 
   assert.ok(classNames.includes("timeline-tone-success"));
   assert.ok(classNames.includes("timeline-tone-warning"));
   assert.ok(!text.includes("raw_ref"));
-  assert.ok(!text.includes(removedExternalBackendEvent));
   assert.ok(!text.includes("blob://sha256"));
 });
 
@@ -1000,16 +991,6 @@ test("Provider Settings exposes DeepSeek preset and exact test result UI", () =>
   assert.ok(panelSource.includes("deepseek"));
   assert.ok(panelSource.includes("openai-compatible"));
   assert.ok(panelSource.includes("custom"));
-  assert.ok(!panelSource.includes(`Execution Backend / ${removedExternalHarnessLabel}`));
-  assert.ok(!panelSource.includes(`${removedExternalHarnessLabel} is the required execution backend`));
-  assert.ok(!panelSource.includes("required executor"));
-  assert.ok(!panelSource.includes(`${removedExternalHarnessLabel} enabled`));
-  assert.ok(!panelSource.includes(`Allow native fallback when ${removedExternalHarnessLabel} is unavailable`));
-  assert.ok(!panelSource.includes("native fallback allowed"));
-  assert.ok(!panelSource.includes("Session API key / token"));
-  assert.ok(!panelSource.includes("Workspace mode"));
-  assert.ok(!panelSource.includes(`Test ${removedExternalHarnessLabel}`));
-  assert.ok(!panelSource.includes(`Clear ${removedExternalHarnessLabel} Token`));
   assert.ok(hookSource.includes('default_provider: "deepseek"'));
   assert.ok(hookSource.includes("deepseek-v4-flash"));
   assert.ok(hookSource.includes("https://api.deepseek.com"));
@@ -1021,9 +1002,6 @@ test("Provider Settings exposes DeepSeek preset and exact test result UI", () =>
   assert.ok(hookSource.includes("mock_mode: false"));
   assert.ok(hookSource.includes("buildProviderSettingsPayload(providerForm, providerSettings)"));
   assert.ok(hookSource.includes("Saving provider ${provider} before test"));
-  assert.ok(!apiSource.includes(`${removedExternalHarnessRoute}/settings`));
-  assert.ok(!apiSource.includes(`${removedExternalHarnessRoute}/status`));
-  assert.ok(!appSource.includes(`use${removedExternalHarnessLabel}Settings`));
   assert.ok(appSource.includes("showMockMode={debugUiEnabled}"));
   assert.ok(liveSmokeScript.includes("CODER_LIVE_LLM_SMOKE"));
   assert.ok(liveSmokeScript.includes("should_start_workflow"));

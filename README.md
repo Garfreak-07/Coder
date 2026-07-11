@@ -2,11 +2,7 @@
 
 Coder is a Planner-first coding workbench with a React frontend and a Rust API
 v3 runtime. The current product path is native: Coder owns planning,
-execution, verification, evidence, cache policy, and review surfaces without
-requiring a separate executor runtime.
-
-The removed pre-Rust compatibility implementation remains available only in git
-history at tag `pre-rust-only-legacy-v2`.
+execution, verification, evidence, cache policy, and review surfaces.
 
 ## Product Path
 

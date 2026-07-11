@@ -385,7 +385,7 @@ Plugins & Skills belongs behind the explicit debug UI switch
 `?debug=1` or `localStorage.coder_debug_ui = "1"`.
 
 Frontend workflow generation must emit `native-code-edit` for execution by
-default and should not expose removed runtime knobs.
+default and exposes only controls supported by the current runtime.
 
 ## Verification
 

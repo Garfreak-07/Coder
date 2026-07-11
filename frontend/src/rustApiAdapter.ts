@@ -20,10 +20,10 @@ import type {
   StoredRunDetail
 } from "./types";
 import {
-  legacyCanvasToWorkflowExport,
+  canvasToWorkflowExport,
   parseWorkflowImport,
   rustValidationReportToAgentWorkflowValidationResult,
-  workflowSpecToLegacyCanvas
+  workflowSpecToCanvas
 } from "./workflowSpecAdapter";
 import { normalizeAgentWorkflow } from "./workflowGraph";
 
@@ -109,7 +109,7 @@ export function rustRoleCardsToRoleCards(response: { role_cards: RoleCardSpec[] 
 }
 
 export function rustDefaultWorkflowToAgentWorkflow(response: RustDefaultWorkflowResponse): AgentWorkflowSpec {
-  return workflowSpecToLegacyCanvas(response.config, response.workflow_id);
+  return workflowSpecToCanvas(response.config, response.workflow_id);
 }
 
 export function rustLibraryToLibraryIndex(response: RustLibraryResponse): LibraryIndex {
@@ -123,7 +123,7 @@ export function agentWorkflowToRustLibrarySaveRequest(workflow: AgentWorkflowSpe
   const normalized = normalizeAgentWorkflow(workflow);
   return {
     workflow_id: normalized.id,
-    workflow: legacyCanvasToWorkflowExport(normalized)
+    workflow: canvasToWorkflowExport(normalized)
   };
 }
 

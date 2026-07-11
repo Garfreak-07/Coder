@@ -456,14 +456,14 @@ fn playwright_node_modules_candidate_entries(
     }
     let repo = PathBuf::from(repo_root);
     roots.push(PlaywrightNodeModulesCandidate::new(
-        "legacy:repo_tmp_playwright_smoke",
+        "fallback:repo_tmp_playwright_smoke",
         repo.join(".tmp")
             .join("playwright-smoke")
             .join("node_modules"),
     ));
     if let Ok(current) = env::current_dir() {
         roots.push(PlaywrightNodeModulesCandidate::new(
-            "legacy:cwd_tmp_playwright_smoke",
+            "fallback:cwd_tmp_playwright_smoke",
             current
                 .join(".tmp")
                 .join("playwright-smoke")
@@ -472,7 +472,7 @@ fn playwright_node_modules_candidate_entries(
     }
     if let Some(manifest_root) = coder_manifest_workspace_root() {
         roots.push(PlaywrightNodeModulesCandidate::new(
-            "legacy:workspace_tmp_playwright_smoke",
+            "fallback:workspace_tmp_playwright_smoke",
             manifest_root
                 .join(".tmp")
                 .join("playwright-smoke")
@@ -480,30 +480,30 @@ fn playwright_node_modules_candidate_entries(
         ));
     }
     roots.push(PlaywrightNodeModulesCandidate::new(
-        "legacy:repo_node_modules",
+        "fallback:repo_node_modules",
         repo.join("node_modules"),
     ));
     roots.push(PlaywrightNodeModulesCandidate::new(
-        "legacy:repo_frontend_node_modules",
+        "fallback:repo_frontend_node_modules",
         repo.join("frontend").join("node_modules"),
     ));
     if let Ok(current) = env::current_dir() {
         roots.push(PlaywrightNodeModulesCandidate::new(
-            "legacy:cwd_node_modules",
+            "fallback:cwd_node_modules",
             current.join("node_modules"),
         ));
         roots.push(PlaywrightNodeModulesCandidate::new(
-            "legacy:cwd_frontend_node_modules",
+            "fallback:cwd_frontend_node_modules",
             current.join("frontend").join("node_modules"),
         ));
     }
     if let Some(manifest_root) = coder_manifest_workspace_root() {
         roots.push(PlaywrightNodeModulesCandidate::new(
-            "legacy:workspace_node_modules",
+            "fallback:workspace_node_modules",
             manifest_root.join("node_modules"),
         ));
         roots.push(PlaywrightNodeModulesCandidate::new(
-            "legacy:workspace_frontend_node_modules",
+            "fallback:workspace_frontend_node_modules",
             manifest_root.join("frontend").join("node_modules"),
         ));
     }

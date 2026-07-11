@@ -98,7 +98,7 @@ import {
   type RustLibraryResponse,
   type RustLibraryWorkflowGetResponse
 } from "./rustApiAdapter";
-import { legacyCanvasToWorkflowSpec } from "./workflowSpecAdapter";
+import { canvasToWorkflowSpec } from "./workflowSpecAdapter";
 
 const jsonHeaders = {
   "Content-Type": "application/json"
@@ -599,7 +599,7 @@ export async function getDefaultAgentWorkflow(): Promise<{
 }
 
 export async function validateAgentWorkflow(agentWorkflow: AgentWorkflowSpec): Promise<AgentWorkflowValidationResult> {
-  const config = legacyCanvasToWorkflowSpec(agentWorkflow);
+  const config = canvasToWorkflowSpec(agentWorkflow);
   const report = await validateRustWorkflowSpec(config, agentWorkflow.id);
   return rustValidationReportToAgentWorkflowValidationResult(report);
 }
@@ -920,7 +920,7 @@ export async function startPlannerSessionWork(input: {
         repo: input.repo,
         workflow_id: input.workflow_id,
         planner_agent_id: input.planner_agent_id,
-        config: legacyCanvasToWorkflowSpec(input.agent_workflow),
+        config: canvasToWorkflowSpec(input.agent_workflow),
         scopes: input.scopes,
         knowledge_pack_ids: input.knowledge_pack_ids ?? [],
         skill_pack_ids: input.skill_pack_ids ?? [],
@@ -974,7 +974,7 @@ async function createRustPlannerChatSession(input: {
     body: JSON.stringify({
       workflow_id: input.workflow_id,
       planner_agent_id: input.planner_agent_id,
-      config: legacyCanvasToWorkflowSpec(input.agent_workflow),
+      config: canvasToWorkflowSpec(input.agent_workflow),
       mode: "discuss"
     })
   });
@@ -1016,7 +1016,7 @@ async function sendRustPlannerChatTurn(input: {
         confirmed: false,
         mode: "discuss",
         planner_agent_id: input.planner_agent_id,
-        config: input.agent_workflow ? legacyCanvasToWorkflowSpec(input.agent_workflow) : undefined
+        config: input.agent_workflow ? canvasToWorkflowSpec(input.agent_workflow) : undefined
       })
     }
   );
@@ -1051,7 +1051,7 @@ async function startRustAgentRun(input: {
   request: string;
   agent_workflow: AgentWorkflowSpec;
 }): Promise<{ run_id: string; status: string; events_url: string; result_url: string }> {
-  const config = legacyCanvasToWorkflowSpec(input.agent_workflow);
+  const config = canvasToWorkflowSpec(input.agent_workflow);
   const response = await requestJson<RustRunResponse>("/api/v3/runs", {
     method: "POST",
     headers: jsonHeaders,

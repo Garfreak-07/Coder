@@ -1673,7 +1673,7 @@ fn browser_verifier_does_not_treat_node_javascript_as_a_browser_task() {
 }
 
 #[test]
-fn browser_verifier_playwright_discovery_prefers_coder_runtime_over_project_deps() {
+fn browser_verifier_playwright_discovery_prefers_coder_runtime_over_fallback_project_deps() {
     let repo = temp_root();
     let runtime_root = temp_root()
         .join("store")

@@ -84,7 +84,7 @@ const executorCapabilities = [
   "return_execution_result"
 ];
 
-export function legacyCanvasToWorkflowSpec(agentWorkflow: AgentWorkflowSpec): RustProjectConfig {
+export function canvasToWorkflowSpec(agentWorkflow: AgentWorkflowSpec): RustProjectConfig {
   const workflow = normalizeAgentWorkflow(agentWorkflow);
   const models: Record<string, RustModelSpec> = {};
   const agents: Record<string, RustAgentSpec> = {};
@@ -132,7 +132,7 @@ export function legacyCanvasToWorkflowSpec(agentWorkflow: AgentWorkflowSpec): Ru
       .map((edge) => ({
         from: edge.from,
         to: edge.to,
-        on: transitionForLegacyEdge(workflow, edge)
+        on: transitionForCanvasEdge(workflow, edge)
       })),
     stop: {
       on_status: ["completed", "blocked", "failed"],
@@ -151,20 +151,20 @@ export function legacyCanvasToWorkflowSpec(agentWorkflow: AgentWorkflowSpec): Ru
   };
 }
 
-export function legacyCanvasToWorkflowExport(agentWorkflow: AgentWorkflowSpec): RustWorkflowExport {
+export function canvasToWorkflowExport(agentWorkflow: AgentWorkflowSpec): RustWorkflowExport {
   const workflow = normalizeAgentWorkflow(agentWorkflow);
-  const config = legacyCanvasToWorkflowSpec(workflow);
+  const config = canvasToWorkflowSpec(workflow);
   return {
     ...config,
     kind: "coder.workflow",
     workflow_id: workflow.id,
     workflow: config.workflows[workflow.id],
     ui: workflow.ui,
-    legacy_agent_workflow: cloneAgentWorkflow(workflow)
+    agent_workflow: cloneAgentWorkflow(workflow)
   };
 }
 
-export function workflowSpecToLegacyCanvas(input: RustProjectConfig | RustWorkflowExport, workflowId?: string): AgentWorkflowSpec {
+export function workflowSpecToCanvas(input: RustProjectConfig | RustWorkflowExport, workflowId?: string): AgentWorkflowSpec {
   const config = workflowExportToProjectConfig(input);
   const exportEnvelope = isRustWorkflowExport(input) ? input : null;
   const selectedWorkflowId = workflowId ?? exportEnvelope?.workflow_id ?? Object.keys(config.workflows)[0] ?? "imported-workflow";
@@ -173,13 +173,13 @@ export function workflowSpecToLegacyCanvas(input: RustProjectConfig | RustWorkfl
     throw new Error(`Workflow '${selectedWorkflowId}' was not found in the imported spec.`);
   }
 
-  const legacy = exportEnvelope?.legacy_agent_workflow;
+  const canvasSnapshot = exportEnvelope?.agent_workflow ?? exportEnvelope?.legacy_agent_workflow;
   const workflowAgentIds = new Set(workflow.nodes.map((node) => node.agent));
   const detachedPlannerId = Object.entries(config.agents).find(
     ([agentId, agent]) => agent.role === "planner" && !workflowAgentIds.has(agentId)
   )?.[0];
   const primaryPlannerId =
-    legacy?.primary_planner_id ??
+    canvasSnapshot?.primary_planner_id ??
     detachedPlannerId ??
     workflow.nodes.find((node) => config.agents[node.agent]?.role === "planner")?.id ??
     workflow.nodes[0]?.id ??
@@ -190,16 +190,16 @@ export function workflowSpecToLegacyCanvas(input: RustProjectConfig | RustWorkfl
 
   const executionAgents = nodes.map((node) => {
     const rustAgent = config.agents[node.agent] ?? config.agents[node.id];
-    const previous = legacy?.agents.find((agent) => agent.id === node.id || agent.id === node.agent);
-    return legacyAgentForNode(node.id, rustAgent, previous, node.id === primaryPlannerId);
+    const previous = canvasSnapshot?.agents.find((agent) => agent.id === node.id || agent.id === node.agent);
+    return canvasAgentForNode(node.id, rustAgent, previous, node.id === primaryPlannerId);
   });
   const primaryPlanner = nodes.some((node) => node.id === primaryPlannerId)
     ? []
     : [
-        legacyAgentForNode(
+        canvasAgentForNode(
           primaryPlannerId,
           config.agents[primaryPlannerId],
-          legacy?.agents.find((agent) => agent.id === primaryPlannerId),
+          canvasSnapshot?.agents.find((agent) => agent.id === primaryPlannerId),
           true
         )
       ];
@@ -207,9 +207,9 @@ export function workflowSpecToLegacyCanvas(input: RustProjectConfig | RustWorkfl
 
   return normalizeAgentWorkflow({
     id: selectedWorkflowId,
-    version: legacy?.version ?? "0.5",
-    name: workflow.name || legacy?.name || selectedWorkflowId,
-    description: legacy?.description ?? "",
+    version: canvasSnapshot?.version ?? "0.5",
+    name: workflow.name || canvasSnapshot?.name || selectedWorkflowId,
+    description: canvasSnapshot?.description ?? "",
     primary_planner_id: primaryPlannerId,
     agents,
     edges: workflow.edges.map((edge) => ({
@@ -218,13 +218,13 @@ export function workflowSpecToLegacyCanvas(input: RustProjectConfig | RustWorkfl
       on: edge.on,
       ...(edge.to === primaryPlannerId || edge.on === "continue" ? { loop: true } : {})
     })),
-    harness_bindings: legacy?.harness_bindings ?? harnessBindingsForWorkflow(nodes, primaryPlannerId, agents),
+    harness_bindings: canvasSnapshot?.harness_bindings ?? harnessBindingsForWorkflow(nodes, primaryPlannerId, agents),
     loop_policy: {
-      max_auto_rounds: workflow.max_rounds || legacy?.loop_policy.max_auto_rounds || 3,
-      token_budget: workflow.token_budget ?? legacy?.loop_policy.token_budget ?? null,
+      max_auto_rounds: workflow.max_rounds || canvasSnapshot?.loop_policy.max_auto_rounds || 3,
+      token_budget: workflow.token_budget ?? canvasSnapshot?.loop_policy.token_budget ?? null,
       user_can_change: true
     },
-    ui: exportEnvelope?.ui ?? legacy?.ui ?? { layout: {} }
+    ui: exportEnvelope?.ui ?? canvasSnapshot?.ui ?? { layout: {} }
   });
 }
 
@@ -246,15 +246,15 @@ export function workflowExportToProjectConfig(input: RustProjectConfig | RustWor
 
 export function parseWorkflowImport(value: unknown): AgentWorkflowSpec {
   if (isRustWorkflowExport(value)) {
-    return workflowSpecToLegacyCanvas(value);
+    return workflowSpecToCanvas(value);
   }
   if (isRustProjectConfig(value)) {
-    return workflowSpecToLegacyCanvas(value);
+    return workflowSpecToCanvas(value);
   }
-  if (isLegacyAgentWorkflowSpec(value)) {
+  if (isAgentWorkflowSpec(value)) {
     return normalizeAgentWorkflow(value);
   }
-  throw new Error("Expected a Coder workflow export or legacy Agent workflow JSON.");
+  throw new Error("Expected a Coder workflow export or Agent workflow JSON.");
 }
 
 export function validateWorkflowSpec(config: RustProjectConfig, workflowId: string): AgentWorkflowValidationResult {
@@ -477,20 +477,20 @@ function harnessBindingsForWorkflow(
   };
 }
 
-function transitionForLegacyEdge(workflow: AgentWorkflowSpec, edge: AgentWorkflowEdge): string {
+function transitionForCanvasEdge(workflow: AgentWorkflowSpec, edge: AgentWorkflowEdge): string {
   if (edge?.on?.trim()) return edge.on.trim();
   if (edge?.handoff === "execution_result" || edge?.loop || edge.to === workflow.primary_planner_id) return "completed";
   if (edge?.handoff === "planner_decision" || edge?.handoff === "round_summary") return "completed";
   return "ready";
 }
 
-function legacyAgentForNode(
+function canvasAgentForNode(
   id: string,
   rustAgent: RustAgentSpec | undefined,
   previous: AgentWorkflowAgent | undefined,
   primary: boolean
 ): AgentWorkflowAgent {
-  const role = legacyRole(rustAgent?.role, primary);
+  const role = canvasRole(rustAgent?.role, primary);
   return {
     id,
     name: previous?.name ?? displayNameForAgent(id, role),
@@ -507,7 +507,7 @@ function legacyAgentForNode(
   };
 }
 
-function legacyRole(role: string | undefined, primary: boolean): AgentWorkflowRole {
+function canvasRole(role: string | undefined, primary: boolean): AgentWorkflowRole {
   if (role === "planner" || role === "executor") return role;
   return primary ? "planner" : "executor";
 }
@@ -596,7 +596,7 @@ function targetTypeFromRustTarget(target: string): string {
   return "workflow";
 }
 
-function isLegacyAgentWorkflowSpec(value: unknown): value is AgentWorkflowSpec {
+function isAgentWorkflowSpec(value: unknown): value is AgentWorkflowSpec {
   const record = asRecord(value);
   return Boolean(
     record &&

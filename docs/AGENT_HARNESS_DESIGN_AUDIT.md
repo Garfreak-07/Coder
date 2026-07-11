@@ -17,7 +17,7 @@ This audit records the current design and its evidence. It is not a change log.
    resource limits. Provider output is a request to use tools, not authority to
    mutate the host.
 5. Optional integrations stay outside the core until a real workflow requires
-   them. The default product has no separate executor runtime.
+   them. Coder owns the ordinary execution runtime.
 
 ## Concrete Claude Code References
 
@@ -127,11 +127,10 @@ thresholds remain absent until cross-provider evaluations justify them.
   deterministic fields may still be replaced, so this protection does not
   freeze stale scope from earlier turns.
 - Start Work sends one plan snapshot plus the original request and authorization
-  bit. Removed top-level copies of acceptance criteria, risks, affected paths,
-  workflow ID, and the static conversation summary.
-- Subagent runtime context now contains one `coder` object. Removed duplicate
-  `parent_backend_context`, `coder_subagent`, context-factory copies, source
-  citations, and descriptive policy JSON that no runtime path read.
+  bit. Acceptance criteria, risks, affected paths, workflow ID, and the static
+  conversation summary are not duplicated at the top level.
+- Subagent runtime context contains one `coder` object with only the fields
+  consumed by the child runtime.
 - Model-visible subagent results contain status, report, task metadata, and
   durable metadata/transcript references. Full event previews remain available
   in the API payload and store but are not copied back into the model history.
@@ -139,13 +138,11 @@ thresholds remain absent until cross-provider evaluations justify them.
   registry after their durable record is written. Background subagents are
   capped at three live child tasks: Codex's default of four session threads
   includes the root agent.
-- Removed the unused `CODER_AUTO_BACKGROUND_TASKS` /
-  `CLAUDE_AUTO_BACKGROUND_TASKS` compatibility branch and its 120,000 ms
-  constant.
-- Removed Planner harness tool declarations that the tool-disabled adapter never
-  exposed. Workflow Planner now reuses the default model reference and provider
-  runtime instead of carrying a separate client or model alias.
-- Added provider-backed Workflow Planner decisions with strict JSON output and
+- Background work starts only from explicit command or subagent tool calls and
+  follows the configured task timeout and ownership boundaries.
+- Planner harnesses expose no execution tools. Workflow Planner reuses the
+  default model reference and provider runtime.
+- Provider-backed Workflow Planner decisions use strict JSON output and
   code-enforced stop gates. Successful closed tasks retain a zero-provider
   fast path; qualitative goals and verifier failures receive model analysis.
 - A missing, failed, or malformed live Workflow Planner decision is `blocked`,
@@ -159,14 +156,13 @@ thresholds remain absent until cross-provider evaluations justify them.
 - Browser/game verification now uses word-boundary intent routing, reads inline
   scripts, starts common button/overlay entry surfaces, and prioritizes console
   errors over a generic no-progress failure.
-- `edit_text_file` now accepts either its legacy single replacement or at most
+- `edit_text_file` accepts either one replacement or at most
   32 ordered same-file replacements in `edits[]`. All replacements are applied
   and validated in memory before one write; a later ambiguous or missing match
   leaves the file unchanged. This removes repeated provider turns without a new
   patch parser, tool, agent, or file-write path.
-- Removed synthetic subagent cleanup records that listed only
-  `not_configured`/`not_applicable` actions. Rust task ownership and explicit
-  cancellation remain the real cleanup boundary.
+- Subagent cleanup records are emitted only for concrete task ownership or
+  cancellation actions.
 
 ## Current Agent Boundaries
 
@@ -208,8 +204,7 @@ reported in Planner Chat instead of being silently deleted.
   compact plan handoff.
 - Start Work authorization is represented once as
   `plan_context.start_work_authorized=true`. The task and plan goal retain only
-  the sanitized domain objective; the old repeated textual authorization was
-  removed from both fields.
+  the sanitized domain objective.
 - Provider tool turns stop immediately on `finish`. The example Executor sets
   24 turns explicitly, and the native runtime uses the same fallback if a
   custom configuration omits the value.
@@ -278,14 +273,14 @@ reported in Planner Chat instead of being silently deleted.
 
 | Requirement | Evidence | Status |
 | --- | --- | --- |
-| Native lightweight core | Cargo workspace contains 11 native crates; source/config/script search has no removed-runtime references. | Complete |
+| Native lightweight core | Cargo workspace contains 11 native crates and the default execution path stays inside Coder-owned Rust harnesses. | Complete |
 | Maintainable module layout | `coder-server/src/lib.rs` and `coder-workflow/src/lib.rs` are wiring layers; behavior lives in focused modules. | Complete |
 | Parallel Planner and workflow | Deterministic concurrency/cancellation tests pass; the live game session retained a parallel Planner turn after workflow completion. | Complete |
 | Local status/supplement/stop control | Targeted server tests prove zero-provider routing and in-flight cancellation. | Complete |
 | Low-token successful path | Pure confirmation is local; closed verified tasks use a zero-provider Planner fast path; open-ended quality review is capped at 900 output tokens. | Complete |
 | Real provider path | DeepSeek `deepseek-v4-flash`, direct proxy mode, SSE Planner transport, native tools, hooks, compaction, subagent, Review Changes, and secret checks executed successfully. | Complete |
 | Autonomous open-ended task | Run `e444d194-5a31-4417-b3f8-c3a3fe8dd30e` created and verified a browser garden-defense game from a short prompt; independent QA records the remaining quality gap below. | Complete |
-| Documentation | Maintained docs describe the current native path and resource policy; superseded planning/history docs are deleted. | Complete |
+| Documentation | Maintained docs describe the current native path, architecture, provider setup, persistence, and resource policy. | Complete |
 
 ## Bounded Planner Live Evidence
 

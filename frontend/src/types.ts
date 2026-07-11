@@ -458,6 +458,7 @@ export interface RustWorkflowExport extends RustProjectConfig {
   workflow_id: string;
   workflow: RustWorkflowSpec;
   ui?: AgentWorkflowSpec["ui"];
+  agent_workflow?: AgentWorkflowSpec;
   legacy_agent_workflow?: AgentWorkflowSpec;
 }
 

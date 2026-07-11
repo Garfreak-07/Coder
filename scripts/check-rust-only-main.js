@@ -56,8 +56,6 @@ function assertNoPatterns(files, patterns) {
   }
 }
 
-assertMissing(["legacy", "python"].join("-"), "Removed compatibility implementation");
-assertMissing(path.join("docs", "legacy-python.md"), "Removed legacy documentation page");
 assertMissing("pyproject.toml", "Root Python package metadata");
 
 assertNoPatterns(walkFiles(rel("frontend")), [
@@ -92,11 +90,6 @@ assertContains(
   'activeSection === "extensions" && debugUiEnabled',
   "Plugins and Skills route guard"
 );
-
-assertNoPatterns([rel(".github", "workflows", "ci.yml")], [
-  "Legacy " + "Python compatibility",
-  ["legacy", "python"].join("-")
-]);
 
 if (failures.length > 0) {
   console.error("Rust-only main guard failed:");

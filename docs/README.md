@@ -1,8 +1,7 @@
 # Docs
 
-These are the maintained project docs. Historical audit notes, one-off
-validation records, and superseded planning docs should not be kept in `docs/`
-unless they still guide current maintenance.
+These documents define the current product architecture, runtime policy,
+provider setup, persistence model, and distribution process.
 
 ## Start Here
 
@@ -32,8 +31,6 @@ unless they still guide current maintenance.
 When the worktree is dirty during a refactor, classify changes before cleanup:
 
 - Keep untracked source modules that are referenced by `mod` declarations.
-- Keep deleted historical docs deleted when maintained docs preserve the active
-  product rule.
 - Remove generated cache/build artifacts only after previewing the exact paths.
 - Do not use broad `git reset` or `git clean` commands to make the tree look
   tidy; split the work into reviewable source, docs, frontend, and regression
