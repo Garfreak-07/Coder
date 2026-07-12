@@ -1,6 +1,6 @@
 use coder_config::{HookCommandSpec, HookEvent, HookSettings, ModelSpec, PermissionDecision};
 use coder_store::RunStore;
-use coder_workflow::ModelToolHostContext;
+use coder_workflow::TurnContext;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -40,7 +40,7 @@ pub(crate) struct ModelToolHookInvocation<'a> {
     pub(crate) tool_input: &'a Value,
     pub(crate) tool_response: Option<&'a Value>,
     pub(crate) tool_error: Option<&'a str>,
-    pub(crate) host_context: &'a ModelToolHostContext,
+    pub(crate) host_context: &'a TurnContext,
 }
 
 pub(crate) async fn execute_model_tool_hook_phase(
@@ -315,12 +315,7 @@ pub(crate) async fn execute_model_tool_hook_phase(
                 "runtime_not_implemented"
             } else {
                 "not_applicable"
-            },
-            "claude_sources": [
-                "src/schemas/hooks.ts HookMatcherSchema",
-                "src/utils/hooks.ts executePreToolHooks/executePostToolHooks",
-                "src/services/tools/toolHooks.ts runPreToolUseHooks/runPostToolUseHooks"
-            ]
+            }
         }),
         blocking_error,
         updated_input: if should_apply_updated_input {
@@ -392,7 +387,7 @@ fn model_tool_hook_input(
 fn model_tool_hook_context(
     store: &RunStore,
     input: &Value,
-    host_context: &ModelToolHostContext,
+    host_context: &TurnContext,
 ) -> ModelToolHookContext {
     if let Some(run_id) = model_tool_context_run_id(input, host_context) {
         if let Some(config) = read_run_project_config_snapshot(store, &run_id) {

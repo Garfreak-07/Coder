@@ -1,54 +1,54 @@
-use std::{collections::BTreeSet, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use coder_config::AGENT_MAX_OUTPUT_RECOVERY_ATTEMPTS_DEFAULT;
+use coder_config::ResolvedAgentRuntimePolicy;
 use coder_core::{EvidenceRef, FinalReport, RunId};
 use coder_harness::{
     HarnessBackend, HarnessError, HarnessRunEvent, HarnessRunEventRef, HarnessRunResult,
 };
-use coder_store::{RepoEvidenceKind, RepoEvidenceRef};
-use coder_tools::{
-    edit_text_file_batch, git_diff, write_text_file, FileEditBatchRequest, FileEditReplacement,
-    FileWriteRequest,
+use coder_tools::builtin_tools;
+use coder_workflow::{
+    execute_model_tool_turn, DeterministicNativeBackend, ModelToolLoopOptions,
+    ModelToolResultBlock, ModelToolUseBlock, TurnContext,
 };
-use coder_workflow::NativeRustBackend;
 use reqwest::Client;
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::model_tool_async_attachments::{
     drain_async_hook_response_attachments, drain_async_rewake_notification_attachments,
     drain_planner_user_guidance_attachments,
 };
-use crate::model_tool_execute_pipeline::execute_model_tool_response;
 use crate::model_tool_input::canonical_model_tool_name;
+use crate::model_tool_server_executor::server_model_tool_executor_with_mcp;
+use crate::native_model_mcp::{
+    native_model_mcp_routes, snapshot_native_model_mcp_tools, NativeModelMcpTool,
+};
 use crate::provider_runtime::{
-    harness_model_spec, model_name_for_settings, model_provider_base_url,
+    harness_agent_runtime, harness_model_spec, model_name_for_settings, model_provider_base_url,
     model_provider_for_settings, normalize_provider, provider_api_key,
     provider_chat_completions_endpoint, provider_http_client_builder, provider_proxy_url_for_url,
-    provider_reasoning_effort, redact_provider_error,
+    provider_reasoning_effort, provider_request_max_retries, redact_provider_error,
+    send_provider_request_with_retry,
 };
 use crate::run_token_budget::{
     check_run_token_budget, provider_token_usage, record_run_token_usage, RunTokenUsage,
 };
-use crate::{ApiState, ModelToolExecuteRequest};
+use crate::ApiState;
 
-const NATIVE_MODEL_MAX_FILES: usize = 12;
-const NATIVE_MODEL_MAX_FILE_EDITS: usize = 32;
-const NATIVE_MODEL_MAX_FILE_BYTES: usize = 512 * 1024;
 const NATIVE_MODEL_TOOL_RESULT_MAX_CHARS: usize = 24_000;
-const NATIVE_MODEL_DEFAULT_MAX_TURNS: usize = 24;
+const NATIVE_MODEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+const NATIVE_READ_ONLY_MAX_TURNS: usize = 8;
 
 #[derive(Debug, Clone)]
 pub(crate) struct NativeModelBackend {
     state: ApiState,
-    fallback: Arc<NativeRustBackend>,
+    mock_backend: Arc<DeterministicNativeBackend>,
 }
 
 impl NativeModelBackend {
     pub(crate) fn new(state: ApiState) -> Self {
         Self {
-            fallback: Arc::new(NativeRustBackend::new(state.store.clone())),
+            mock_backend: Arc::new(DeterministicNativeBackend::new(state.store.clone())),
             state,
         }
     }
@@ -60,55 +60,57 @@ impl HarnessBackend for NativeModelBackend {
         &self,
         request: coder_harness::HarnessRunRequest,
     ) -> Result<HarnessRunResult, HarnessError> {
-        if request.harness_id != "native-code-edit"
-            || !native_model_agent_can_execute(&request)
-            || !native_model_should_handle(&request)
-        {
-            return self.fallback.run(request).await;
-        }
-        if !start_work_authorized(&request) {
-            return Ok(HarnessRunResult {
-                status: "blocked".to_owned(),
-                report: Some(FinalReport::blocked(
-                    "Native model executor stopped before writing files.",
-                    "file writes require Start Work approval in plan_context",
-                )),
-                events: vec![HarnessRunEvent::new(
-                    "backend.native_rust.blocked",
-                    json!({
-                        "backend": "native-rust",
-                        "implementation": "native-model-file-write",
-                        "status": "blocked",
-                        "reason": "missing_start_work_approval"
-                    }),
-                )],
-            });
+        let settings = self.state.provider_settings.lock().unwrap().clone();
+        if settings.mock_mode {
+            return self.mock_backend.run(request).await;
         }
 
         let started = HarnessRunEvent::new(
             "backend.native_rust.started",
             json!({
                 "backend": "native-rust",
-                "implementation": "native-model-file-write",
+                "implementation": "native-model-tool-loop",
                 "node_id": request.node_id,
                 "agent_id": request.agent_id,
                 "harness_id": request.harness_id,
                 "model_driven": true,
-                "side_effect_boundary": "repo_scoped_file_write"
+                "side_effect_boundary": "structured_tools"
             }),
         );
-
-        let settings = self.state.provider_settings.lock().unwrap().clone();
-        if settings.mock_mode {
-            return self.fallback.run(request).await;
+        if !native_model_agent_can_execute(&request) {
+            return Ok(blocked_result(
+                started,
+                "Native model execution requires an Executor or subagent role.",
+                "native_model_role_not_executable",
+            ));
         }
+        if !start_work_authorized(&request) {
+            return Ok(blocked_result(
+                started,
+                "Native model execution requires Start Work authorization.",
+                "missing_start_work_approval",
+            ));
+        }
+
         let model = harness_model_spec(&request);
+        let runtime = harness_agent_runtime(&request);
+        if !runtime.supports_tool_calls {
+            return Ok(blocked_result(
+                started,
+                "The selected model does not support tool calls required by the native executor.",
+                "model_tool_calls_unsupported",
+            ));
+        }
         let provider = model_provider_for_settings(&settings, &model);
         let model_name = model_name_for_settings(&settings, &model);
         let Some((api_key, credential_source)) =
             provider_api_key(&settings, &provider, model.api_key_env.as_deref())
         else {
-            return self.fallback.run(request).await;
+            return Ok(blocked_result(
+                started,
+                "Native model execution requires configured provider credentials.",
+                "missing_provider_credentials",
+            ));
         };
         let Some(base_url) = model_provider_base_url(&settings, &provider, &model) else {
             return Ok(blocked_result(
@@ -119,16 +121,14 @@ impl HarnessBackend for NativeModelBackend {
         };
         let url = provider_chat_completions_endpoint(&base_url);
         let proxy_url = provider_proxy_url_for_url(&settings, &provider, Some(&url));
-        let client = provider_http_client_builder(&url, proxy_url.as_deref())
+        let client = provider_http_client_builder(&settings, &provider, &url)
             .map_err(|error| {
                 HarnessError::Failed(redact_provider_error(
                     &error,
                     &[&api_key, &base_url, proxy_url.as_deref().unwrap_or("")],
                 ))
             })?
-            .timeout(Duration::from_millis(native_model_response_timeout_ms(
-                &request,
-            )))
+            .timeout(NATIVE_MODEL_REQUEST_TIMEOUT)
             .build()
             .map_err(|error| {
                 HarnessError::Failed(redact_provider_error(
@@ -137,7 +137,7 @@ impl HarnessBackend for NativeModelBackend {
                 ))
             })?;
 
-        let provider_output = run_native_model_provider(NativeModelProviderContext {
+        let outcome = run_native_model_provider(NativeModelProviderContext {
             state: &self.state,
             client: &client,
             url: &url,
@@ -145,7 +145,9 @@ impl HarnessBackend for NativeModelBackend {
             provider: &provider,
             model: &model_name,
             request: &request,
-            max_output_tokens: max_output_tokens_from_request(&request),
+            max_output_tokens: runtime.max_output_tokens,
+            request_max_retries: provider_request_max_retries(&settings, &provider),
+            runtime,
         })
         .await
         .map_err(|error| {
@@ -154,215 +156,17 @@ impl HarnessBackend for NativeModelBackend {
                 &[&api_key, &base_url, proxy_url.as_deref().unwrap_or("")],
             ))
         })?;
-        if let NativeModelProviderOutput::ToolLoop(outcome) = provider_output {
-            return tool_loop_result(
-                started,
-                credential_source,
-                provider,
-                model_name,
-                outcome,
-                &self.state,
-                &request,
-            )
-            .map_err(|error| HarnessError::Failed(error.to_string()));
-        }
-        let NativeModelProviderOutput::Text(text_outcome) = provider_output else {
-            unreachable!("native provider output was already handled")
-        };
-        let NativeModelTextOutcome {
-            content: response,
-            events: provider_events,
-        } = text_outcome;
-        let plan = match parse_native_model_plan(&response) {
-            Ok(plan) => plan,
-            Err(error) => {
-                return Ok(failed_result(
-                    started,
-                    format!("Native model executor could not parse model output: {error}"),
-                ));
-            }
-        };
-        if plan.status == "blocked" || !plan.blockers.is_empty() {
-            return Ok(blocked_result(
-                started,
-                "Native model executor reported it could not safely complete the task.",
-                concise_blocker(&plan.blockers),
-            ));
-        }
-        if plan.files.is_empty() {
-            if !native_model_requires_file_writes(&request) {
-                return Ok(no_file_report_result(
-                    started,
-                    credential_source,
-                    provider,
-                    model_name,
-                    plan,
-                ));
-            }
-            return Ok(blocked_result(
-                started,
-                "Native model executor produced no file writes.",
-                "model_returned_no_files",
-            ));
-        }
-        if plan.files.len() > NATIVE_MODEL_MAX_FILES {
-            return Ok(blocked_result(
-                started,
-                "Native model executor refused an oversized file plan.",
-                "model_returned_too_many_files",
-            ));
-        }
-
-        let mut events = vec![started];
-        events.extend(provider_events);
-        events.push(HarnessRunEvent::new(
-            "executor.reasoning_summary",
-            json!({
-                "backend": "native-rust",
-                "implementation": "native-model-file-write",
-                "summary": "Use the provider-generated file plan, then write only repo-scoped files and record evidence.",
-                "credential_source": credential_source,
-                "provider": provider,
-                "model": model_name
-            }),
-        ));
-
-        let mut changed_files = Vec::new();
-        let mut evidence_refs = Vec::new();
-        for file in plan.files {
-            if file.content.is_empty() {
-                return Ok(blocked_result(
-                    events.remove(0),
-                    "Native model executor refused an empty file write.",
-                    format!("empty_file_content: {}", file.path),
-                ));
-            }
-            let evidence = write_text_file(
-                &request.repo_root,
-                FileWriteRequest {
-                    path: PathBuf::from(&file.path),
-                    content: file.content,
-                    max_bytes: NATIVE_MODEL_MAX_FILE_BYTES,
-                    source: "model".to_owned(),
-                },
-            )
-            .map_err(|error| HarnessError::Failed(error.to_string()))?;
-            let evidence_ref = write_file_evidence(&self.state, &request.run_id, &evidence)
-                .map_err(|error| HarnessError::Failed(error.to_string()))?;
-            changed_files.push(evidence.path.clone());
-            evidence_refs.push(repo_evidence_ref(&evidence_ref));
-            events.push(
-                HarnessRunEvent::new(
-                    "file.written",
-                    json!({
-                        "backend": "native-rust",
-                        "implementation": "native-model-file-write",
-                        "path": &evidence.path,
-                        "status": &evidence.status,
-                        "created": evidence.created,
-                        "bytes_written": evidence.bytes_written,
-                        "evidence_ref": &evidence_ref.ref_id
-                    }),
-                )
-                .with_ref(
-                    "repo_evidence",
-                    format!("repo-evidence://{}", evidence_ref.ref_id),
-                ),
-            );
-        }
-
-        if changed_files.is_empty() {
-            return Ok(blocked_result(
-                events.remove(0),
-                "Native model executor made no file changes.",
-                "no_changed_files",
-            ));
-        }
-        let diff_ref = write_git_diff_evidence(&self.state, &request.run_id, &request.repo_root)
-            .map_err(|error| HarnessError::Failed(error.to_string()))?;
-        if let Some(reference) = diff_ref {
-            evidence_refs.push(repo_evidence_ref(&reference));
-            events.push(
-                HarnessRunEvent::new(
-                    "git.diff.recorded",
-                    json!({
-                        "backend": "native-rust",
-                        "implementation": "native-model-file-write",
-                        "evidence_ref": reference.ref_id
-                    }),
-                )
-                .with_ref(
-                    "repo_evidence",
-                    format!("repo-evidence://{}", reference.ref_id),
-                ),
-            );
-        }
-
-        let mut report = FinalReport::completed(if plan.summary.trim().is_empty() {
-            format!(
-                "Native model executor wrote {} file(s).",
-                changed_files.len()
-            )
-        } else {
-            plan.summary
-        });
-        report.changed_files = changed_files;
-        report.checks = if plan.checks.is_empty() {
-            vec!["native_model_file_write: completed".to_owned()]
-        } else {
-            plan.checks
-        };
-        report.evidence_refs = evidence_refs;
-        events.push(HarnessRunEvent::new(
-            "backend.native_rust.completed",
-            json!({
-                "backend": "native-rust",
-                "implementation": "native-model-file-write",
-                "status": "completed",
-                "changed_files": &report.changed_files,
-                "checks": &report.checks
-            }),
-        ));
-        Ok(HarnessRunResult {
-            status: "completed".to_owned(),
-            report: Some(report),
-            events,
-        })
+        tool_loop_result(
+            started,
+            credential_source,
+            provider,
+            model_name,
+            outcome,
+            &self.state,
+            &request,
+        )
+        .map_err(|error| HarnessError::Failed(error.to_string()))
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct NativeModelPlan {
-    #[serde(default = "completed_status")]
-    status: String,
-    #[serde(default)]
-    summary: String,
-    #[serde(default)]
-    files: Vec<NativeModelFile>,
-    #[serde(default)]
-    checks: Vec<String>,
-    #[serde(default)]
-    blockers: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct NativeModelFile {
-    path: String,
-    content: String,
-}
-
-fn completed_status() -> String {
-    "completed".to_owned()
-}
-
-enum NativeModelProviderOutput {
-    Text(NativeModelTextOutcome),
-    ToolLoop(NativeModelToolLoopOutcome),
-}
-
-struct NativeModelTextOutcome {
-    content: String,
-    events: Vec<HarnessRunEvent>,
 }
 
 #[derive(Debug, Default)]
@@ -392,7 +196,14 @@ struct NativeModelToolCallResult {
     is_error: bool,
     content: String,
     refs: Vec<HarnessRunEventRef>,
-    attachments: Vec<Value>,
+}
+
+enum PreparedNativeModelToolCall {
+    Shared {
+        tool_call_id: String,
+        canonical_tool_name: String,
+    },
+    Synthetic(NativeModelToolCallResult),
 }
 
 struct NativeModelProviderContext<'a> {
@@ -404,11 +215,13 @@ struct NativeModelProviderContext<'a> {
     model: &'a str,
     request: &'a coder_harness::HarnessRunRequest,
     max_output_tokens: u32,
+    request_max_retries: u64,
+    runtime: ResolvedAgentRuntimePolicy,
 }
 
 async fn run_native_model_provider(
     context: NativeModelProviderContext<'_>,
-) -> Result<NativeModelProviderOutput, String> {
+) -> Result<NativeModelToolLoopOutcome, String> {
     let NativeModelProviderContext {
         state,
         client,
@@ -418,18 +231,30 @@ async fn run_native_model_provider(
         model,
         request,
         max_output_tokens,
+        request_max_retries,
+        runtime,
     } = context;
+    let mcp_tools = if native_model_is_read_only(request) {
+        Vec::new()
+    } else {
+        snapshot_native_model_mcp_tools(state.mcp_runtime.list_tools().await)
+    };
+    let mcp_routes = native_model_mcp_routes(&mcp_tools);
     let mut messages = native_model_initial_messages(request);
     let mut outcome = NativeModelToolLoopOutcome {
         status: "completed".to_owned(),
         ..NativeModelToolLoopOutcome::default()
     };
-    let mut used_tool_loop = false;
-    let max_output_recovery_attempts = native_model_max_output_recovery_attempts(request);
+    let max_output_recovery_attempts = runtime.max_output_recovery_attempts;
     let mut output_recovery_attempts = 0_u8;
 
-    let max_turns = native_model_max_turns_from_request(request);
-    for turn in 0..max_turns {
+    let max_turns = native_model_max_turns(request, &runtime);
+    let mut turn = 0usize;
+    loop {
+        if turn >= max_turns {
+            break;
+        }
+        turn = turn.saturating_add(1);
         if let Some(budget) = check_run_token_budget(state, request) {
             if budget.exhausted() {
                 outcome.status = "blocked".to_owned();
@@ -442,10 +267,10 @@ async fn run_native_model_provider(
                         "contract": "coder.run_token_budget.v1",
                         "run_id": request.run_id,
                         "budget": budget.as_json(),
-                        "next_turn": turn + 1
+                        "next_turn": turn
                     }),
                 ));
-                return Ok(NativeModelProviderOutput::ToolLoop(outcome));
+                return Ok(outcome);
             }
         }
         let pending_attachments = drain_native_model_async_attachments(state, request);
@@ -453,7 +278,7 @@ async fn run_native_model_provider(
             &mut messages,
             pending_attachments,
             &mut outcome,
-            turn + 1,
+            turn,
             "before_provider_request",
         );
         let body = native_model_chat_completion_body(
@@ -462,42 +287,19 @@ async fn run_native_model_provider(
             messages.clone(),
             max_output_tokens,
             request,
-            true,
+            runtime.supports_parallel_tool_calls,
+            &mcp_tools,
         );
-        let payload = match send_native_chat_completion(client, url, api_key, &body).await {
-            Ok(payload) => payload,
-            Err(_error) if turn == 0 => {
-                let fallback_body = native_model_chat_completion_body(
-                    provider,
-                    model,
-                    native_model_initial_messages(request),
-                    max_output_tokens,
-                    request,
-                    false,
-                );
-                let fallback_payload =
-                    send_native_chat_completion(client, url, api_key, &fallback_body).await?;
-                let mut usage_event = native_model_provider_usage_event(
-                    provider,
-                    model,
-                    turn + 1,
-                    &fallback_body,
-                    &fallback_payload,
-                    true,
-                );
-                attach_run_token_budget(state, request, &mut usage_event);
-                outcome.events.push(usage_event);
-                let content =
-                    native_assistant_content(&fallback_payload)?.unwrap_or_else(|| "".to_owned());
-                return Ok(NativeModelProviderOutput::Text(NativeModelTextOutcome {
-                    content,
-                    events: outcome.events,
-                }));
-            }
-            Err(error) => return Err(error),
-        };
-        let mut usage_event =
-            native_model_provider_usage_event(provider, model, turn + 1, &body, &payload, false);
+        let (payload, request_attempts) =
+            send_native_chat_completion(client, url, api_key, &body, request_max_retries).await?;
+        let mut usage_event = native_model_provider_usage_event(
+            provider,
+            model,
+            turn,
+            &body,
+            &payload,
+            request_attempts,
+        );
         attach_run_token_budget(state, request, &mut usage_event);
         outcome.events.push(usage_event);
         let message = native_assistant_message(&payload)?;
@@ -524,7 +326,7 @@ async fn run_native_model_provider(
                 outcome
                     .blockers
                     .push("native model output recovery attempts were exhausted".to_owned());
-                return Ok(NativeModelProviderOutput::ToolLoop(outcome));
+                return Ok(outcome);
             }
             let pending_attachments = drain_native_model_async_attachments(state, request);
             if !pending_attachments.is_empty() {
@@ -533,44 +335,70 @@ async fn run_native_model_provider(
                     &mut messages,
                     pending_attachments,
                     &mut outcome,
-                    turn + 1,
+                    turn,
                     "before_final_response",
                 );
-                used_tool_loop = true;
                 continue;
             }
-            if used_tool_loop {
-                apply_native_model_final_content(&mut outcome, content.as_deref());
-                return Ok(NativeModelProviderOutput::ToolLoop(outcome));
-            }
-            return Ok(NativeModelProviderOutput::Text(NativeModelTextOutcome {
-                content: content.unwrap_or_else(|| "".to_owned()),
-                events: outcome.events,
-            }));
+            apply_native_model_final_content(&mut outcome, content.as_deref());
+            return Ok(outcome);
         }
 
-        used_tool_loop = true;
         outcome.events.push(HarnessRunEvent::new(
             "model.tool_turn.started",
             json!({
                 "backend": "native-rust",
-                "implementation": "native-model-file-write",
+                "implementation": "native-model-tool-loop",
                 "execution_mode": "tool_loop",
-                "turn": turn + 1,
+                "turn": turn,
                 "tool_call_count": tool_calls.len()
             }),
         ));
         messages.push(native_assistant_tool_history_message(&message));
+        let (prepared_calls, tool_uses) =
+            prepare_native_model_tool_turn(request, tool_calls, &mcp_tools);
+        outcome.tool_call_count = outcome.tool_call_count.saturating_add(prepared_calls.len());
+        let options = if runtime.supports_parallel_tool_calls {
+            ModelToolLoopOptions::default()
+        } else {
+            ModelToolLoopOptions::with_max_tool_use_concurrency(1)
+        };
+        let turn_output = execute_model_tool_turn(
+            tool_uses,
+            server_model_tool_executor_with_mcp(state.clone(), mcp_routes.clone()),
+            options.with_turn_context(native_model_turn_context(request, &mcp_tools)),
+        )
+        .await;
+        let mut shared_results = turn_output
+            .results
+            .into_iter()
+            .map(|result| (result.tool_use_id.clone(), result))
+            .collect::<std::collections::BTreeMap<_, _>>();
         let mut finish_requested = false;
-        for tool_call in tool_calls {
-            let result =
-                execute_native_model_tool_call(state, request, tool_call, &mut outcome).await;
+        for prepared in prepared_calls {
+            let result = match prepared {
+                PreparedNativeModelToolCall::Shared {
+                    tool_call_id,
+                    canonical_tool_name,
+                } => {
+                    let result = shared_results.remove(&tool_call_id).unwrap_or_else(|| {
+                        synthetic_missing_native_tool_result(&tool_call_id, &canonical_tool_name)
+                    });
+                    absorb_native_model_shared_tool_report(
+                        &mut outcome,
+                        &canonical_tool_name,
+                        &result.payload,
+                    );
+                    native_model_tool_call_result_from_shared(result, canonical_tool_name)
+                }
+                PreparedNativeModelToolCall::Synthetic(result) => result,
+            };
             finish_requested |= result.tool_name == "finish" && !result.is_error;
             let mut event = HarnessRunEvent::new(
                 "model.tool_call.completed",
                 json!({
                     "backend": "native-rust",
-                    "implementation": "native-model-file-write",
+                    "implementation": "native-model-tool-loop",
                     "execution_mode": "tool_loop",
                     "tool_call_id": &result.tool_call_id,
                     "tool_name": &result.tool_name,
@@ -591,14 +419,14 @@ async fn run_native_model_provider(
                 "tool_call_id": result.tool_call_id,
                 "content": result.content
             }));
-            append_native_model_attachment_messages(
-                &mut messages,
-                result.attachments,
-                &mut outcome,
-                turn + 1,
-                "after_tool_result",
-            );
         }
+        append_native_model_attachment_messages(
+            &mut messages,
+            turn_output.attachments,
+            &mut outcome,
+            turn,
+            "after_tool_turn",
+        );
         if output_limit_hit {
             if output_recovery_attempts < max_output_recovery_attempts {
                 output_recovery_attempts += 1;
@@ -616,11 +444,11 @@ async fn run_native_model_provider(
                 outcome
                     .blockers
                     .push("native model output token recovery attempts were exhausted".to_owned());
-                return Ok(NativeModelProviderOutput::ToolLoop(outcome));
+                return Ok(outcome);
             }
         }
         if finish_requested {
-            return Ok(NativeModelProviderOutput::ToolLoop(outcome));
+            return Ok(outcome);
         }
     }
 
@@ -641,7 +469,7 @@ async fn run_native_model_provider(
             .checks
             .push("native_model_tool_loop: stopped_after_turn_limit_with_file_writes".to_owned());
     }
-    Ok(NativeModelProviderOutput::ToolLoop(outcome))
+    Ok(outcome)
 }
 
 async fn send_native_chat_completion(
@@ -649,21 +477,25 @@ async fn send_native_chat_completion(
     url: &str,
     api_key: &str,
     body: &Value,
-) -> Result<Value, String> {
-    let response = client
-        .post(url)
-        .bearer_auth(api_key)
-        .json(body)
-        .send()
-        .await
-        .map_err(|error| format!("native model request failed: {error}"))?;
+    request_max_retries: u64,
+) -> Result<(Value, u32), String> {
+    let outcome = send_provider_request_with_retry(
+        || client.post(url).bearer_auth(api_key).json(body),
+        None,
+        request_max_retries,
+    )
+    .await
+    .map_err(|error| format!("native model request failed: {error}"))?;
+    let request_attempts = outcome.attempts;
+    let response = outcome.response;
     if !response.status().is_success() {
         return Err(format!("native model returned HTTP {}", response.status()));
     }
-    response
+    let payload = response
         .json()
         .await
-        .map_err(|error| format!("native model response was not JSON: {error}"))
+        .map_err(|error| format!("native model response was not JSON: {error}"))?;
+    Ok((payload, request_attempts))
 }
 
 fn native_model_provider_usage_event(
@@ -672,7 +504,7 @@ fn native_model_provider_usage_event(
     turn: usize,
     request_body: &Value,
     response_payload: &Value,
-    streaming_fallback: bool,
+    request_attempts: u32,
 ) -> HarnessRunEvent {
     let serialized_request = request_body.to_string();
     let usage = response_payload.get("usage").unwrap_or(&Value::Null);
@@ -685,7 +517,7 @@ fn native_model_provider_usage_event(
             "provider": provider,
             "model": model,
             "turn": turn,
-            "streaming_fallback": streaming_fallback,
+            "request_attempts": request_attempts,
             "request_chars": serialized_request.chars().count(),
             "estimated_input_tokens": token_usage.estimated_input_tokens,
             "estimated_output_tokens": token_usage.estimated_output_tokens,
@@ -741,10 +573,6 @@ fn native_assistant_message(payload: &Value) -> Result<Value, String> {
         .ok_or_else(|| "native model response did not include assistant message".to_owned())
 }
 
-fn native_assistant_content(payload: &Value) -> Result<Option<String>, String> {
-    native_assistant_message(payload).map(|message| native_assistant_message_content(&message))
-}
-
 fn native_assistant_message_content(message: &Value) -> Option<String> {
     match message.get("content") {
         Some(Value::String(text)) => Some(text.clone()),
@@ -764,7 +592,7 @@ fn native_model_output_recovery_message(attempt: u8, max_attempts: u8) -> Value 
     json!({
         "role": "user",
         "content": format!(
-            "Output token limit hit (recovery {attempt}/{max_attempts}). Resume directly without apology or recap. Break the remaining work into smaller pieces. Use edit_text_file for a small exact change to an existing file; use one focused write_text_file call per new file."
+            "Output token limit hit (recovery {attempt}/{max_attempts}). Resume directly without apology or recap. Break the remaining work into smaller atomic apply_patch calls."
         )
     })
 }
@@ -792,7 +620,8 @@ fn native_model_chat_completion_body(
     messages: Vec<Value>,
     max_output_tokens: u32,
     request: &coder_harness::HarnessRunRequest,
-    tools_enabled: bool,
+    supports_parallel_tool_calls: bool,
+    mcp_tools: &[NativeModelMcpTool],
 ) -> Value {
     let mut body = json!({
         "model": model,
@@ -800,10 +629,9 @@ fn native_model_chat_completion_body(
         "temperature": 0.2,
         "max_tokens": max_output_tokens
     });
-    if tools_enabled {
-        body["tools"] = native_model_tools_schema(request);
-        body["tool_choice"] = json!("auto");
-    }
+    body["tools"] = native_model_tools_schema(request, mcp_tools);
+    body["tool_choice"] = json!("auto");
+    body["parallel_tool_calls"] = json!(supports_parallel_tool_calls);
     let effort = request
         .backend_context
         .pointer("/coder/agent/runtime/effort")
@@ -835,7 +663,7 @@ fn native_model_initial_messages(request: &coder_harness::HarnessRunRequest) -> 
 }
 
 fn native_model_system_prompt(request: &coder_harness::HarnessRunRequest) -> String {
-    const EXECUTION_CONTRACT: &str = "Work only after Start Work approval. Prefer tool calls for inspect -> write -> verify. Available tool calls use repo-relative paths; never include the repo root, absolute paths, or secrets. For localized changes to existing files, use edit_text_file with the smallest clearly unique exact old_string. When one file needs multiple independent changes, use one edit_text_file call with the edits array; edits apply sequentially and atomically. Use write_text_file only for new files or deliberate whole-file rewrites. Use command_background for long-running checks, then read_command_output to observe completion. Finish with a short status. If tool calls are unavailable, return strict JSON with this schema: {\"status\":\"completed|blocked\",\"summary\":\"short\",\"files\":[{\"path\":\"relative/path\",\"content\":\"full file text\"}],\"checks\":[\"short check\"],\"blockers\":[\"reason\"]}. No markdown fences. Keep the implementation dependency-free unless the task explicitly asks for dependencies. Prefer a small complete web app with index.html, style.css, and main.js for browser game tasks.";
+    const EXECUTION_CONTRACT: &str = "Work only after Start Work approval. Prefer tool calls for inspect -> write -> verify. Available tool calls use repo-relative paths; never include the repo root, absolute paths, or secrets. Use the apply_patch tool to edit files so related add, update, delete, and move operations commit atomically. Do not use command tools for manual file edits; reserve them for checks and task-required generators. Use command_background for long-running checks, then read_command_output to observe completion. Finish with a short status.";
     let agent_system = request
         .backend_context
         .pointer("/coder/agent/system")
@@ -843,7 +671,12 @@ fn native_model_system_prompt(request: &coder_harness::HarnessRunRequest) -> Str
         .map(str::trim)
         .filter(|system| !system.is_empty())
         .unwrap_or("You are Coder native executor.");
-    format!("{agent_system}\n\n{EXECUTION_CONTRACT}")
+    let read_only_contract = if native_model_is_read_only(request) {
+        "\nThis is a typed read-only task. Use only the exposed repository and git inspection tools. Do not call commands, writes, skills, or subagents. Finish as soon as the requested facts and evidence are sufficient."
+    } else {
+        ""
+    };
+    format!("{agent_system}\n\n{EXECUTION_CONTRACT}{read_only_contract}")
 }
 
 fn native_model_user_prompt(request: &coder_harness::HarnessRunRequest) -> String {
@@ -852,326 +685,33 @@ fn native_model_user_prompt(request: &coder_harness::HarnessRunRequest) -> Strin
         .pointer("/coder/plan_context")
         .cloned()
         .unwrap_or(Value::Null);
-    let selected_tools = request
-        .backend_context
-        .pointer("/coder/harness/selected_tools")
-        .cloned()
-        .unwrap_or(Value::Null);
+    let runtime = harness_agent_runtime(request);
+    let turn_limit = format!(
+        "Execution budget: at most {} provider turns. ",
+        native_model_max_turns(request, &runtime)
+    );
     format!(
-        "Task:\n{}\n\nRepo root is already selected and must not be repeated in file paths.\nExecution budget: at most {} provider turns. Finish early as soon as the implementation is verifier-ready.\nPlan context JSON:\n{}\n\nSelected tools JSON:\n{}\n\nReturn only strict JSON. If affected_paths are listed, write those paths unless the task clearly requires companion browser files.",
-        request.task,
-        native_model_max_turns_from_request(request),
-        plan_context,
-        selected_tools
+        "Task:\n{}\n\nRepo root is already selected and must not be repeated in file paths.\n{}Finish as soon as implementation and checks are complete.\nPlan context JSON:\n{}\n\nTreat affected_paths as the approved change scope when it is present.",
+        request.task, turn_limit, plan_context
     )
 }
 
-fn native_model_tools_schema(request: &coder_harness::HarnessRunRequest) -> Value {
-    let tools = json!([
-        {
-            "type": "function",
-            "function": {
-                "name": "repo_find_files",
-                "description": "List repo files by optional query and extension filters.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "extensions": {"type": "array", "items": {"type": "string"}},
-                        "max_results": {"type": "integer", "minimum": 1, "maximum": 200}
-                    },
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "repo_search_text",
-                "description": "Search bounded repository text.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "max_matches": {"type": "integer", "minimum": 1, "maximum": 50}
-                    },
-                    "required": ["query"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "repo_read_file",
-                "description": "Read a bounded UTF-8 repo file.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "max_file_bytes": {"type": "integer", "minimum": 1, "maximum": 65536}
-                    },
-                    "required": ["path"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "repo_read_file_range",
-                "description": "Read a bounded line range from a repo file.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "start_line": {"type": "integer", "minimum": 1},
-                        "max_lines": {"type": "integer", "minimum": 1, "maximum": 200},
-                        "max_chars": {"type": "integer", "minimum": 1, "maximum": 100000}
-                    },
-                    "required": ["path"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "git_status",
-                "description": "Read bounded git status.",
-                "parameters": {"type": "object", "properties": {}, "additionalProperties": false}
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "git_diff",
-                "description": "Read bounded git diff.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 65536}
-                    },
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "command_run",
-                "description": "Run a bounded sandboxed command in the repo. Long commands are automatically backgrounded on timeout.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                        "cwd": {"type": "string"},
-                        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
-                        "foreground_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
-                        "max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 2097152}
-                    },
-                    "required": ["argv"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "command_background",
-                "description": "Start a sandboxed background command in the repo.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                        "cwd": {"type": "string"},
-                        "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 600},
-                        "max_output_bytes": {"type": "integer", "minimum": 1, "maximum": 2097152}
-                    },
-                    "required": ["argv"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "read_command_output",
-                "description": "Read or wait for a background command task.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "task_id": {"type": "string"},
-                        "timeout": {"type": "integer", "minimum": 0, "maximum": 120000},
-                        "block": {"type": "boolean"}
-                    },
-                    "required": ["task_id"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "task_stop",
-                "description": "Stop a background command or subagent task.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "task_id": {"type": "string"}
-                    },
-                    "required": ["task_id"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "agent_subagent",
-                "description": "Run a scoped child agent. It is synchronous unless run_in_background=true; a synchronous result is final and needs no status lookup.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "task": {"type": "string"},
-                        "subagent_type": {"type": "string"},
-                        "subagent_name": {"type": "string"},
-                        "run_in_background": {"type": "boolean"}
-                    },
-                    "required": ["task"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "read_subagent_status",
-                "description": "Read or wait for a background subagent only. Use background_task.task_id returned by agent_subagent, never agent_id.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "task_id": {"type": "string"},
-                        "timeout": {"type": "integer", "minimum": 0, "maximum": 120000},
-                        "block": {"type": "boolean"}
-                    },
-                    "required": ["task_id"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "cancel_subagent_background",
-                "description": "Cancel a background subagent task.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "task_id": {"type": "string"}
-                    },
-                    "required": ["task_id"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "skill",
-                "description": "Invoke an installed or built-in skill through the shared skill tool runtime.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "skill": {"type": "string"},
-                        "name": {"type": "string"},
-                        "command": {"type": "string"}
-                    },
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "edit_text_file",
-                "description": "Replace exact strings in one existing repo-relative UTF-8 file. Provide old_string/new_string for one edit or edits for multiple sequential atomic edits. Each old_string must be unique unless replace_all=true.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "old_string": {"type": "string", "minLength": 1},
-                        "new_string": {"type": "string"},
-                        "replace_all": {"type": "boolean"},
-                        "edits": {
-                            "type": "array",
-                            "minItems": 1,
-                            "maxItems": NATIVE_MODEL_MAX_FILE_EDITS,
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "old_string": {"type": "string", "minLength": 1},
-                                    "new_string": {"type": "string"},
-                                    "replace_all": {"type": "boolean"}
-                                },
-                                "required": ["old_string", "new_string"],
-                                "additionalProperties": false
-                            }
-                        }
-                    },
-                    "required": ["path"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "write_text_file",
-                "description": "Write full UTF-8 text content to a new repo-relative file or deliberately replace a whole file.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "content": {"type": "string"}
-                    },
-                    "required": ["path", "content"],
-                    "additionalProperties": false
-                }
-            }
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "finish",
-                "description": "Finish after tool work is complete or blocked.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "status": {"type": "string", "enum": ["completed", "blocked"]},
-                        "summary": {"type": "string"},
-                        "checks": {"type": "array", "items": {"type": "string"}},
-                        "blockers": {"type": "array", "items": {"type": "string"}}
-                    },
-                    "required": ["status", "summary"],
-                    "additionalProperties": false
-                }
-            }
-        }
-    ]);
-    Value::Array(
-        tools
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|tool| {
-                tool.pointer("/function/name")
-                    .and_then(Value::as_str)
-                    .is_some_and(|name| native_model_tool_is_selected(request, name))
-            })
-            .cloned()
-            .collect(),
-    )
+fn native_model_tools_schema(
+    request: &coder_harness::HarnessRunRequest,
+    mcp_tools: &[NativeModelMcpTool],
+) -> Value {
+    let mut specs = builtin_tools()
+        .iter()
+        .copied()
+        .filter_map(|tool| {
+            let spec = tool.model_spec()?;
+            native_model_tool_is_selected(request, tool.name).then_some(spec)
+        })
+        .collect::<Vec<_>>();
+    if !native_model_is_read_only(request) {
+        specs.extend(mcp_tools.iter().map(NativeModelMcpTool::model_spec));
+    }
+    Value::Array(specs)
 }
 
 fn native_model_tool_is_selected(
@@ -1180,6 +720,19 @@ fn native_model_tool_is_selected(
 ) -> bool {
     if tool_name == "finish" {
         return true;
+    }
+    if native_model_is_read_only(request)
+        && !matches!(
+            canonical_model_tool_name(tool_name),
+            "repo_find_files"
+                | "repo_search_text"
+                | "repo_read_file"
+                | "repo_read_file_range"
+                | "git_status"
+                | "git_diff"
+        )
+    {
+        return false;
     }
     let selected = request
         .backend_context
@@ -1191,18 +744,59 @@ fn native_model_tool_is_selected(
         .map(canonical_model_tool_name)
         .collect::<BTreeSet<_>>();
     let canonical = canonical_model_tool_name(tool_name);
+    if canonical == "apply_patch" {
+        return selected.contains("apply_patch") || selected.contains("patch_apply");
+    }
     if tool_name == "edit_text_file" {
-        return selected.contains("write_text_file") || selected.contains("patch_apply");
+        return selected.contains("write_text_file");
     }
     if canonical == "write_text_file" {
-        return selected.contains("write_text_file") || selected.contains("patch_apply");
-    }
-    if canonical == "task_stop" {
-        return selected.contains("task_stop")
-            || selected.contains("cancel_command_background")
-            || selected.contains("cancel_subagent_background");
+        return selected.contains("write_text_file");
     }
     canonical != "unknown" && selected.contains(canonical)
+}
+
+fn native_model_tool_is_authorized(
+    request: &coder_harness::HarnessRunRequest,
+    tool_name: &str,
+) -> bool {
+    if native_model_tool_is_selected(request, tool_name) {
+        return true;
+    }
+    if native_model_is_read_only(request)
+        || !matches!(tool_name, "edit_text_file" | "write_text_file")
+    {
+        return false;
+    }
+    request
+        .backend_context
+        .pointer("/coder/harness/selected_tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(canonical_model_tool_name)
+        .any(|tool| tool == "apply_patch")
+}
+
+fn native_model_is_read_only(request: &coder_harness::HarnessRunRequest) -> bool {
+    request
+        .backend_context
+        .pointer("/coder/plan_context/plan_draft/execution_mode")
+        .and_then(Value::as_str)
+        == Some("read_only")
+}
+
+fn native_model_max_turns(
+    request: &coder_harness::HarnessRunRequest,
+    runtime: &ResolvedAgentRuntimePolicy,
+) -> usize {
+    let configured = usize::try_from(runtime.max_turns).unwrap_or(usize::MAX);
+    if native_model_is_read_only(request) {
+        configured.min(NATIVE_READ_ONLY_MAX_TURNS)
+    } else {
+        configured
+    }
 }
 
 fn native_assistant_tool_history_message(message: &Value) -> Value {
@@ -1253,118 +847,133 @@ fn native_model_tool_calls(message: &Value, output_limit_hit: bool) -> Vec<Nativ
         .collect()
 }
 
-async fn execute_native_model_tool_call(
-    state: &ApiState,
+fn prepare_native_model_tool_turn(
     request: &coder_harness::HarnessRunRequest,
-    tool_call: NativeModelToolCall,
-    outcome: &mut NativeModelToolLoopOutcome,
-) -> NativeModelToolCallResult {
-    outcome.tool_call_count += 1;
-    let tool_call_id = tool_call.id;
-    let requested_tool_name = tool_call.name.clone();
-    let canonical_tool_name = canonical_model_tool_name(&tool_call.name);
-    let tool_name = if canonical_tool_name == "unknown" {
-        tool_call.name.clone()
-    } else {
-        canonical_tool_name.to_owned()
-    };
-    if !native_model_tool_is_selected(request, &tool_name) {
-        return native_model_tool_error(
-            tool_call_id,
-            tool_name,
-            format!("tool '{}' is not selected for this agent", tool_call.name),
-        );
-    }
-    let arguments = match tool_call.arguments {
-        Ok(arguments) => arguments,
-        Err(error) => {
-            return native_model_tool_error(tool_call_id, tool_name, error);
-        }
-    };
-    match tool_name.as_str() {
-        "repo_find_files"
-        | "repo_search_text"
-        | "repo_read_file"
-        | "repo_read_file_range"
-        | "git_status"
-        | "git_diff"
-        | "command_run"
-        | "command_background"
-        | "read_command_output"
-        | "task_stop"
-        | "agent_subagent"
-        | "read_subagent_status"
-        | "cancel_subagent_background"
-        | "skill" => {
-            execute_native_model_shared_tool(
-                state,
-                request,
-                tool_call_id,
-                tool_name,
+    tool_calls: Vec<NativeModelToolCall>,
+    mcp_tools: &[NativeModelMcpTool],
+) -> (Vec<PreparedNativeModelToolCall>, Vec<ModelToolUseBlock>) {
+    let mut prepared = Vec::with_capacity(tool_calls.len());
+    let mut tool_uses = Vec::with_capacity(tool_calls.len());
+    for tool_call in tool_calls {
+        let tool_call_id = tool_call.id;
+        let requested_tool_name = tool_call.name;
+        let canonical = canonical_model_tool_name(&requested_tool_name);
+        let canonical_tool_name = if canonical == "unknown" {
+            requested_tool_name.clone()
+        } else {
+            canonical.to_owned()
+        };
+        let mut arguments = match tool_call.arguments {
+            Ok(arguments) => arguments,
+            Err(error) => {
+                prepared.push(PreparedNativeModelToolCall::Synthetic(
+                    native_model_tool_error(tool_call_id, canonical_tool_name, error),
+                ));
+                continue;
+            }
+        };
+        prepare_native_model_tool_input(&canonical_tool_name, request, &mut arguments);
+        let model_tool = mcp_tools
+            .iter()
+            .find(|tool| tool.provider_name == requested_tool_name);
+        tool_uses.push(if let Some(model_tool) = model_tool {
+            ModelToolUseBlock::with_concurrency(
+                tool_call_id.clone(),
                 requested_tool_name,
                 arguments,
-                outcome,
+                model_tool.concurrency(),
             )
-            .await
-        }
-        "write_text_file" => {
-            execute_native_model_write_text_file(state, request, tool_call_id, arguments, outcome)
-        }
-        "edit_text_file" => {
-            execute_native_model_edit_text_file(state, request, tool_call_id, arguments, outcome)
-        }
-        "finish" => execute_native_model_finish(tool_call_id, arguments, outcome),
-        _ => native_model_tool_error(
+        } else {
+            ModelToolUseBlock::new(tool_call_id.clone(), requested_tool_name, arguments)
+        });
+        prepared.push(PreparedNativeModelToolCall::Shared {
             tool_call_id,
-            tool_name,
-            format!("unsupported native executor tool '{}'", tool_call.name),
-        ),
+            canonical_tool_name,
+        });
+    }
+    (prepared, tool_uses)
+}
+
+fn native_model_turn_context(
+    request: &coder_harness::HarnessRunRequest,
+    mcp_tools: &[NativeModelMcpTool],
+) -> TurnContext {
+    let mut selected_tools = builtin_tools()
+        .iter()
+        .filter(|tool| native_model_tool_is_authorized(request, tool.name))
+        .map(|tool| tool.name.to_owned())
+        .collect::<Vec<_>>();
+    if !native_model_is_read_only(request) {
+        selected_tools.extend(mcp_tools.iter().map(|tool| tool.provider_name.clone()));
+    }
+    TurnContext {
+        run_id: Some(request.run_id.to_string()),
+        repo_root: Some(request.repo_root.clone()),
+        harness_id: Some(request.harness_id.clone()),
+        agent_id: Some(request.agent_id.clone()),
+        agent_role: request
+            .backend_context
+            .pointer("/coder/agent/role")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        current_model: request
+            .backend_context
+            .pointer("/coder/model/model")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        model_capabilities: Some(harness_model_spec(request).resolved_capabilities()),
+        current_effort: request
+            .backend_context
+            .pointer("/coder/agent/runtime/effort")
+            .cloned(),
+        selected_tools,
+        permission_policy: request
+            .backend_context
+            .pointer("/coder/harness/permissions")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok()),
+        start_work_authorized: start_work_authorized(request),
+        token_budget: request
+            .backend_context
+            .pointer("/coder/workflow_loop/token_budget")
+            .and_then(Value::as_u64),
+        ..TurnContext::default()
     }
 }
 
-async fn execute_native_model_shared_tool(
-    state: &ApiState,
-    request: &coder_harness::HarnessRunRequest,
-    tool_call_id: String,
+fn native_model_tool_call_result_from_shared(
+    result: ModelToolResultBlock,
     canonical_tool_name: String,
-    requested_tool_name: String,
-    mut arguments: Value,
-    outcome: &mut NativeModelToolLoopOutcome,
 ) -> NativeModelToolCallResult {
-    prepare_native_model_shared_tool_input(&canonical_tool_name, request, &mut arguments);
-    let response = execute_model_tool_response(
-        state.clone(),
-        ModelToolExecuteRequest {
-            tool_use_id: tool_call_id.clone(),
-            tool_name: requested_tool_name,
-            run_id: Some(request.run_id.to_string()),
-            harness_id: Some(request.harness_id.clone()),
-            agent_id: Some(request.agent_id.clone()),
-            current_model: request
-                .backend_context
-                .pointer("/coder/model/model")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            current_effort: request
-                .backend_context
-                .pointer("/coder/agent/runtime/effort")
-                .cloned(),
-            skill_context_modifiers: Vec::new(),
-            input: arguments,
-        },
-    )
-    .await;
-    absorb_native_model_shared_tool_report(outcome, &canonical_tool_name, &response.payload);
-    let attachments =
-        drain_native_model_async_attachments_after_tool(state, request, &response).await;
     NativeModelToolCallResult {
-        tool_call_id: response.tool_use_id,
+        tool_call_id: result.tool_use_id,
         tool_name: canonical_tool_name,
-        status: response.status,
-        is_error: response.is_error,
-        content: truncate_tool_content(response.content),
-        refs: response.refs,
-        attachments,
+        status: result.status,
+        is_error: result.is_error,
+        content: truncate_tool_content(result.content),
+        refs: result.refs,
+    }
+}
+
+fn synthetic_missing_native_tool_result(
+    tool_call_id: &str,
+    tool_name: &str,
+) -> ModelToolResultBlock {
+    ModelToolResultBlock {
+        contract: coder_workflow::MODEL_TOOL_RESULT_CONTRACT,
+        source: "coder-workflow",
+        result_type: "tool_result",
+        tool_use_id: tool_call_id.to_owned(),
+        tool_name: tool_name.to_owned(),
+        status: "failed".to_owned(),
+        is_error: true,
+        content: format!(
+            "<tool_use_error>Error calling tool ({tool_name}): missing shared tool result</tool_use_error>"
+        ),
+        content_truncated: false,
+        payload: json!({"status": "failed", "error": "missing shared tool result"}),
+        refs: Vec::new(),
+        phases: Vec::new(),
     }
 }
 
@@ -1373,37 +982,53 @@ fn absorb_native_model_shared_tool_report(
     tool_name: &str,
     payload: &Value,
 ) {
-    if !matches!(tool_name, "agent_subagent" | "read_subagent_status") {
-        return;
-    }
-    let Some(report) = payload
-        .get("report")
-        .cloned()
-        .and_then(|value| serde_json::from_value::<FinalReport>(value).ok())
-    else {
-        return;
-    };
-    outcome.changed_files.extend(report.changed_files);
-    outcome.evidence_refs.extend(report.evidence_refs);
-}
-
-async fn drain_native_model_async_attachments_after_tool(
-    state: &ApiState,
-    request: &coder_harness::HarnessRunRequest,
-    response: &crate::ModelToolExecuteResponse,
-) -> Vec<Value> {
-    let mut attachments = drain_native_model_async_attachments(state, request);
-    if !attachments.is_empty() || !model_tool_response_requested_async_rewake(response) {
-        return attachments;
-    }
-    for _ in 0..20 {
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        attachments = drain_native_model_async_attachments(state, request);
-        if !attachments.is_empty() {
-            break;
+    let payload = payload.get("original_payload").unwrap_or(payload);
+    if matches!(tool_name, "write_text_file" | "edit_text_file") {
+        if let Some(path) = payload
+            .pointer("/changed_file/path")
+            .and_then(Value::as_str)
+        {
+            outcome.changed_files.push(path.to_owned());
+        }
+        if let Some(ref_id) = payload
+            .pointer("/evidence_ref/ref_id")
+            .and_then(Value::as_str)
+        {
+            outcome.evidence_refs.push(EvidenceRef {
+                kind: "repo_evidence".to_owned(),
+                reference: format!("repo-evidence://{ref_id}"),
+            });
         }
     }
-    attachments
+    if tool_name == "finish" {
+        outcome.status = payload
+            .get("status")
+            .and_then(Value::as_str)
+            .filter(|status| *status == "blocked")
+            .map(|_| "blocked")
+            .unwrap_or("completed")
+            .to_owned();
+        if let Some(summary) = payload.get("summary").and_then(Value::as_str) {
+            outcome.summary = summary.to_owned();
+        }
+        outcome
+            .checks
+            .extend(native_tool_string_array(payload, "checks"));
+        outcome
+            .blockers
+            .extend(native_tool_string_array(payload, "blockers"));
+        return;
+    }
+    if matches!(tool_name, "agent_subagent" | "read_subagent_status") {
+        if let Some(report) = payload
+            .get("report")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<FinalReport>(value).ok())
+        {
+            outcome.changed_files.extend(report.changed_files);
+            outcome.evidence_refs.extend(report.evidence_refs);
+        }
+    }
 }
 
 fn drain_native_model_async_attachments(
@@ -1420,22 +1045,6 @@ fn drain_native_model_async_attachments(
         Some(request.agent_id.as_str()),
     ));
     attachments
-}
-
-fn model_tool_response_requested_async_rewake(response: &crate::ModelToolExecuteResponse) -> bool {
-    response.phases.iter().any(|phase| {
-        phase
-            .get("hook_results")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .any(|hook_result| {
-                hook_result
-                    .get("async_rewake")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-            })
-    })
 }
 
 fn append_native_model_attachment_messages(
@@ -1463,7 +1072,7 @@ fn append_native_model_attachment_messages(
         "model.tool_turn.attachments_delivered",
         json!({
             "backend": "native-rust",
-            "implementation": "native-model-file-write",
+            "implementation": "native-model-tool-loop",
             "execution_mode": "tool_loop",
             "turn": turn,
             "delivery_point": delivery_point,
@@ -1498,7 +1107,7 @@ fn native_model_attachment_content(attachment: &Value) -> String {
     serde_json::to_string_pretty(attachment).unwrap_or_else(|_| attachment.to_string())
 }
 
-fn prepare_native_model_shared_tool_input(
+fn prepare_native_model_tool_input(
     tool_name: &str,
     request: &coder_harness::HarnessRunRequest,
     input: &mut Value,
@@ -1509,20 +1118,6 @@ fn prepare_native_model_shared_tool_input(
     let Some(object) = input.as_object_mut() else {
         return;
     };
-    object
-        .entry("repo_root".to_owned())
-        .or_insert_with(|| Value::String(request.repo_root.clone()));
-    object
-        .entry("run_id".to_owned())
-        .or_insert_with(|| Value::String(request.run_id.to_string()));
-    object
-        .entry("harness_id".to_owned())
-        .or_insert_with(|| Value::String(request.harness_id.clone()));
-    if tool_name != "agent_subagent" {
-        object
-            .entry("agent_id".to_owned())
-            .or_insert_with(|| Value::String(request.agent_id.clone()));
-    }
     match tool_name {
         "repo_find_files" => {
             object.entry("max_results".to_owned()).or_insert(json!(80));
@@ -1538,9 +1133,6 @@ fn prepare_native_model_shared_tool_input(
                 .entry("sandbox".to_owned())
                 .or_insert_with(|| Value::Bool(true));
             object
-                .entry("approved".to_owned())
-                .or_insert_with(|| Value::Bool(true));
-            object
                 .entry("max_output_bytes".to_owned())
                 .or_insert_with(|| json!(coder_tools::DEFAULT_MAX_COMMAND_OUTPUT_BYTES));
             if tool_name == "command_run" {
@@ -1551,261 +1143,10 @@ fn prepare_native_model_shared_tool_input(
         }
         "agent_subagent" => {
             object
-                .entry("approved".to_owned())
-                .or_insert_with(|| Value::Bool(true));
-            object
                 .entry("backend_context".to_owned())
                 .or_insert_with(|| request.backend_context.clone());
-            object
-                .entry("parent_agent_id".to_owned())
-                .or_insert_with(|| Value::String(request.agent_id.clone()));
-            object
-                .entry("parent_harness_id".to_owned())
-                .or_insert_with(|| Value::String(request.harness_id.clone()));
-        }
-        "task_stop" | "cancel_subagent_background" => {
-            object
-                .entry("approved".to_owned())
-                .or_insert_with(|| Value::Bool(true));
         }
         _ => {}
-    }
-}
-
-fn execute_native_model_write_text_file(
-    state: &ApiState,
-    request: &coder_harness::HarnessRunRequest,
-    tool_call_id: String,
-    arguments: Value,
-    outcome: &mut NativeModelToolLoopOutcome,
-) -> NativeModelToolCallResult {
-    let Some(path) = native_tool_string(&arguments, &["path"]) else {
-        return native_model_tool_error(tool_call_id, "write_text_file", "path is required");
-    };
-    let Some(content) = native_tool_content_string(&arguments, "content") else {
-        return native_model_tool_error(tool_call_id, "write_text_file", "content is required");
-    };
-    if content.is_empty() {
-        return native_model_tool_error(tool_call_id, "write_text_file", "content is empty");
-    }
-    match write_text_file(
-        &request.repo_root,
-        FileWriteRequest {
-            path: PathBuf::from(&path),
-            content,
-            max_bytes: NATIVE_MODEL_MAX_FILE_BYTES,
-            source: "model_tool_loop".to_owned(),
-        },
-    ) {
-        Ok(evidence) => record_native_model_file_change(
-            state,
-            request,
-            tool_call_id,
-            "write_text_file",
-            "full_write",
-            evidence,
-            outcome,
-        ),
-        Err(error) => native_model_tool_error(tool_call_id, "write_text_file", error.to_string()),
-    }
-}
-
-fn execute_native_model_edit_text_file(
-    state: &ApiState,
-    request: &coder_harness::HarnessRunRequest,
-    tool_call_id: String,
-    arguments: Value,
-    outcome: &mut NativeModelToolLoopOutcome,
-) -> NativeModelToolCallResult {
-    let Some(path) = native_tool_string(&arguments, &["path"]) else {
-        return native_model_tool_error(tool_call_id, "edit_text_file", "path is required");
-    };
-    let edits = match native_model_file_edits(&arguments) {
-        Ok(edits) => edits,
-        Err(error) => {
-            return native_model_tool_error(tool_call_id, "edit_text_file", error);
-        }
-    };
-    let operation = if edits.len() > 1 {
-        "exact_string_edit_batch"
-    } else {
-        "exact_string_edit"
-    };
-    match edit_text_file_batch(
-        &request.repo_root,
-        FileEditBatchRequest {
-            path: PathBuf::from(path),
-            edits,
-            max_bytes: NATIVE_MODEL_MAX_FILE_BYTES,
-            source: "model_tool_loop".to_owned(),
-        },
-    ) {
-        Ok(evidence) => record_native_model_file_change(
-            state,
-            request,
-            tool_call_id,
-            "edit_text_file",
-            operation,
-            evidence,
-            outcome,
-        ),
-        Err(error) => native_model_tool_error(tool_call_id, "edit_text_file", error.to_string()),
-    }
-}
-
-fn native_model_file_edits(arguments: &Value) -> Result<Vec<FileEditReplacement>, &'static str> {
-    if let Some(items) = arguments.get("edits") {
-        let Some(items) = items.as_array() else {
-            return Err("edits must be an array");
-        };
-        if items.is_empty() {
-            return Err("edits must contain at least one edit");
-        }
-        if items.len() > NATIVE_MODEL_MAX_FILE_EDITS {
-            return Err("edits exceeded the maximum of 32 items");
-        }
-        return items
-            .iter()
-            .map(|item| {
-                let Some(old_string) = native_tool_content_string(item, "old_string") else {
-                    return Err("each edit requires old_string");
-                };
-                let Some(new_string) = native_tool_content_string(item, "new_string") else {
-                    return Err("each edit requires new_string");
-                };
-                Ok(FileEditReplacement {
-                    old_string,
-                    new_string,
-                    replace_all: item
-                        .get("replace_all")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                })
-            })
-            .collect();
-    }
-    let Some(old_string) = native_tool_content_string(arguments, "old_string") else {
-        return Err("old_string is required when edits is omitted");
-    };
-    let Some(new_string) = native_tool_content_string(arguments, "new_string") else {
-        return Err("new_string is required when edits is omitted");
-    };
-    Ok(vec![FileEditReplacement {
-        old_string,
-        new_string,
-        replace_all: arguments
-            .get("replace_all")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    }])
-}
-
-fn record_native_model_file_change(
-    state: &ApiState,
-    request: &coder_harness::HarnessRunRequest,
-    tool_call_id: String,
-    tool_name: &'static str,
-    operation: &'static str,
-    evidence: coder_tools::FileWriteEvidence,
-    outcome: &mut NativeModelToolLoopOutcome,
-) -> NativeModelToolCallResult {
-    let evidence_ref = match write_file_evidence(state, &request.run_id, &evidence) {
-        Ok(reference) => reference,
-        Err(error) => return native_model_tool_error(tool_call_id, tool_name, error.to_string()),
-    };
-    if !outcome
-        .changed_files
-        .iter()
-        .any(|file| file == &evidence.path)
-    {
-        outcome.changed_files.push(evidence.path.clone());
-    }
-    outcome.evidence_refs.push(repo_evidence_ref(&evidence_ref));
-    outcome.events.push(
-        HarnessRunEvent::new(
-            "file.written",
-            json!({
-                "backend": "native-rust",
-                "implementation": "native-model-file-write",
-                "execution_mode": "tool_loop",
-                "tool_call_id": &tool_call_id,
-                "tool_name": tool_name,
-                "operation": operation,
-                "path": &evidence.path,
-                "status": &evidence.status,
-                "created": evidence.created,
-                "bytes_written": evidence.bytes_written,
-                "evidence_ref": &evidence_ref.ref_id
-            }),
-        )
-        .with_ref(
-            "repo_evidence",
-            format!("repo-evidence://{}", evidence_ref.ref_id),
-        ),
-    );
-    let payload = json!({
-        "status": "completed",
-        "tool": tool_name,
-        "operation": operation,
-        "result": evidence
-    });
-    native_model_tool_success(tool_call_id, tool_name, payload, Some(evidence_ref))
-}
-
-fn execute_native_model_finish(
-    tool_call_id: String,
-    arguments: Value,
-    outcome: &mut NativeModelToolLoopOutcome,
-) -> NativeModelToolCallResult {
-    let status =
-        native_tool_string(&arguments, &["status"]).unwrap_or_else(|| "completed".to_owned());
-    outcome.status = if status == "blocked" {
-        "blocked".to_owned()
-    } else {
-        "completed".to_owned()
-    };
-    if let Some(summary) = native_tool_string(&arguments, &["summary"]) {
-        outcome.summary = summary;
-    }
-    outcome
-        .checks
-        .extend(native_tool_string_array(&arguments, "checks"));
-    outcome
-        .blockers
-        .extend(native_tool_string_array(&arguments, "blockers"));
-    let payload = json!({
-        "status": outcome.status,
-        "tool": "finish",
-        "summary": &outcome.summary,
-        "checks": &outcome.checks,
-        "blockers": &outcome.blockers
-    });
-    native_model_tool_success(tool_call_id, "finish", payload, None)
-}
-
-fn native_model_tool_success(
-    tool_call_id: impl Into<String>,
-    tool_name: impl Into<String>,
-    payload: Value,
-    evidence_ref: Option<RepoEvidenceRef>,
-) -> NativeModelToolCallResult {
-    let tool_call_id = tool_call_id.into();
-    let tool_name = tool_name.into();
-    NativeModelToolCallResult {
-        tool_call_id,
-        tool_name,
-        status: "completed".to_owned(),
-        is_error: false,
-        content: bounded_tool_content(&payload),
-        refs: evidence_ref
-            .map(|reference| {
-                vec![HarnessRunEventRef {
-                    label: "repo_evidence".to_owned(),
-                    uri: format!("repo-evidence://{}", reference.ref_id),
-                }]
-            })
-            .unwrap_or_default(),
-        attachments: Vec::new(),
     }
 }
 
@@ -1826,7 +1167,6 @@ fn native_model_tool_error(
         is_error: true,
         content: bounded_tool_content(&payload),
         refs: Vec::new(),
-        attachments: Vec::new(),
     }
 }
 
@@ -1837,16 +1177,7 @@ fn apply_native_model_final_content(
     let Some(content) = content.map(str::trim).filter(|value| !value.is_empty()) else {
         return;
     };
-    if let Ok(plan) = parse_native_model_plan(content) {
-        if plan.status == "blocked" {
-            outcome.status = "blocked".to_owned();
-        }
-        if !plan.summary.trim().is_empty() {
-            outcome.summary = plan.summary;
-        }
-        outcome.checks.extend(plan.checks);
-        outcome.blockers.extend(plan.blockers);
-    } else if outcome.summary.trim().is_empty() {
+    if outcome.summary.trim().is_empty() {
         outcome.summary = content.chars().take(400).collect();
     }
 }
@@ -1865,7 +1196,7 @@ fn tool_loop_result(
         "executor.reasoning_summary",
         json!({
             "backend": "native-rust",
-            "implementation": "native-model-file-write",
+            "implementation": "native-model-tool-loop",
             "execution_mode": "tool_loop",
             "summary": "Run a provider-driven tool loop where Rust executes repo-scoped tools and returns observations.",
             "credential_source": credential_source,
@@ -1881,40 +1212,8 @@ fn tool_loop_result(
             .changed_files
             .extend(recorded_run_changed_files(state, &request.run_id)?);
     }
-    if outcome.status != "blocked"
-        && outcome.changed_files.is_empty()
-        && native_model_requires_file_writes(request)
-    {
-        outcome.status = "blocked".to_owned();
-        outcome
-            .blockers
-            .push("native model tool loop produced no file writes".to_owned());
-    }
     let mut changed_files = dedupe_strings(outcome.changed_files);
-    let mut evidence_refs = outcome.evidence_refs;
-    if outcome.status != "blocked" {
-        if let Some(reference) =
-            write_git_diff_evidence(state, &request.run_id, &request.repo_root)?
-        {
-            evidence_refs.push(repo_evidence_ref(&reference));
-            events.push(
-                HarnessRunEvent::new(
-                    "git.diff.recorded",
-                    json!({
-                        "backend": "native-rust",
-                        "implementation": "native-model-file-write",
-                        "execution_mode": "tool_loop",
-                        "evidence_ref": reference.ref_id
-                    }),
-                )
-                .with_ref(
-                    "repo_evidence",
-                    format!("repo-evidence://{}", reference.ref_id),
-                ),
-            );
-        }
-    }
-
+    let evidence_refs = outcome.evidence_refs;
     let checks = if outcome.checks.is_empty() {
         vec![format!(
             "native_model_tool_loop: completed {} tool call(s)",
@@ -1955,7 +1254,7 @@ fn tool_loop_result(
         format!("backend.native_rust.{status}"),
         json!({
             "backend": "native-rust",
-            "implementation": "native-model-file-write",
+            "implementation": "native-model-tool-loop",
             "execution_mode": "tool_loop",
             "status": status,
             "changed_files": &report.changed_files,
@@ -1988,53 +1287,6 @@ pub(crate) fn recorded_run_changed_files(
     Ok(dedupe_strings(changed_files))
 }
 
-fn no_file_report_result(
-    started: HarnessRunEvent,
-    credential_source: String,
-    provider: String,
-    model_name: String,
-    plan: NativeModelPlan,
-) -> HarnessRunResult {
-    let summary = if plan.summary.trim().is_empty() {
-        "Native model subagent completed without file writes.".to_owned()
-    } else {
-        plan.summary
-    };
-    let mut report = FinalReport::completed(summary);
-    report.checks = plan.checks;
-    report.next_steps = plan.blockers;
-    let events = vec![
-        started,
-        HarnessRunEvent::new(
-            "executor.reasoning_summary",
-            json!({
-                "backend": "native-rust",
-                "implementation": "native-model-file-write",
-                "summary": "Provider returned a no-file report for a native subagent task.",
-                "credential_source": credential_source,
-                "provider": provider,
-                "model": model_name
-            }),
-        ),
-        HarnessRunEvent::new(
-            "backend.native_rust.completed",
-            json!({
-                "backend": "native-rust",
-                "implementation": "native-model-file-write",
-                "status": "completed",
-                "changed_files": [],
-                "checks": &report.checks,
-                "tool_call_count": 0
-            }),
-        ),
-    ];
-    HarnessRunResult {
-        status: "completed".to_owned(),
-        report: Some(report),
-        events,
-    }
-}
-
 fn bounded_tool_content(payload: &Value) -> String {
     let text = serde_json::to_string(payload).unwrap_or_else(|_| "{}".to_owned());
     truncate_tool_content(text)
@@ -2056,21 +1308,6 @@ fn evidence_refs_from_event_refs(refs: &[HarnessRunEventRef]) -> Vec<EvidenceRef
             reference: reference.uri.clone(),
         })
         .collect()
-}
-
-fn native_tool_string(input: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        input
-            .get(*key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-    })
-}
-
-fn native_tool_content_string(input: &Value, key: &str) -> Option<String> {
-    input.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
 fn native_tool_string_array(input: &Value, key: &str) -> Vec<String> {
@@ -2102,111 +1339,6 @@ fn dedupe_evidence_refs(values: Vec<EvidenceRef>) -> Vec<EvidenceRef> {
         .collect()
 }
 
-fn parse_native_model_plan(content: &str) -> Result<NativeModelPlan, serde_json::Error> {
-    serde_json::from_str(content).or_else(|_| {
-        let trimmed = content.trim();
-        let start = trimmed.find('{').unwrap_or(0);
-        let end = trimmed
-            .rfind('}')
-            .map(|index| index + 1)
-            .unwrap_or(trimmed.len());
-        serde_json::from_str(&trimmed[start..end])
-    })
-}
-
-fn write_file_evidence(
-    state: &ApiState,
-    run_id: &RunId,
-    evidence: &coder_tools::FileWriteEvidence,
-) -> Result<RepoEvidenceRef, coder_store::StoreError> {
-    state.store.write_repo_evidence(
-        run_id,
-        RepoEvidenceKind::RepoDiff,
-        evidence.repo_root.clone(),
-        vec![evidence.path.clone()],
-        format!("Changed file '{}'.", evidence.path),
-        json!({
-            "evidence_kind": &evidence.evidence_kind,
-            "operation": &evidence.evidence_kind,
-            "files": [
-                {
-                    "path": &evidence.path,
-                    "status": if evidence.created { "added" } else { "modified" }
-                }
-            ],
-            "result": evidence
-        }),
-    )
-}
-
-fn write_git_diff_evidence(
-    state: &ApiState,
-    run_id: &RunId,
-    repo_root: &str,
-) -> Result<Option<RepoEvidenceRef>, coder_store::StoreError> {
-    let Ok(diff) = git_diff(repo_root, coder_tools::DEFAULT_MAX_GIT_OUTPUT_BYTES) else {
-        return Ok(None);
-    };
-    state
-        .store
-        .write_repo_evidence(
-            run_id,
-            RepoEvidenceKind::RepoDiff,
-            diff.repo_root.clone(),
-            Vec::new(),
-            "Captured git diff after native model file writes.",
-            json!({
-                "evidence_kind": "repo_evidence",
-                "operation": "git_diff",
-                "diff": diff
-            }),
-        )
-        .map(Some)
-}
-
-fn repo_evidence_ref(reference: &RepoEvidenceRef) -> EvidenceRef {
-    EvidenceRef {
-        kind: "repo_evidence".to_owned(),
-        reference: format!("repo-evidence://{}", reference.ref_id),
-    }
-}
-
-fn max_output_tokens_from_request(request: &coder_harness::HarnessRunRequest) -> u32 {
-    request
-        .backend_context
-        .pointer("/coder/agent/runtime/max_output_tokens")
-        .and_then(Value::as_u64)
-        .map(|value| value.clamp(1024, 32_000) as u32)
-        .unwrap_or(8_000)
-}
-
-fn native_model_max_turns_from_request(request: &coder_harness::HarnessRunRequest) -> usize {
-    request
-        .backend_context
-        .pointer("/coder/agent/runtime/max_turns")
-        .and_then(Value::as_u64)
-        .filter(|value| *value > 0)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(NATIVE_MODEL_DEFAULT_MAX_TURNS)
-}
-
-fn native_model_max_output_recovery_attempts(request: &coder_harness::HarnessRunRequest) -> u8 {
-    request
-        .backend_context
-        .pointer("/coder/agent/runtime/max_output_recovery_attempts")
-        .and_then(Value::as_u64)
-        .and_then(|value| u8::try_from(value).ok())
-        .unwrap_or(AGENT_MAX_OUTPUT_RECOVERY_ATTEMPTS_DEFAULT)
-}
-
-fn native_model_response_timeout_ms(request: &coder_harness::HarnessRunRequest) -> u64 {
-    request
-        .backend_context
-        .pointer("/coder/agent/runtime/stream_idle_timeout_ms")
-        .and_then(Value::as_u64)
-        .unwrap_or(90_000)
-}
-
 fn start_work_authorized(request: &coder_harness::HarnessRunRequest) -> bool {
     request
         .backend_context
@@ -2226,10 +1358,6 @@ fn native_model_agent_can_execute(request: &coder_harness::HarnessRunRequest) ->
     request_agent_role(request) == Some("executor") || request_is_native_subagent(request)
 }
 
-fn native_model_requires_file_writes(request: &coder_harness::HarnessRunRequest) -> bool {
-    !request_is_native_subagent(request)
-}
-
 fn request_is_native_subagent(request: &coder_harness::HarnessRunRequest) -> bool {
     request
         .backend_context
@@ -2241,29 +1369,6 @@ fn request_is_native_subagent(request: &coder_harness::HarnessRunRequest) -> boo
             .pointer("/coder_subagent/context/agent_type")
             .and_then(Value::as_str)
             == Some("subagent")
-}
-
-fn native_model_should_handle(request: &coder_harness::HarnessRunRequest) -> bool {
-    request
-        .backend_context
-        .pointer("/coder/harness/selected_tools")
-        .and_then(Value::as_array)
-        .map(|tools| {
-            tools.iter().filter_map(Value::as_str).any(|tool| {
-                matches!(
-                    tool,
-                    "patch_apply"
-                        | "apply_patch"
-                        | "apply_patch_sandbox"
-                        | "patch_preview"
-                        | "preview_patch"
-                        | "command_run"
-                        | "run_command"
-                        | "run_command_sandbox"
-                )
-            })
-        })
-        .unwrap_or(false)
 }
 
 fn blocked_result(
@@ -2281,31 +1386,8 @@ fn blocked_result(
                 "backend.native_rust.blocked",
                 json!({
                     "backend": "native-rust",
-                    "implementation": "native-model-file-write",
+                    "implementation": "native-model-tool-loop",
                     "status": "blocked",
-                    "reason": blocker
-                }),
-            ),
-        ],
-    }
-}
-
-fn failed_result(started: HarnessRunEvent, blocker: impl Into<String>) -> HarnessRunResult {
-    let blocker = blocker.into();
-    HarnessRunResult {
-        status: "failed".to_owned(),
-        report: Some(FinalReport::failed(
-            "Native model executor failed before applying file writes.",
-            blocker.clone(),
-        )),
-        events: vec![
-            started,
-            HarnessRunEvent::new(
-                "backend.native_rust.failed",
-                json!({
-                    "backend": "native-rust",
-                    "implementation": "native-model-file-write",
-                    "status": "failed",
                     "reason": blocker
                 }),
             ),
@@ -2330,6 +1412,7 @@ fn concise_blocker(blockers: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coder_harness::SideEffectLevel;
     use coder_store::RunStore;
 
     fn budget_test_request(run_id: &str, token_budget: u64) -> coder_harness::HarnessRunRequest {
@@ -2392,9 +1475,12 @@ mod tests {
             Vec::new(),
             256,
             &request,
-            false,
+            true,
+            &[],
         );
         assert_eq!(deepseek["thinking"]["type"], "enabled");
+        assert!(deepseek["tools"].is_array());
+        assert_eq!(deepseek["tool_choice"], "auto");
 
         let generic = native_model_chat_completion_body(
             "openai-compatible",
@@ -2402,7 +1488,8 @@ mod tests {
             Vec::new(),
             256,
             &request,
-            false,
+            true,
+            &[],
         );
         assert_eq!(generic["reasoning_effort"], "high");
 
@@ -2416,7 +1503,8 @@ mod tests {
             Vec::new(),
             256,
             &request,
-            false,
+            true,
+            &[],
         );
         assert_eq!(default_deepseek["thinking"]["type"], "disabled");
     }
@@ -2444,12 +1532,12 @@ mod tests {
             model: "test",
             request: &request,
             max_output_tokens: 256,
+            request_max_retries: crate::provider_runtime::PROVIDER_REQUEST_MAX_RETRIES,
+            runtime: harness_agent_runtime(&request),
         })
         .await
         .unwrap();
-        let NativeModelProviderOutput::ToolLoop(outcome) = output else {
-            panic!("exhausted budget must stop the tool loop");
-        };
+        let outcome = output;
         assert_eq!(outcome.status, "blocked");
         assert!(outcome
             .events
@@ -2476,8 +1564,55 @@ mod tests {
         let prompt = native_model_system_prompt(&request);
         assert!(prompt.starts_with("Role-specific instructions."));
         assert!(prompt.contains("inspect -> write -> verify"));
-        assert!(prompt.contains("smallest clearly unique exact old_string"));
-        assert!(prompt.contains("one edit_text_file call with the edits array"));
+        assert!(prompt.contains("Use the apply_patch tool to edit files"));
+        assert!(prompt.contains("Do not use command tools for manual file edits"));
+        assert!(prompt.contains("commit atomically"));
+        assert!(!prompt.contains("strict JSON"));
+    }
+
+    #[test]
+    fn plain_assistant_text_is_summary_only_not_a_file_plan() {
+        let mut outcome = NativeModelToolLoopOutcome::default();
+        apply_native_model_final_content(
+            &mut outcome,
+            Some(r#"{"status":"completed","files":[{"path":"README.md","content":"x"}]}"#),
+        );
+
+        assert!(outcome.summary.contains("README.md"));
+        assert!(outcome.changed_files.is_empty());
+        assert!(outcome.evidence_refs.is_empty());
+    }
+
+    #[test]
+    fn native_user_prompt_does_not_repeat_structured_tool_specs_or_task_goal() {
+        let request = coder_harness::HarnessRunRequest {
+            run_id: RunId::from_string("run-compact-user-prompt"),
+            workflow_id: "planner-led".to_owned(),
+            node_id: "executor".to_owned(),
+            agent_id: "executor".to_owned(),
+            harness_id: "native-code-edit".to_owned(),
+            repo_root: ".".to_owned(),
+            task: "Create README.md.".to_owned(),
+            backend_context: json!({
+                "coder": {
+                    "harness": {"selected_tools": ["repo_read_file", "write_text_file"]},
+                    "plan_context": {
+                        "start_work_authorized": true,
+                        "plan_draft": {
+                            "affected_paths": ["README.md"],
+                            "acceptance_criteria": ["README.md exists"]
+                        }
+                    }
+                }
+            }),
+        };
+
+        let prompt = native_model_user_prompt(&request);
+
+        assert_eq!(prompt.matches("Create README.md.").count(), 1);
+        assert!(!prompt.contains("Selected tools JSON"));
+        assert!(!prompt.contains("repo_read_file"));
+        assert!(prompt.contains("README.md exists"));
     }
 
     #[test]
@@ -2506,7 +1641,7 @@ mod tests {
             }),
         };
 
-        let schema = native_model_tools_schema(&request);
+        let schema = native_model_tools_schema(&request, &[]);
         let names = schema
             .as_array()
             .unwrap()
@@ -2515,22 +1650,131 @@ mod tests {
             .collect::<BTreeSet<_>>();
 
         assert!(names.contains("repo_read_file"));
-        assert!(names.contains("edit_text_file"));
-        assert!(names.contains("write_text_file"));
-        assert!(names.contains("task_stop"));
+        assert!(names.contains("apply_patch"));
+        assert!(names.contains("cancel_command_background"));
         assert!(names.contains("finish"));
+        assert!(!names.contains("edit_text_file"));
+        assert!(!names.contains("write_text_file"));
         assert!(!names.contains("agent_subagent"));
         assert!(!names.contains("command_run"));
-        let edit_tool = schema
+        let patch_tool = schema
             .as_array()
             .unwrap()
             .iter()
-            .find(|tool| tool["function"]["name"] == "edit_text_file")
+            .find(|tool| tool["function"]["name"] == "apply_patch")
             .unwrap();
-        assert_eq!(
-            edit_tool["function"]["parameters"]["properties"]["edits"]["maxItems"],
-            NATIVE_MODEL_MAX_FILE_EDITS
+        assert!(
+            patch_tool["function"]["parameters"]["properties"]["patch"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("start: begin_patch hunk+ end_patch")
         );
+    }
+
+    #[test]
+    fn native_tool_schema_exposes_frozen_mcp_snapshot_only_to_executable_tasks() {
+        let mut request = budget_test_request("run-mcp-schema", 100);
+        request.backend_context["coder"]["harness"] = json!({"selected_tools": ["finish"]});
+        let mcp_tools = vec![NativeModelMcpTool {
+            provider_name: "mcp__local__lookup".to_owned(),
+            server_id: "local".to_owned(),
+            tool_name: "lookup".to_owned(),
+            description: "Look up local data.".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"]
+            }),
+            side_effect: SideEffectLevel::Read,
+        }];
+
+        let schema = native_model_tools_schema(&request, &mcp_tools);
+        let mcp = schema
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["function"]["name"] == "mcp__local__lookup")
+            .unwrap();
+        assert_eq!(mcp["function"]["parameters"]["required"][0], "query");
+        assert!(native_model_turn_context(&request, &mcp_tools)
+            .selected_tools
+            .contains(&"mcp__local__lookup".to_owned()));
+
+        request.backend_context["coder"]["plan_context"]["plan_draft"] =
+            json!({"execution_mode": "read_only"});
+        let read_only_schema = native_model_tools_schema(&request, &mcp_tools);
+        assert!(!read_only_schema
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["function"]["name"] == "mcp__local__lookup"));
+        assert!(!native_model_turn_context(&request, &mcp_tools)
+            .selected_tools
+            .contains(&"mcp__local__lookup".to_owned()));
+    }
+
+    #[test]
+    fn typed_read_only_plan_removes_side_effect_tools_and_caps_turns() {
+        let request = coder_harness::HarnessRunRequest {
+            run_id: RunId::from_string("run-read-only-tools"),
+            workflow_id: "planner-led".to_owned(),
+            node_id: "executor".to_owned(),
+            agent_id: "executor".to_owned(),
+            harness_id: "native-code-edit".to_owned(),
+            repo_root: ".".to_owned(),
+            task: "Review README.md.".to_owned(),
+            backend_context: json!({
+                "coder": {
+                    "agent": {"runtime": {"max_turns": 24}},
+                    "harness": {
+                        "selected_tools": [
+                            "repo_find_files",
+                            "repo_search_text",
+                            "repo_read_file",
+                            "repo_read_file_range",
+                            "git_status",
+                            "git_diff",
+                            "command_run",
+                            "write_text_file",
+                            "agent_subagent",
+                            "Skill"
+                        ]
+                    },
+                    "plan_context": {
+                        "start_work_authorized": true,
+                        "plan_draft": {"execution_mode": "read_only"}
+                    }
+                }
+            }),
+        };
+        let schema = native_model_tools_schema(&request, &[]);
+        let names = schema
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            names,
+            BTreeSet::from([
+                "finish",
+                "git_diff",
+                "git_status",
+                "repo_find_files",
+                "repo_read_file",
+                "repo_read_file_range",
+                "repo_search_text"
+            ])
+        );
+        assert_eq!(
+            native_model_max_turns(&request, &harness_agent_runtime(&request)),
+            NATIVE_READ_ONLY_MAX_TURNS
+        );
+        let system = native_model_system_prompt(&request);
+        assert!(system.contains("typed read-only task"));
+        assert!(system.contains("Do not call commands, writes, skills, or subagents"));
+        assert!(native_model_user_prompt(&request).contains("at most 8 provider turns"));
     }
 
     #[test]
@@ -2546,20 +1790,15 @@ mod tests {
             backend_context: json!({"coder": {"agent": {"runtime": {}}}}),
         };
 
-        assert_eq!(
-            native_model_max_turns_from_request(&request),
-            NATIVE_MODEL_DEFAULT_MAX_TURNS
-        );
+        assert_eq!(harness_agent_runtime(&request).max_turns, 24);
         assert!(native_model_user_prompt(&request).contains("at most 24 provider turns"));
 
         request.backend_context["coder"]["agent"]["runtime"]["max_turns"] = json!(7);
-        assert_eq!(native_model_max_turns_from_request(&request), 7);
+        assert_eq!(harness_agent_runtime(&request).max_turns, 7);
         assert!(native_model_user_prompt(&request).contains("at most 7 provider turns"));
 
-        assert_eq!(native_model_response_timeout_ms(&request), 90_000);
-        request.backend_context["coder"]["agent"]["runtime"]["stream_idle_timeout_ms"] =
-            json!(12_345);
-        assert_eq!(native_model_response_timeout_ms(&request), 12_345);
+        request.backend_context["coder"]["agent"]["runtime"]["max_output_tokens"] = json!(64_000);
+        assert_eq!(harness_agent_runtime(&request).max_output_tokens, 8_000);
     }
 
     #[test]
@@ -2590,7 +1829,7 @@ mod tests {
         assert!(native_model_output_recovery_message(1, 3)["content"]
             .as_str()
             .unwrap()
-            .contains("Use edit_text_file for a small exact change"));
+            .contains("smaller atomic apply_patch calls"));
     }
 
     #[test]
@@ -2609,29 +1848,5 @@ mod tests {
         .to_string();
 
         assert!(full_write.len() > exact_edit.len() * 100);
-    }
-
-    #[test]
-    fn native_model_file_edits_accepts_batch_and_legacy_shapes() {
-        let batch = native_model_file_edits(&json!({
-            "path": "main.js",
-            "edits": [
-                {"old_string": "one", "new_string": "first"},
-                {"old_string": "two", "new_string": "second", "replace_all": true}
-            ]
-        }))
-        .unwrap();
-        assert_eq!(batch.len(), 2);
-        assert!(!batch[0].replace_all);
-        assert!(batch[1].replace_all);
-
-        let legacy = native_model_file_edits(&json!({
-            "path": "main.js",
-            "old_string": "one",
-            "new_string": "first"
-        }))
-        .unwrap();
-        assert_eq!(legacy.len(), 1);
-        assert_eq!(legacy[0].new_string, "first");
     }
 }

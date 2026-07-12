@@ -544,12 +544,7 @@ pub(crate) async fn record_invoked_skill(
             "content": content,
             "content_truncated": content_truncated,
             "content_estimated_tokens": content_estimated_tokens,
-            "agent_id": agent_id,
-            "claude_sources": [
-                "src/bootstrap/state.ts addInvokedSkill",
-                "src/bootstrap/state.ts getInvokedSkillsForAgent",
-                "src/services/compact/compact.ts createSkillAttachmentIfNeeded"
-            ]
+            "agent_id": agent_id
         }),
     );
     state.store.append_event(&run_id, &event)?;
@@ -563,11 +558,6 @@ pub(crate) async fn record_invoked_skill(
         event_sequence: sequence,
         content_truncated,
         content_estimated_tokens,
-        claude_sources: vec![
-            "src/bootstrap/state.ts addInvokedSkill",
-            "src/bootstrap/state.ts getInvokedSkillsForAgent",
-            "src/services/compact/compact.ts createSkillAttachmentIfNeeded",
-        ],
     }))
 }
 

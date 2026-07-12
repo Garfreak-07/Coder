@@ -2,6 +2,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+mod stdio_mcp;
+
+pub use stdio_mcp::{
+    StdioMcpCallOutput, StdioMcpError, StdioMcpRuntime, DEFAULT_MCP_STARTUP_TIMEOUT_SECONDS,
+    DEFAULT_MCP_TOOL_TIMEOUT_SECONDS,
+};
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionType {

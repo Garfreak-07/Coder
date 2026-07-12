@@ -1,11 +1,13 @@
 use axum::{extract::State, Json};
 use coder_core::RunId;
-use coder_harness::{ToolRegistry, ToolRegistryEntry};
-use coder_store::{RepoEvidenceKind, RepoEvidenceRef, RunStore, StoreError};
+use coder_events::redact_payload;
+use coder_store::{
+    redact_repo_evidence_payload, RepoEvidenceKind, RepoEvidenceRef, RunStore, StoreError,
+};
 use coder_tools::{
-    apply_patch_file, find_files, git_diff, git_status, preview_command, preview_patch_file,
-    read_file, read_file_range, run_command, search_text, CommandPreview, CommandRunEvidence,
-    CommandRunRequest, PatchApplyEvidence, PatchApplyRequest as ToolPatchApplyRequest,
+    apply_patch_file, builtin_tool, find_files, git_diff, git_status, preview_command,
+    preview_patch_file, read_file, read_file_range, search_text, CommandPreview,
+    CommandRunEvidence, PatchApplyEvidence, PatchApplyRequest as ToolPatchApplyRequest,
     PatchPreviewEvidence, RepoToolConfig,
 };
 use serde_json::{json, Value};
@@ -20,17 +22,10 @@ use crate::{
     RepoSearchTextRequest, RepoSearchTextResponse,
 };
 
-pub(crate) fn ensure_tool_boundary(tool_name: &str) -> Result<ToolRegistryEntry, ApiError> {
-    let registry = ToolRegistry::default();
-    let entry = registry
-        .get_tool(tool_name)
+pub(crate) fn ensure_tool_boundary(tool_name: &str) -> Result<(), ApiError> {
+    builtin_tool(tool_name)
         .ok_or_else(|| ApiError::forbidden(format!("tool '{tool_name}' is not registered")))?;
-    if !entry.enabled_by_default {
-        return Err(ApiError::forbidden(format!(
-            "tool '{tool_name}' is disabled by default"
-        )));
-    }
-    Ok(entry)
+    Ok(())
 }
 
 pub(crate) async fn preview_command_endpoint(
@@ -59,6 +54,7 @@ pub(crate) async fn run_command_endpoint(
         foreground_timeout_seconds,
         background_on_timeout,
         max_output_bytes,
+        interactive,
         source,
         sandbox,
         approved,
@@ -72,28 +68,51 @@ pub(crate) async fn run_command_endpoint(
     let max_output_bytes =
         max_output_bytes.unwrap_or(coder_tools::DEFAULT_MAX_COMMAND_OUTPUT_BYTES);
 
-    if background_on_timeout.unwrap_or(false) {
-        ensure_tool_boundary("command_background")?;
-        let background_task = start_background_command_task(
-            &state,
-            CommandBackgroundStartRequest {
-                repo_root: repo_root.clone(),
-                cwd: Some(cwd.clone()),
-                argv: argv.clone(),
-                timeout_seconds,
-                max_output_bytes: Some(max_output_bytes),
-                source: Some(source.clone()),
-                sandbox: Some(sandbox),
-                approved: Some(approved),
-                run_id: run_id.clone(),
-            },
-        )?;
+    ensure_tool_boundary("command_background")?;
+    let allow_background = background_on_timeout.unwrap_or(false);
+    let process_timeout_seconds = if allow_background {
+        timeout_seconds
+    } else {
+        Some(timeout_seconds.unwrap_or(coder_tools::DEFAULT_COMMAND_TIMEOUT_SECONDS))
+    };
+    let background_task = start_background_command_task(
+        &state,
+        CommandBackgroundStartRequest {
+            repo_root: repo_root.clone(),
+            cwd: Some(cwd.clone()),
+            argv: argv.clone(),
+            timeout_seconds: process_timeout_seconds,
+            max_output_bytes: Some(max_output_bytes),
+            interactive,
+            source: Some(source.clone()),
+            sandbox: Some(sandbox),
+            approved: Some(approved),
+            run_id,
+        },
+    )?;
+    let foreground_deadline = allow_background.then(|| {
         let foreground_timeout_seconds = foreground_timeout_seconds
             .unwrap_or(coder_tools::DEFAULT_COMMAND_TIMEOUT_SECONDS)
             .clamp(1, coder_tools::MAX_COMMAND_TIMEOUT_SECONDS);
-        let deadline =
-            tokio::time::Instant::now() + Duration::from_secs(foreground_timeout_seconds);
-        loop {
+        tokio::time::Instant::now() + Duration::from_secs(foreground_timeout_seconds)
+    });
+
+    loop {
+        let status = background_command_status(&state, &background_task.task_id)?;
+        if status.status != "running" {
+            if let Some(result) = status.result {
+                return Ok(Json(CommandRunResponse {
+                    evidence_ref: status.evidence_ref,
+                    result,
+                    background_task: None,
+                }));
+            }
+            return Err(ApiError::internal(format!(
+                "command process {} reached terminal status '{}' without a result",
+                background_task.task_id, status.status
+            )));
+        }
+        if foreground_deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
             let status = background_command_status(&state, &background_task.task_id)?;
             if status.status != "running" {
                 if let Some(result) = status.result {
@@ -103,102 +122,46 @@ pub(crate) async fn run_command_endpoint(
                         background_task: None,
                     }));
                 }
-                return Err(ApiError::internal(format!(
-                    "background command task {} reached terminal status '{}' without a result",
-                    background_task.task_id, status.status
-                )));
             }
-            if tokio::time::Instant::now() >= deadline {
-                let status = background_command_status(&state, &background_task.task_id)?;
-                if status.status != "running" {
-                    if let Some(result) = status.result {
-                        return Ok(Json(CommandRunResponse {
-                            evidence_ref: status.evidence_ref,
-                            result,
-                            background_task: None,
-                        }));
-                    }
-                }
-                let preview = preview_command(&repo_root, &cwd, argv, &source, sandbox)?;
-                let output = if status.output_preview.trim().is_empty() {
-                    format!(
-                        "Command is still running in background task {}. Read {} for output or delete {} to cancel.",
-                        background_task.task_id, background_task.output_url, background_task.cancel_url
-                    )
-                } else {
-                    format!(
-                        "Command is still running in background task {}. Read {} for output or delete {} to cancel.\n\nRecent output:\n{}",
-                        background_task.task_id,
-                        background_task.output_url,
-                        background_task.cancel_url,
-                        status.output_preview
-                    )
-                };
-                return Ok(Json(CommandRunResponse {
-                    evidence_ref: None,
-                    result: CommandRunEvidence {
-                        repo_root: preview.repo_root,
-                        cwd: preview.cwd,
-                        argv: preview.argv,
-                        command: preview.command,
-                        status: "backgrounded".to_owned(),
-                        passed: false,
-                        blocked: false,
-                        requires_approval: false,
-                        approval_key: preview.approval_key,
-                        returncode: None,
-                        output,
-                        output_truncated: status.output_truncated,
-                        timed_out: false,
-                        policy: preview.policy,
-                        evidence_kind: "command_evidence".to_owned(),
-                    },
-                    background_task: Some(background_task),
-                }));
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            let preview = preview_command(&repo_root, &cwd, argv, &source, sandbox)?;
+            let output = if status.output_preview.trim().is_empty() {
+                format!(
+                    "Command is still running in background task {}. Read {} for output or delete {} to cancel.",
+                    background_task.task_id, background_task.output_url, background_task.cancel_url
+                )
+            } else {
+                format!(
+                    "Command is still running in background task {}. Read {} for output or delete {} to cancel.\n\nRecent output:\n{}",
+                    background_task.task_id,
+                    background_task.output_url,
+                    background_task.cancel_url,
+                    status.output_preview
+                )
+            };
+            return Ok(Json(CommandRunResponse {
+                evidence_ref: None,
+                result: CommandRunEvidence {
+                    repo_root: preview.repo_root,
+                    cwd: preview.cwd,
+                    argv: preview.argv,
+                    command: preview.command,
+                    status: "backgrounded".to_owned(),
+                    passed: false,
+                    blocked: false,
+                    requires_approval: false,
+                    approval_key: preview.approval_key,
+                    returncode: None,
+                    output,
+                    output_truncated: status.output_truncated,
+                    timed_out: false,
+                    policy: preview.policy,
+                    evidence_kind: "command_evidence".to_owned(),
+                },
+                background_task: Some(background_task),
+            }));
         }
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
-
-    let output = run_command(
-        &repo_root,
-        CommandRunRequest {
-            cwd: cwd.into(),
-            argv,
-            stdin: None,
-            timeout_seconds: timeout_seconds
-                .unwrap_or(coder_tools::DEFAULT_COMMAND_TIMEOUT_SECONDS),
-            max_output_bytes,
-            source,
-            sandbox,
-            approved,
-        },
-    )?;
-    let evidence_ref = write_tool_evidence(
-        &state.store,
-        run_id.as_deref(),
-        RepoEvidenceKind::RepoTest,
-        &repo_root,
-        "Ran command through Rust tool endpoint.",
-        json!({
-            "evidence_kind": "command_evidence",
-            "operation": "command_run",
-            "result": serde_json::to_value(&output).map_err(|error| ApiError::internal(error.to_string()))?
-        }),
-    )?;
-    if let (Some(run_id), Some(reference)) = (&run_id, &evidence_ref) {
-        record_command_events(
-            &state.store,
-            &RunId::from_string(run_id.clone()),
-            &output,
-            reference,
-        )?;
-    }
-    Ok(Json(CommandRunResponse {
-        evidence_ref,
-        result: output,
-        background_task: None,
-    }))
 }
 
 pub(crate) async fn repo_find_files_endpoint(
@@ -458,7 +421,7 @@ pub(crate) fn write_tool_evidence(
         repo_root,
         Vec::new(),
         summary,
-        payload,
+        redact_repo_evidence_payload(redact_payload(payload)),
     )?;
     Ok(Some(reference))
 }

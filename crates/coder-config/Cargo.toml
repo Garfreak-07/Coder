@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+coder-tools.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

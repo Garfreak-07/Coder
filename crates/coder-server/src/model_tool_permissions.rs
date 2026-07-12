@@ -7,10 +7,10 @@ use coder_config::{
 };
 use coder_core::RunId;
 use coder_store::{DurableJsonlPageOptions, RunStore};
-use coder_workflow::ModelToolHostContext;
+use coder_tools::{builtin_tool, ToolPermission};
+use coder_workflow::TurnContext;
 use serde_json::{json, Value};
 
-use crate::model_tool_background_tasks::model_tool_task_stop_permission_resolution;
 use crate::model_tool_run_context::latest_run_context;
 use crate::model_tool_skill_context::model_tool_skill_context_modifier_permission_decision;
 use crate::skill_model_tool::{load_model_skill, model_tool_skill_name};
@@ -26,54 +26,9 @@ pub(crate) fn default_model_tool_config() -> &'static ProjectConfig {
 pub(crate) fn required_permission_for_model_tool(
     canonical_tool_name: &str,
 ) -> Option<&'static str> {
-    match canonical_tool_name {
-        "repo_find_files"
-        | "repo_search_text"
-        | "repo_read_file"
-        | "repo_read_file_range"
-        | "git_status"
-        | "git_diff" => Some("read_files"),
-        "command_run" | "command_background" | "cancel_command_background" => Some("run_commands"),
-        "read_command_output" => Some("read_files"),
-        "patch_preview" | "patch_apply" => Some("write_files"),
-        "agent_subagent" | "cancel_subagent_background" => Some("child_harness_permissions"),
-        "read_subagent_status" => Some("read_files"),
-        "skill" => Some("read_files"),
-        "sleep" => None,
-        _ => None,
-    }
-}
-
-struct ModelToolPermissionResolution {
-    required_permission: Option<&'static str>,
-    task_stop_resolution: Option<Value>,
-}
-
-fn model_tool_permission_resolution(
-    state: &ApiState,
-    canonical_tool_name: &str,
-    input: &Value,
-    host_context: &ModelToolHostContext,
-    tool_use_id: &str,
-) -> ModelToolPermissionResolution {
-    let static_permission = required_permission_for_model_tool_with_context(
-        state,
-        canonical_tool_name,
-        input,
-        host_context,
-        tool_use_id,
-    );
-    if canonical_tool_name != "task_stop" {
-        return ModelToolPermissionResolution {
-            required_permission: static_permission,
-            task_stop_resolution: None,
-        };
-    }
-
-    let resolution = model_tool_task_stop_permission_resolution(state, input);
-    ModelToolPermissionResolution {
-        required_permission: resolution.required_permission,
-        task_stop_resolution: Some(resolution.payload),
+    match builtin_tool(canonical_tool_name).map(|tool| tool.permission) {
+        Some(ToolPermission::None) | None => None,
+        Some(permission) => Some(permission.as_str()),
     }
 }
 
@@ -81,7 +36,7 @@ fn required_permission_for_model_tool_with_context(
     state: &ApiState,
     canonical_tool_name: &str,
     input: &Value,
-    host_context: &ModelToolHostContext,
+    host_context: &TurnContext,
     tool_use_id: &str,
 ) -> Option<&'static str> {
     if canonical_tool_name == "skill" {
@@ -93,7 +48,7 @@ fn required_permission_for_model_tool_with_context(
 fn required_permission_for_skill_model_tool(
     state: &ApiState,
     input: &Value,
-    host_context: &ModelToolHostContext,
+    host_context: &TurnContext,
     tool_use_id: &str,
 ) -> Option<&'static str> {
     let skill_name = model_tool_skill_name(input)?;
@@ -118,17 +73,16 @@ pub(crate) fn model_tool_permission_phase_payload(
     canonical_tool_name: &str,
     tool_use_id: &str,
     input: &Value,
-    host_context: &ModelToolHostContext,
+    host_context: &TurnContext,
 ) -> Value {
     let store = &state.store;
-    let permission_resolution = model_tool_permission_resolution(
+    let required_permission = required_permission_for_model_tool_with_context(
         state,
         canonical_tool_name,
         input,
         host_context,
         tool_use_id,
     );
-    let required_permission = permission_resolution.required_permission;
     let approved_supplied = input
         .get("approved")
         .and_then(Value::as_bool)
@@ -197,11 +151,6 @@ pub(crate) fn model_tool_permission_phase_payload(
             object.insert("agent_tool_deny_rule".to_owned(), decision);
         }
     }
-    if let Some(task_stop_resolution) = permission_resolution.task_stop_resolution {
-        if let Some(object) = payload.as_object_mut() {
-            object.insert("task_stop_resolution".to_owned(), task_stop_resolution);
-        }
-    }
     payload
 }
 
@@ -209,7 +158,7 @@ fn model_tool_agent_deny_rule_decision(
     state: &ApiState,
     canonical_tool_name: &str,
     input: &Value,
-    host_context: &ModelToolHostContext,
+    host_context: &TurnContext,
 ) -> Option<Value> {
     if canonical_tool_name != "agent_subagent" {
         return None;
@@ -244,11 +193,6 @@ fn model_tool_agent_deny_rule_decision(
             return Some(json!({
                 "contract": "coder.agent_tool_deny_rule.v1",
                 "source": "persisted PermissionSettingsRecord deny rules",
-                "claude_sources": [
-                    "src/utils/permissions/permissions.ts getDenyRuleForAgent",
-                    "src/utils/permissions/permissions.ts filterDeniedAgents",
-                    "packages/builtin-tools/src/tools/AgentTool/AgentTool.tsx denied Agent(type)"
-                ],
                 "destination": destination.as_str(),
                 "requested_subagent_type": requested_subagent_type,
                 "rule": {
@@ -294,11 +238,6 @@ fn runtime_agent_deny_rule_decision(
             json!({
                 "contract": "coder.agent_tool_deny_rule.v1",
                 "source": "runtime permission.updated event rules",
-                "claude_sources": [
-                    "src/utils/permissions/permissions.ts getDenyRuleForAgent",
-                    "src/utils/permissions/PermissionUpdate.ts applyPermissionUpdate",
-                    "packages/builtin-tools/src/tools/AgentTool/AgentTool.tsx denied Agent(type)"
-                ],
                 "destination": rule.destination.as_str(),
                 "requested_subagent_type": requested_subagent_type,
                 "rule": {
@@ -424,7 +363,7 @@ fn model_tool_agent_tool_allowlist_decision(
     state: &ApiState,
     canonical_tool_name: &str,
     input: &Value,
-    host_context: &ModelToolHostContext,
+    host_context: &TurnContext,
 ) -> Option<Value> {
     if canonical_tool_name != "agent_subagent" {
         return None;
@@ -508,11 +447,6 @@ fn model_tool_agent_tool_allowlist_decision(
     Some(json!({
         "contract": "coder.agent_tool_allowed_types.v1",
         "source": "ProjectConfig.agents tools Agent(...) plus harness.tools",
-        "claude_sources": [
-            "packages/builtin-tools/src/tools/AgentTool/agentToolUtils.ts resolveAgentTools",
-            "packages/builtin-tools/src/tools/AgentTool/AgentTool.tsx allowedAgentTypes",
-            "src/utils/attachments.ts allowedAgentTypes"
-        ],
         "run_id": run_id,
         "parent_agent_id": parent_agent_id,
         "parent_harness_id": parent_harness_id,
@@ -539,7 +473,7 @@ fn model_tool_input_string(input: &Value, keys: &[&str]) -> Option<String> {
 pub(crate) fn model_tool_permission_context(
     store: &RunStore,
     input: &Value,
-    host_context: &ModelToolHostContext,
+    host_context: &TurnContext,
 ) -> ModelToolPermissionContext {
     let run_id = model_tool_context_run_id(input, host_context);
     let input_harness_id = input
@@ -555,6 +489,17 @@ pub(crate) fn model_tool_permission_context(
         .cloned()
         .map(|value| value.trim().to_owned())
         .filter(|harness_id| !harness_id.is_empty());
+    if let Some(permissions) = host_context.permission_policy.as_ref() {
+        let requested_harness_id = host_harness_id.clone().or_else(|| input_harness_id.clone());
+        return ModelToolPermissionContext {
+            harness_id: requested_harness_id
+                .clone()
+                .unwrap_or_else(|| DEFAULT_MODEL_TOOL_PERMISSION_HARNESS_ID.to_owned()),
+            requested_harness_id,
+            source: "turn_context_snapshot",
+            permissions: permissions.clone(),
+        };
+    }
     if let (Some(run_id), Some(harness_id)) = (run_id.as_deref(), host_harness_id.as_deref()) {
         if let Some(context) = model_tool_permission_context_from_run_config(
             store,
@@ -645,7 +590,7 @@ pub(crate) fn model_tool_permission_context(
 
 pub(crate) fn model_tool_context_run_id(
     input: &Value,
-    host_context: &ModelToolHostContext,
+    host_context: &TurnContext,
 ) -> Option<String> {
     host_context
         .run_id

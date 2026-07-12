@@ -30,7 +30,6 @@ use coder_store::{RunStore, StoreError};
 use coder_tools::RepoToolError;
 use coder_workflow::{WorkflowError, WorkflowRunControl};
 use serde_json::{json, Value};
-use tower_http::cors::CorsLayer;
 
 mod api_types;
 mod background_commands;
@@ -38,11 +37,13 @@ mod cache_runtime;
 mod change_sets;
 mod extension_endpoints;
 mod goal_runtime;
+mod local_api_transport;
 mod mcp_runtime;
 mod memory_endpoints;
 mod model_tool_agent_hooks;
 mod model_tool_async_attachments;
 mod model_tool_background_tasks;
+mod model_tool_builtin_operations;
 mod model_tool_command_hooks;
 mod model_tool_dispatch;
 mod model_tool_execute_pipeline;
@@ -62,7 +63,8 @@ mod model_tool_skill_context;
 mod model_tool_skill_execution;
 mod model_tool_webhook_hooks;
 mod native_model_backend;
-mod planner_active_run;
+mod native_model_mcp;
+mod outbound_http;
 mod planner_api;
 mod planner_conversation;
 mod planner_history;
@@ -71,6 +73,7 @@ mod planner_provider_recovery;
 mod planner_provider_runtime;
 mod planner_runtime;
 mod planner_session;
+mod planner_tool_runtime;
 mod provider_runtime;
 mod provider_settings;
 mod run_control;
@@ -89,9 +92,9 @@ mod workflow_planner_backend;
 use api_types::InstalledSkillRecord;
 pub use api_types::*;
 use background_commands::{
-    background_command_status, cancel_background_command_endpoint, get_background_command_endpoint,
+    cancel_background_command_endpoint, get_background_command_endpoint,
     get_background_command_output_endpoint, start_background_command_endpoint,
-    BackgroundCommandTask,
+    write_background_command_stdin_endpoint, BackgroundCommandTask,
 };
 use extension_endpoints::{
     add_plugin_marketplace, add_skill_extra_root, auto_update_skills, developer_import_skill,
@@ -131,13 +134,14 @@ use subagent_tools::{
     cancel_background_subagent_endpoint, get_background_subagent_endpoint, run_subagent_endpoint,
     BackgroundSubagentTask,
 };
-use surface_endpoints::{agent_role_cards, capabilities, health, list_harness_tools};
+use surface_endpoints::{agent_role_cards, capabilities, health};
 use tool_endpoints::{
     apply_patch_endpoint, ensure_tool_boundary, git_diff_endpoint, git_status_endpoint,
     preview_command_endpoint, preview_patch_endpoint, record_command_events,
     repo_find_files_endpoint, repo_read_file_endpoint, repo_read_file_range_endpoint,
     repo_search_text_endpoint, run_command_endpoint, write_tool_evidence,
 };
+pub use workflow_endpoints::run_embedded_workflow;
 pub(crate) use workflow_endpoints::{default_project_config, workflow_runner_for_api};
 use workflow_endpoints::{
     default_workflow, get_library, get_library_workflow, preview_run, run_mock_workflow,
@@ -203,6 +207,7 @@ pub struct ApiState {
     pub(crate) plugin_marketplaces: Arc<Mutex<BTreeMap<String, PluginMarketplace>>>,
     pub(crate) skill_extra_roots: Arc<Mutex<Vec<SkillExtraRoot>>>,
     pub(crate) provider_settings: Arc<Mutex<ProviderSettings>>,
+    pub(crate) mcp_runtime: coder_extensions::StdioMcpRuntime,
 }
 
 impl ApiState {
@@ -227,6 +232,7 @@ impl ApiState {
             )]))),
             skill_extra_roots: Arc::new(Mutex::new(Vec::new())),
             provider_settings: Arc::new(Mutex::new(ProviderSettings::default())),
+            mcp_runtime: coder_extensions::StdioMcpRuntime::default(),
         }
     }
 }
@@ -322,7 +328,14 @@ pub fn router(state: ApiState) -> Router {
             "/api/v3/goals/{session_id}/clear",
             post(goal_runtime::clear_goal_endpoint),
         )
-        .route("/api/v3/mcp/servers", get(mcp_runtime::list_mcp_servers))
+        .route(
+            "/api/v3/mcp/servers",
+            get(mcp_runtime::list_mcp_servers).post(mcp_runtime::register_mcp_server),
+        )
+        .route(
+            "/api/v3/mcp/servers/{server_id}",
+            axum::routing::delete(mcp_runtime::remove_mcp_server),
+        )
         .route(
             "/api/v3/mcp/servers/validate",
             post(mcp_runtime::validate_mcp),
@@ -406,7 +419,6 @@ pub fn router(state: ApiState) -> Router {
             "/api/v3/cache/tasks/{task_id}",
             axum::routing::delete(cache_runtime::cancel_cache_task),
         )
-        .route("/api/v3/harness/tools", get(list_harness_tools))
         .route(
             "/api/v3/providers/settings",
             get(get_provider_settings).post(save_provider_settings),
@@ -431,6 +443,10 @@ pub fn router(state: ApiState) -> Router {
         .route(
             "/api/v3/tools/command/background/{task_id}/output",
             get(get_background_command_output_endpoint),
+        )
+        .route(
+            "/api/v3/tools/command/background/{task_id}/stdin",
+            post(write_background_command_stdin_endpoint),
         )
         .route(
             "/api/v3/tools/model/execute",
@@ -553,10 +569,11 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v3/blobs/sha256/{digest}", get(get_blob_sha256))
         .route("/api/v3/repo-evidence/{ref_id}", get(get_repo_evidence))
         .with_state(state)
-        .layer(CorsLayer::permissive())
+        .layer(local_api_transport::cors_layer())
 }
 
 pub async fn serve(addr: SocketAddr, state: ApiState) -> std::io::Result<()> {
+    local_api_transport::validate_bind_address(addr)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router(state)).await
 }

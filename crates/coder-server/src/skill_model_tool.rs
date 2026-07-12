@@ -584,16 +584,3 @@ restore the skill context.",
         skill.description
     )
 }
-
-pub(crate) fn claude_skill_tool_sources() -> Vec<&'static str> {
-    vec![
-        "packages/builtin-tools/src/tools/SkillTool/SkillTool.ts",
-        "packages/builtin-tools/src/tools/SkillTool/constants.ts SKILL_TOOL_NAME",
-        "src/skills/loadSkillsDir.ts parseSkillFrontmatterFields",
-        "src/screens/REPL.tsx additionalAllowedTools/effort turn scoping",
-        "src/commands.ts getSkillToolCommands",
-        "src/bootstrap/state.ts addInvokedSkill",
-        "src/bootstrap/state.ts getInvokedSkillsForAgent",
-        "src/services/compact/compact.ts createSkillAttachmentIfNeeded",
-    ]
-}

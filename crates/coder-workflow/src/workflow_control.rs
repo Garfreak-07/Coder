@@ -74,7 +74,7 @@ pub(crate) fn workflow_feedback_value(
         "loop_contract": {
             "lifecycle": ["diagnose", "plan", "act", "verify", "recover_or_finish"],
             "required_decision": workflow_required_decision(signal),
-            "finish_requires_verifier_evidence": true,
+            "finish_requires_executor_evidence": true,
             "blocked_requires_external_dependency": true,
             "repair_when_feedback_is_actionable": true
         },
@@ -113,7 +113,7 @@ pub(crate) fn workflow_planner_task_from_feedback(
         concise_join(blockers, 1000)
     };
     format!(
-        "Decide the next workflow control signal after node '{}' returned '{}'. Return finish only when verifier evidence proves the task is done. Return continue when repair is needed. Return blocked only when user input or external state is required.\n\nPrevious feedback:\n{}\n\nOriginal task:\n{}",
+        "Decide the next workflow control signal after node '{}' returned '{}'. Return finish only when the executor's action and verification evidence prove the task is done. Return continue when repair is needed. Return blocked only when user input or external state is required.\n\nPrevious feedback:\n{}\n\nOriginal task:\n{}",
         source_node.id,
         signal.as_str(),
         feedback,
@@ -134,7 +134,7 @@ pub(crate) fn repair_task_from_feedback(
         concise_join(blockers, 800)
     };
     format!(
-        "Continue the same task and repair the implementation based on the previous {} result from node '{}'. The listed feedback is the scope of this round: address it and only directly related checks. Do not restart broad planning or review, rewrite unrelated files, or delegate to a subagent unless the feedback explicitly requires it. Do not ask the user for implementation details. Stop as soon as the implementation is verifier-ready and finish with evidence.\n\nPrevious feedback:\n{}\n\nOriginal task:\n{}",
+        "Continue the same task and repair the implementation based on the previous {} result from node '{}'. The listed feedback is the scope of this round: address it and only directly related checks. Do not restart broad planning or review, rewrite unrelated files, or delegate to a subagent unless the feedback explicitly requires it. Do not ask the user for implementation details. Stop as soon as the implementation is complete and verified, then finish with evidence.\n\nPrevious feedback:\n{}\n\nOriginal task:\n{}",
         signal.as_str(),
         source_node.id,
         feedback,
@@ -272,18 +272,26 @@ fn workflow_planner_decision_from_feedback(feedback: Option<&Value>) -> Workflow
     };
 
     match signal {
-        WorkflowSignal::Completed if source_node == "verifier" => WorkflowPlannerDecision {
+        WorkflowSignal::Completed
+            if source_node == "executor"
+                && feedback
+                    .pointer("/evidence_policy/checks_present")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false) =>
+        {
+            WorkflowPlannerDecision {
             decision: "finish",
-            summary: "Workflow planner accepted verifier evidence and finished the run.",
+            summary: "Workflow planner accepted the executor's evidence and finished the run.",
             validation_status: "valid_feedback",
             validation_error: None,
             blocker: None,
             source_node_id,
             source_signal,
-        },
+            }
+        }
         WorkflowSignal::Completed => invalid_workflow_planner_feedback(
             &format!(
-                "workflow planner cannot finish from source node '{source_node}' without verifier evidence"
+                "workflow planner cannot finish from source node '{source_node}' without executor evidence"
             ),
             source_node_id,
             source_signal,
@@ -292,10 +300,10 @@ fn workflow_planner_decision_from_feedback(feedback: Option<&Value>) -> Workflow
             let blocker = workflow_feedback_blockers(feedback)
                 .into_iter()
                 .next()
-                .unwrap_or_else(|| "workflow verification requires external state".to_owned());
+                .unwrap_or_else(|| "workflow execution requires external state".to_owned());
             WorkflowPlannerDecision {
                 decision: "blocked",
-                summary: "Workflow planner stopped because verification requires external state rather than a code repair.",
+                summary: "Workflow planner stopped because execution requires external state rather than a code repair.",
                 validation_status: "valid_external_blocker",
                 validation_error: None,
                 blocker: Some(blocker),
@@ -306,7 +314,7 @@ fn workflow_planner_decision_from_feedback(feedback: Option<&Value>) -> Workflow
         WorkflowSignal::Failed | WorkflowSignal::Blocked | WorkflowSignal::Continue => {
             WorkflowPlannerDecision {
                 decision: "continue",
-                summary: "Workflow planner routed verifier feedback back to the executor for repair.",
+                summary: "Workflow planner routed execution feedback back to the executor for repair.",
                 validation_status: "valid_feedback",
                 validation_error: None,
                 blocker: None,

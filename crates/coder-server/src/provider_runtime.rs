@@ -1,10 +1,124 @@
-use std::{collections::BTreeMap, collections::BTreeSet, env};
+use std::{collections::BTreeMap, collections::BTreeSet, env, fmt, time::Duration};
 
-use coder_config::ModelSpec as ConfigModelSpec;
+use coder_config::{
+    resolve_agent_runtime_policy, AgentRuntimePolicy, ModelSpec as ConfigModelSpec,
+    ResolvedAgentRuntimePolicy,
+};
 use coder_harness::HarnessRunRequest;
-use reqwest::{Client, Proxy};
+use reqwest::{RequestBuilder, Response, StatusCode};
 
+use crate::outbound_http::{
+    environment_proxy_route, ClientRouteClass, HttpClientFactory, OutboundProxyRoute,
+};
 use crate::ProviderSettings;
+
+pub(crate) const PROVIDER_REQUEST_MAX_RETRIES: u64 = 4;
+pub(crate) const PROVIDER_RETRY_BASE_DELAY_MS: u64 = 200;
+pub(crate) const PROVIDER_STREAM_MAX_RETRIES: u64 = 5;
+pub(crate) const PROVIDER_STREAM_IDLE_TIMEOUT_MS: u64 = 300_000;
+pub(crate) const PROVIDER_WEBSOCKET_CONNECT_TIMEOUT_MS: u64 = 15_000;
+const PROVIDER_MAX_RETRIES_LIMIT: u64 = 100;
+
+#[derive(Debug)]
+pub(crate) enum ProviderSendError {
+    Timeout(Duration),
+    Transport(reqwest::Error),
+}
+
+impl fmt::Display for ProviderSendError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Timeout(timeout) => write!(
+                formatter,
+                "provider returned no response data for {} ms",
+                timeout.as_millis()
+            ),
+            Self::Transport(error) => error.fmt(formatter),
+        }
+    }
+}
+
+pub(crate) struct ProviderSendOutcome {
+    pub response: Response,
+    pub attempts: u32,
+}
+
+pub(crate) async fn send_provider_request_with_retry(
+    make_request: impl FnMut() -> RequestBuilder,
+    attempt_timeout: Option<Duration>,
+    max_retries: u64,
+) -> Result<ProviderSendOutcome, ProviderSendError> {
+    send_provider_request_with_policy(
+        make_request,
+        attempt_timeout,
+        max_retries.min(PROVIDER_MAX_RETRIES_LIMIT),
+        Duration::from_millis(PROVIDER_RETRY_BASE_DELAY_MS),
+    )
+    .await
+}
+
+async fn send_provider_request_with_policy(
+    mut make_request: impl FnMut() -> RequestBuilder,
+    attempt_timeout: Option<Duration>,
+    max_retries: u64,
+    base_delay: Duration,
+) -> Result<ProviderSendOutcome, ProviderSendError> {
+    for attempt in 0..=max_retries {
+        let result = if let Some(timeout) = attempt_timeout {
+            match tokio::time::timeout(timeout, make_request().send()).await {
+                Ok(result) => result.map_err(ProviderSendError::Transport),
+                Err(_) => Err(ProviderSendError::Timeout(timeout)),
+            }
+        } else {
+            make_request()
+                .send()
+                .await
+                .map_err(ProviderSendError::Transport)
+        };
+
+        match result {
+            Ok(response)
+                if provider_status_is_retryable(response.status()) && attempt < max_retries =>
+            {
+                tokio::time::sleep(provider_retry_backoff(base_delay, attempt + 1)).await;
+            }
+            Ok(response) => {
+                return Ok(ProviderSendOutcome {
+                    response,
+                    attempts: (attempt + 1) as u32,
+                });
+            }
+            Err(error) if provider_send_error_is_retryable(&error) && attempt < max_retries => {
+                tokio::time::sleep(provider_retry_backoff(base_delay, attempt + 1)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("provider retry loop always returns on its final attempt")
+}
+
+fn provider_send_error_is_retryable(error: &ProviderSendError) -> bool {
+    match error {
+        ProviderSendError::Timeout(_) => true,
+        ProviderSendError::Transport(error) => {
+            error.is_timeout()
+                || error.is_connect()
+                || error.is_request() && !error.is_builder()
+                || error.is_body()
+        }
+    }
+}
+
+fn provider_retry_backoff(base_delay: Duration, attempt: u64) -> Duration {
+    let exponent = 2_u64.saturating_pow(attempt.saturating_sub(1) as u32);
+    let raw_ms = (base_delay.as_millis() as u64).saturating_mul(exponent);
+    let jitter_per_mille = fastrand::u64(900..1100);
+    Duration::from_millis(raw_ms.saturating_mul(jitter_per_mille) / 1000)
+}
+
+pub(crate) fn provider_status_is_retryable(status: StatusCode) -> bool {
+    status.is_server_error()
+}
 
 pub(crate) fn redact_provider_error(message: &str, secrets: &[&str]) -> String {
     let mut redacted = coder_events::redact_secret_text(message);
@@ -41,6 +155,24 @@ pub(crate) fn provider_proxy_url_for_url(
     }
 }
 
+fn provider_outbound_proxy_route(
+    settings: &ProviderSettings,
+    provider: &str,
+    request_url: &str,
+) -> OutboundProxyRoute {
+    match provider_proxy_mode(settings, provider).as_str() {
+        "explicit" => OutboundProxyRoute::from_optional_url(
+            settings
+                .proxy_urls
+                .get(&normalize_provider(provider))
+                .map(String::as_str),
+        ),
+        "environment" => environment_proxy_route(request_url, &provider_proxy_env_keys(provider))
+            .outbound_route(),
+        _ => OutboundProxyRoute::Direct,
+    }
+}
+
 pub(crate) fn provider_proxy_mode(settings: &ProviderSettings, provider: &str) -> String {
     let provider = normalize_provider(provider);
     if let Some(mode) = settings
@@ -61,6 +193,46 @@ pub(crate) fn provider_proxy_mode(settings: &ProviderSettings, provider: &str) -
     default_provider_proxy_mode(&provider).to_owned()
 }
 
+pub(crate) fn provider_request_max_retries(settings: &ProviderSettings, provider: &str) -> u64 {
+    provider_network_settings(settings, provider)
+        .and_then(|network| network.request_max_retries)
+        .unwrap_or(PROVIDER_REQUEST_MAX_RETRIES)
+        .min(PROVIDER_MAX_RETRIES_LIMIT)
+}
+
+pub(crate) fn provider_stream_max_retries(settings: &ProviderSettings, provider: &str) -> u64 {
+    provider_network_settings(settings, provider)
+        .and_then(|network| network.stream_max_retries)
+        .unwrap_or(PROVIDER_STREAM_MAX_RETRIES)
+        .min(PROVIDER_MAX_RETRIES_LIMIT)
+}
+
+pub(crate) fn provider_stream_idle_timeout_ms(settings: &ProviderSettings, provider: &str) -> u64 {
+    provider_network_settings(settings, provider)
+        .and_then(|network| network.stream_idle_timeout_ms)
+        .unwrap_or(PROVIDER_STREAM_IDLE_TIMEOUT_MS)
+}
+
+pub(crate) fn provider_websocket_connect_timeout_ms(
+    settings: &ProviderSettings,
+    provider: &str,
+) -> u64 {
+    provider_network_settings(settings, provider)
+        .and_then(|network| network.websocket_connect_timeout_ms)
+        .unwrap_or(PROVIDER_WEBSOCKET_CONNECT_TIMEOUT_MS)
+}
+
+pub(crate) fn provider_supports_websockets(settings: &ProviderSettings, provider: &str) -> bool {
+    provider_network_settings(settings, provider).is_some_and(|network| network.supports_websockets)
+}
+
+fn provider_network_settings<'a>(
+    settings: &'a ProviderSettings,
+    provider: &str,
+) -> Option<&'a crate::ProviderNetworkSettings> {
+    settings.network.get(&normalize_provider(provider))
+}
+
 fn default_provider_proxy_mode(provider: &str) -> &'static str {
     match normalize_provider(provider).as_str() {
         "deepseek" | "ollama" => "direct",
@@ -78,11 +250,14 @@ pub(crate) fn normalize_provider_proxy_mode(value: &str) -> Option<String> {
 }
 
 fn provider_proxy_url_from_env(provider: &str, request_url: Option<&str>) -> Option<String> {
-    if let Some(request_url) = request_url {
-        if provider_should_bypass_proxy(request_url, provider_no_proxy_from_env().as_deref()) {
-            return None;
-        }
-    }
+    environment_proxy_route(
+        request_url.unwrap_or_default(),
+        &provider_proxy_env_keys(provider),
+    )
+    .proxy_url
+}
+
+fn provider_proxy_env_keys(provider: &str) -> Vec<String> {
     let provider_key = provider
         .chars()
         .map(|ch| {
@@ -93,70 +268,10 @@ fn provider_proxy_url_from_env(provider: &str, request_url: Option<&str>) -> Opt
             }
         })
         .collect::<String>();
-    let candidates = [
+    vec![
         format!("CODER_{}_PROXY_URL", provider_key),
         "CODER_PROVIDER_PROXY_URL".to_owned(),
-        "https_proxy".to_owned(),
-        "HTTPS_PROXY".to_owned(),
-        "http_proxy".to_owned(),
-        "HTTP_PROXY".to_owned(),
-    ];
-    for env_name in candidates {
-        if let Some(value) = env::var_os(env_name).and_then(|value| value.into_string().ok()) {
-            let value = value.trim();
-            if !value.is_empty() {
-                return Some(value.to_owned());
-            }
-        }
-    }
-    None
-}
-
-fn provider_no_proxy_from_env() -> Option<String> {
-    ["no_proxy", "NO_PROXY"].into_iter().find_map(|env_name| {
-        env::var_os(env_name)
-            .and_then(|value| value.into_string().ok())
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-    })
-}
-
-pub(crate) fn provider_should_bypass_proxy(url: &str, no_proxy: Option<&str>) -> bool {
-    let Some(no_proxy) = no_proxy.map(str::trim).filter(|value| !value.is_empty()) else {
-        return false;
-    };
-    if no_proxy == "*" {
-        return true;
-    }
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        return false;
-    };
-    let hostname = parsed.host_str().unwrap_or("").to_ascii_lowercase();
-    let port = parsed
-        .port_or_known_default()
-        .map(|port| port.to_string())
-        .unwrap_or_default();
-    let host_with_port = if port.is_empty() {
-        hostname.clone()
-    } else {
-        format!("{hostname}:{port}")
-    };
-    no_proxy
-        .split([',', ' ', '\t', '\n', '\r'])
-        .filter_map(|entry| {
-            let entry = entry.trim().to_ascii_lowercase();
-            (!entry.is_empty()).then_some(entry)
-        })
-        .any(|pattern| {
-            if pattern.contains(':') {
-                return host_with_port == pattern;
-            }
-            if pattern.starts_with('.') {
-                let suffix = pattern.as_str();
-                return hostname == suffix.trim_start_matches('.') || hostname.ends_with(suffix);
-            }
-            hostname == pattern
-        })
+    ]
 }
 
 fn provider_base_url_from_env(model_base_url_env: Option<&str>) -> Option<String> {
@@ -286,19 +401,12 @@ pub(crate) fn provider_reasoning_effort(effort: Option<&str>) -> Option<&'static
 }
 
 pub(crate) fn provider_http_client_builder(
+    settings: &ProviderSettings,
+    provider: &str,
     url: &str,
-    proxy_url: Option<&str>,
 ) -> Result<reqwest::ClientBuilder, String> {
-    if url.contains("://127.0.0.1") || url.contains("://localhost") || url.contains("://[::1]") {
-        return Ok(Client::builder().no_proxy());
-    }
-    if let Some(proxy_url) = proxy_url.map(str::trim).filter(|value| !value.is_empty()) {
-        let proxy = Proxy::all(proxy_url)
-            .map_err(|error| format!("Provider proxy URL is invalid: {error}"))?;
-        Ok(Client::builder().proxy(proxy))
-    } else {
-        Ok(Client::builder().no_proxy())
-    }
+    HttpClientFactory::new(provider_outbound_proxy_route(settings, provider, url))
+        .builder(url, ClientRouteClass::ProviderApi)
 }
 
 pub(crate) fn provider_chat_completions_endpoint(base_url: &str) -> String {
@@ -371,7 +479,22 @@ pub(crate) fn harness_model_spec(request: &HarnessRunRequest) -> ConfigModelSpec
             .and_then(|value| value.get("api_key_env"))
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
+        capabilities: model
+            .and_then(|value| value.get("capabilities"))
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default(),
     }
+}
+
+pub(crate) fn harness_agent_runtime(request: &HarnessRunRequest) -> ResolvedAgentRuntimePolicy {
+    let runtime = request
+        .backend_context
+        .pointer("/coder/agent/runtime")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<AgentRuntimePolicy>(value).ok())
+        .unwrap_or_default();
+    resolve_agent_runtime_policy(&harness_model_spec(request), &runtime)
 }
 
 pub(crate) fn model_name_for_settings(
@@ -393,4 +516,150 @@ pub(crate) fn model_provider_base_url(
     settings_provider_base_url(settings, provider)
         .or_else(|| provider_base_url_from_env(model.base_url_env.as_deref()))
         .or_else(|| default_provider_base_url(provider).map(str::to_owned))
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    use axum::{routing::post, Router};
+    use reqwest::Client;
+
+    use super::*;
+
+    async fn spawn_status_server(
+        statuses: Vec<StatusCode>,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let handler_attempts = Arc::clone(&attempts);
+        let statuses = Arc::new(statuses);
+        let app = Router::new().route(
+            "/",
+            post(move || {
+                let attempts = Arc::clone(&handler_attempts);
+                let statuses = Arc::clone(&statuses);
+                async move {
+                    let index = attempts.fetch_add(1, Ordering::SeqCst);
+                    statuses
+                        .get(index)
+                        .copied()
+                        .or_else(|| statuses.last().copied())
+                        .unwrap_or(StatusCode::OK)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}/"), attempts, task)
+    }
+
+    #[tokio::test]
+    async fn provider_request_retries_5xx_then_returns_success() {
+        let (url, attempts, server) = spawn_status_server(vec![
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::OK,
+        ])
+        .await;
+        let client = Client::builder().no_proxy().build().unwrap();
+
+        let outcome = send_provider_request_with_policy(
+            || client.post(&url),
+            None,
+            PROVIDER_REQUEST_MAX_RETRIES,
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.response.status(), StatusCode::OK);
+        assert_eq!(outcome.attempts, 3);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn provider_request_does_not_retry_429() {
+        let (url, attempts, server) =
+            spawn_status_server(vec![StatusCode::TOO_MANY_REQUESTS, StatusCode::OK]).await;
+        let client = Client::builder().no_proxy().build().unwrap();
+
+        let outcome = send_provider_request_with_policy(
+            || client.post(&url),
+            None,
+            PROVIDER_REQUEST_MAX_RETRIES,
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(outcome.attempts, 1);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn provider_request_stops_after_four_retries() {
+        let (url, attempts, server) =
+            spawn_status_server(vec![StatusCode::SERVICE_UNAVAILABLE]).await;
+        let client = Client::builder().no_proxy().build().unwrap();
+
+        let outcome = send_provider_request_with_policy(
+            || client.post(&url),
+            None,
+            PROVIDER_REQUEST_MAX_RETRIES,
+            Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(outcome.attempts, 5);
+        assert_eq!(attempts.load(Ordering::SeqCst), 5);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn provider_request_retries_transport_errors() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        drop(listener);
+        let client = Client::builder().no_proxy().build().unwrap();
+        let attempts = AtomicUsize::new(0);
+
+        let result = send_provider_request_with_policy(
+            || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                client.post(&url)
+            },
+            None,
+            2,
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert!(matches!(result, Err(ProviderSendError::Transport(_))));
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn provider_retry_backoff_matches_codex_range() {
+        for attempt in 1..=4 {
+            let raw = PROVIDER_RETRY_BASE_DELAY_MS * 2_u64.pow(attempt - 1);
+            let delay = provider_retry_backoff(
+                Duration::from_millis(PROVIDER_RETRY_BASE_DELAY_MS),
+                u64::from(attempt),
+            )
+            .as_millis() as u64;
+            assert!(delay >= raw * 9 / 10);
+            assert!(delay < raw * 11 / 10);
+        }
+    }
 }

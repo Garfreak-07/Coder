@@ -117,7 +117,7 @@ export function canvasToWorkflowSpec(agentWorkflow: AgentWorkflowSpec): RustProj
 
   const executionNodeIds = new Set(nodes.map((node) => node.id));
   const finalReportAgent =
-    executionAgents.find((agent) => agent.id.toLowerCase().includes("verifier"))?.id ??
+    executionAgents.filter((agent) => agent.role === "planner").at(-1)?.id ??
     executionAgents.at(-1)?.id ??
     workflow.primary_planner_id;
   const rustWorkflow: RustWorkflowSpec = {
@@ -145,6 +145,14 @@ export function canvasToWorkflowSpec(agentWorkflow: AgentWorkflowSpec): RustProj
     models,
     agents,
     harnesses,
+    surface_bindings: planningChatBinding
+      ? {
+          planner_chat: {
+            agent: workflow.primary_planner_id,
+            harness: planningChatBinding.profile_id
+          }
+        }
+      : undefined,
     workflows: {
       [workflow.id]: rustWorkflow
     }
@@ -180,13 +188,14 @@ export function workflowSpecToCanvas(input: RustProjectConfig | RustWorkflowExpo
   )?.[0];
   const primaryPlannerId =
     canvasSnapshot?.primary_planner_id ??
+    config.surface_bindings?.planner_chat?.agent ??
     detachedPlannerId ??
     workflow.nodes.find((node) => config.agents[node.agent]?.role === "planner")?.id ??
     workflow.nodes[0]?.id ??
     "planner";
   const nodes = workflow.nodes.length > 0
     ? workflow.nodes
-    : [{ id: "executor", agent: "executor", harness: "review-only" }];
+    : [{ id: "executor", agent: "executor", harness: "native-code-edit" }];
 
   const executionAgents = nodes.map((node) => {
     const rustAgent = config.agents[node.agent] ?? config.agents[node.id];
@@ -368,17 +377,12 @@ function rustAgentSpecFor(agent: AgentWorkflowAgent, model: string): RustAgentSp
 function rustHarnessSpecFor(binding: HarnessModeBinding, mode: HarnessMode): RustHarnessSpec {
   const backend = backendForBinding(binding, mode);
   const taskMode = mode === "task_execution" && backend === "native-rust";
-  const browserMode = backend === "browser-verifier";
   const plannerChatMode = mode === "planning_chat";
   return {
     backend,
     tools: toolsForHarness(mode, backend),
-    permissions: taskMode
-      ? { ...taskPermissions }
-      : browserMode
-        ? { ...readonlyPermissions, run_commands: "allow" }
-        : { ...readonlyPermissions },
-    memory: taskMode || browserMode
+    permissions: taskMode ? { ...taskPermissions } : { ...readonlyPermissions },
+    memory: taskMode
       ? {
           read: ["workflow", "run"],
           write: ["run"]
@@ -393,8 +397,8 @@ function rustHarnessSpecFor(binding: HarnessModeBinding, mode: HarnessMode): Rus
           write: ["workflow", "run"]
         },
     verification: {
-      require_evidence: taskMode || browserMode,
-      allowed_checks: taskMode ? ["cargo test", "npm run build"] : browserMode ? ["auto"] : []
+      require_evidence: taskMode,
+      allowed_checks: taskMode ? ["cargo test", "npm run build"] : []
     }
   };
 }
@@ -402,9 +406,6 @@ function rustHarnessSpecFor(binding: HarnessModeBinding, mode: HarnessMode): Rus
 function toolsForHarness(mode: HarnessMode, backend: string): string[] {
   if (mode === "planning_chat") {
     return ["memory_read", "knowledge_retrieve", "repo_search", "read_file", "git_diff"];
-  }
-  if (backend === "browser-verifier") {
-    return ["browser_static", "gameplay_static", "browser_dynamic", "gameplay_browser"];
   }
   if (mode === "task_execution") {
     return [
@@ -423,7 +424,7 @@ function toolsForHarness(mode: HarnessMode, backend: string): string[] {
       "read_command_output",
       "cancel_command_background",
       "patch_preview",
-      "patch_apply",
+      "apply_patch",
       "Skill"
     ];
   }
@@ -436,7 +437,6 @@ function backendForBinding(binding: HarnessModeBinding, mode: HarnessMode): stri
   if (mode === "workflow_supervisor" || profileId.includes("workflow-planner")) {
     return "planner-model";
   }
-  if (profileId.includes("browser")) return "browser-verifier";
   return "native-rust";
 }
 
@@ -519,9 +519,7 @@ function displayNameForAgent(id: string, role: AgentWorkflowRole): string {
 }
 
 function executionAgentPriority(agent: AgentWorkflowAgent): number {
-  if (agent.id.toLowerCase().includes("verifier")) return 1;
-  if (agent.role === "planner") return 2;
-  return 0;
+  return agent.role === "planner" ? 1 : 0;
 }
 
 function modelRefForTier(tier: AgentModelTier): string {

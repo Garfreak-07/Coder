@@ -19,11 +19,6 @@ pub(crate) fn goal_runtime_policy() -> GoalRuntimePolicy {
     GoalRuntimePolicy {
         blocked_consecutive_threshold: BLOCKED_CONSECUTIVE_THRESHOLD,
         max_goal_turns: MAX_GOAL_TURNS,
-        claude_sources: vec![
-            "src/services/goal/goalState.ts BLOCKED_CONSECUTIVE_THRESHOLD = 3",
-            "src/services/goal/goalState.ts MAX_GOAL_TURNS = 150",
-            "src/services/goal/goalStorage.ts persisted per-session goal state",
-        ],
     }
 }
 

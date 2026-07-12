@@ -41,6 +41,8 @@ interface PlannerChatPageProps {
   onScopesTextChange: (value: string) => void;
   onPlannerStrengthChange: (value: PlannerStrength) => void;
   onCancelWork: () => void;
+  onCheckWorkStatus: () => void;
+  onSubmitGuidance: () => void;
   onStartWork: () => void;
   onSubmitRequest: () => void;
   onUndoChangeSet: (changeSetId: string) => void;
@@ -72,6 +74,8 @@ export function PlannerChatPage({
   onScopesTextChange,
   onPlannerStrengthChange,
   onCancelWork,
+  onCheckWorkStatus,
+  onSubmitGuidance,
   onStartWork,
   onSubmitRequest,
   onUndoChangeSet
@@ -216,9 +220,17 @@ export function PlannerChatPage({
             </label>
             <div className="composer-actions">
               {workflowRunning ? (
-                <button className="stop-work-action" onClick={onCancelWork} disabled={plannerLoading}>
-                  Stop work
-                </button>
+                <>
+                  <button onClick={onCheckWorkStatus} disabled={plannerLoading}>
+                    Check status
+                  </button>
+                  <button onClick={onSubmitGuidance} disabled={!canSend}>
+                    Guide work
+                  </button>
+                  <button className="stop-work-action" onClick={onCancelWork} disabled={plannerLoading}>
+                    Stop work
+                  </button>
+                </>
               ) : (
                 <button
                   className={`start-work-action ${canStartWork ? "primary-action" : ""}`}

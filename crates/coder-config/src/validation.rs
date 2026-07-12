@@ -1,3 +1,4 @@
+use coder_tools::{builtin_tool, ToolPermission};
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::IpAddr,
@@ -5,127 +6,18 @@ use std::{
 
 use crate::{
     normalized_tool_name, permission_decision, resolve_agent_tools, AgentRuntimePolicy, AgentSpec,
-    HarnessSpec, HookCommandSpec, HookEvent, HookMatcherSpec, HookSettings, MemoryScope,
+    HarnessSpec, HookCommandSpec, HookEvent, HookMatcherSpec, HookSettings, MemoryScope, ModelSpec,
     PermissionDecision, PermissionPolicy, ProjectConfig, ValidationIssue, ValidationLevel,
-    ValidationReport, VerificationPolicy, WorkflowSpec, AGENT_AUTOCOMPACT_BUFFER_TOKENS_MAX,
-    AGENT_AUTOCOMPACT_BUFFER_TOKENS_MIN, AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_MAX,
-    AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_MIN, AGENT_CONTEXT_WINDOW_TOKENS_MAX,
-    AGENT_CONTEXT_WINDOW_TOKENS_MIN, AGENT_EFFORT_LEVELS,
+    ValidationReport, WorkflowSpec, AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_MAX,
+    AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_MIN, AGENT_EFFORT_LEVELS,
     AGENT_MAX_CONSECUTIVE_COMPACTION_FAILURES_MAX, AGENT_MAX_CONSECUTIVE_COMPACTION_FAILURES_MIN,
     AGENT_MAX_OUTPUT_RECOVERY_ATTEMPTS_MAX, AGENT_MAX_OUTPUT_RECOVERY_ATTEMPTS_MIN,
-    AGENT_MAX_OUTPUT_TOKENS_MAX, AGENT_MAX_OUTPUT_TOKENS_MIN, AGENT_STREAM_IDLE_TIMEOUT_MS_MAX,
-    AGENT_STREAM_IDLE_TIMEOUT_MS_MIN, WORKFLOW_MAX_ROUNDS_MAX, WORKFLOW_MAX_ROUNDS_MIN,
+    AGENT_MAX_OUTPUT_TOKENS_MAX, AGENT_MAX_OUTPUT_TOKENS_MIN, MODEL_CONTEXT_WINDOW_TOKENS_MAX,
+    MODEL_CONTEXT_WINDOW_TOKENS_MIN, MODEL_EFFECTIVE_CONTEXT_WINDOW_PERCENT_MAX,
+    MODEL_EFFECTIVE_CONTEXT_WINDOW_PERCENT_MIN, WORKFLOW_MAX_ROUNDS_MAX, WORKFLOW_MAX_ROUNDS_MIN,
 };
 
-const KNOWN_BACKENDS: &[&str] = &[
-    "planner-model",
-    "native-rust",
-    "native_mock",
-    "mock",
-    "browser-verifier",
-];
-
-const PLANNER_MODEL_TOOLS: &[&str] = &[
-    "memory_read",
-    "knowledge_retrieve",
-    "repo_search",
-    "repo_search_text",
-    "read_file",
-    "git_diff",
-    "inspect_workflow",
-    "inspect_project_summary",
-    "inspect_artifact",
-    "inspect_run_state",
-    "inspect_round_summary",
-    "inspect_evidence",
-    "inspect_skill_index",
-    "inspect_memory",
-    "read_skill_index",
-    "search_workflow_memory",
-    "search_project_memory",
-    "validate_run_contract_draft",
-    "validate_planner_order",
-    "validate_planner_decision",
-    "build_final_report",
-    "estimate_risk",
-    "estimate_budget",
-];
-
-const NATIVE_RUST_TOOLS: &[&str] = &[
-    "repo_find_files",
-    "find_files",
-    "repo_files",
-    "repo_search_text",
-    "repo_search",
-    "search_text",
-    "repo_read_file",
-    "read_file",
-    "repo_read_file_range",
-    "read_file_range",
-    "git_status",
-    "git_diff",
-    "agent_subagent",
-    "agent",
-    "subagent",
-    "command_preview",
-    "preview_command",
-    "command_run",
-    "run_command",
-    "run_command_sandbox",
-    "command_background",
-    "read_command_output",
-    "cancel_command_background",
-    "patch_preview",
-    "preview_patch",
-    "patch_apply",
-    "apply_patch",
-    "apply_patch_sandbox",
-    "read_subagent_status",
-    "cancel_subagent_background",
-    "task_stop",
-    "Skill",
-    "skill",
-    "SkillTool",
-    "skill_tool",
-];
-
-const BROWSER_VERIFIER_TOOLS: &[&str] = &[
-    "browser",
-    "gameplay",
-    "snake_gameplay",
-    "browser_static",
-    "gameplay_static",
-    "snake_gameplay_static",
-    "browser_dynamic",
-    "browser_playwright",
-    "gameplay_browser",
-    "gameplay_dynamic",
-    "snake_gameplay_browser",
-    "snake_gameplay_dynamic",
-];
-
-const BROWSER_VERIFIER_CHECKS: &[&str] = &[
-    "auto",
-    "auto_browser_static",
-    "auto_browser_dynamic",
-    "browser",
-    "browser_static",
-    "game",
-    "gameplay",
-    "gameplay_static",
-    "snake",
-    "snake_gameplay",
-    "snake_gameplay_static",
-    "browser_dynamic",
-    "browser_live",
-    "browser_playwright",
-    "gameplay_browser",
-    "gameplay_dynamic",
-    "gameplay_playwright",
-    "snake_gameplay_browser",
-    "snake_browser",
-    "snake_playwright",
-];
+const KNOWN_BACKENDS: &[&str] = &["planner-model", "native-rust", "native_mock", "mock"];
 
 pub fn validate_project_config(config: &ProjectConfig) -> ValidationReport {
     let mut issues = Vec::new();
@@ -146,8 +38,16 @@ pub fn validate_project_config(config: &ProjectConfig) -> ValidationReport {
     }
     issues.extend(validate_hook_settings(&config.hooks));
 
+    for (model_id, model) in &config.models {
+        issues.extend(validate_model_capabilities(model_id, model));
+    }
+
     for (agent_id, agent) in &config.agents {
-        issues.extend(validate_agent_runtime_policy(agent_id, &agent.runtime));
+        issues.extend(validate_agent_runtime_policy(
+            agent_id,
+            &agent.runtime,
+            config.models.get(&agent.model),
+        ));
         issues.extend(validate_agent_tool_specs(agent_id, agent));
         if !config.models.contains_key(&agent.model) {
             issues.push(error(
@@ -195,6 +95,49 @@ pub fn validate_project_config(config: &ProjectConfig) -> ValidationReport {
                 ),
                 format!("harnesses.{harness_id}.memory"),
             ));
+        }
+    }
+
+    if let Some(binding) = &config.surface_bindings.planner_chat {
+        match config.agents.get(&binding.agent) {
+            Some(agent)
+                if agent.role == "planner"
+                    && agent.output_contract == "planner_conversation" => {}
+            Some(agent) => issues.push(error(
+                "planner_chat_agent_contract_invalid",
+                format!(
+                    "Planner Chat agent '{}' must use role 'planner' and output_contract 'planner_conversation', found role '{}' and output_contract '{}'",
+                    binding.agent, agent.role, agent.output_contract
+                ),
+                "surface_bindings.planner_chat.agent",
+            )),
+            None => issues.push(error(
+                "planner_chat_agent_not_found",
+                format!(
+                    "surface_bindings.planner_chat references unknown agent '{}'",
+                    binding.agent
+                ),
+                "surface_bindings.planner_chat.agent",
+            )),
+        }
+        match config.harnesses.get(&binding.harness) {
+            Some(harness) if harness.backend == "planner-model" => {}
+            Some(harness) => issues.push(error(
+                "planner_chat_harness_backend_invalid",
+                format!(
+                    "Planner Chat harness '{}' must use backend 'planner-model', found '{}'",
+                    binding.harness, harness.backend
+                ),
+                "surface_bindings.planner_chat.harness",
+            )),
+            None => issues.push(error(
+                "planner_chat_harness_not_found",
+                format!(
+                    "surface_bindings.planner_chat references unknown harness '{}'",
+                    binding.harness
+                ),
+                "surface_bindings.planner_chat.harness",
+            )),
         }
     }
 
@@ -354,6 +297,7 @@ fn validate_hook_timeout(timeout: Option<u64>, path: &str, issues: &mut Vec<Vali
 fn validate_agent_runtime_policy(
     agent_id: &str,
     runtime: &AgentRuntimePolicy,
+    model: Option<&ModelSpec>,
 ) -> Vec<ValidationIssue> {
     let mut issues = Vec::new();
     if runtime.max_turns == Some(0) {
@@ -374,6 +318,18 @@ fn validate_agent_runtime_policy(
                 format!("agents.{agent_id}.runtime.max_output_tokens"),
             ));
         }
+        if let Some(model) = model {
+            let model_limit = model.resolved_capabilities().max_output_tokens;
+            if max_output_tokens > model_limit {
+                issues.push(error(
+                    "agent_max_output_tokens_exceeds_model_capability",
+                    format!(
+                        "agent '{agent_id}' runtime.max_output_tokens must not exceed model capability {model_limit}"
+                    ),
+                    format!("agents.{agent_id}.runtime.max_output_tokens"),
+                ));
+            }
+        }
     }
     if let Some(effort) = runtime.effort.as_deref() {
         let normalized = effort.trim().to_ascii_lowercase();
@@ -388,58 +344,30 @@ fn validate_agent_runtime_policy(
             ));
         }
     }
-    if !(AGENT_CONTEXT_WINDOW_TOKENS_MIN..=AGENT_CONTEXT_WINDOW_TOKENS_MAX)
-        .contains(&runtime.context_window_tokens)
-    {
-        issues.push(error(
-            "agent_context_window_tokens_out_of_range",
-            format!(
-                "agent '{agent_id}' runtime.context_window_tokens must be between {AGENT_CONTEXT_WINDOW_TOKENS_MIN} and {AGENT_CONTEXT_WINDOW_TOKENS_MAX}"
-            ),
-            format!("agents.{agent_id}.runtime.context_window_tokens"),
-        ));
-    }
-    if !(AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_MIN..=AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_MAX)
-        .contains(&runtime.compact_output_reserve_tokens)
-    {
-        issues.push(error(
-            "agent_compact_output_reserve_tokens_out_of_range",
-            format!(
-                "agent '{agent_id}' runtime.compact_output_reserve_tokens must be between {AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_MIN} and {AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_MAX}"
-            ),
-            format!("agents.{agent_id}.runtime.compact_output_reserve_tokens"),
-        ));
-    }
-    if runtime.compact_output_reserve_tokens >= runtime.context_window_tokens {
-        issues.push(error(
-            "agent_compact_output_reserve_exceeds_context",
-            format!(
-                "agent '{agent_id}' runtime.compact_output_reserve_tokens must be smaller than runtime.context_window_tokens"
-            ),
-            format!("agents.{agent_id}.runtime.compact_output_reserve_tokens"),
-        ));
-    }
-    if !(AGENT_AUTOCOMPACT_BUFFER_TOKENS_MIN..=AGENT_AUTOCOMPACT_BUFFER_TOKENS_MAX)
-        .contains(&runtime.autocompact_buffer_tokens)
-    {
-        issues.push(error(
-            "agent_autocompact_buffer_tokens_out_of_range",
-            format!(
-                "agent '{agent_id}' runtime.autocompact_buffer_tokens must be between {AGENT_AUTOCOMPACT_BUFFER_TOKENS_MIN} and {AGENT_AUTOCOMPACT_BUFFER_TOKENS_MAX}"
-            ),
-            format!("agents.{agent_id}.runtime.autocompact_buffer_tokens"),
-        ));
-    }
-    if runtime.compact_output_reserve_tokens + runtime.autocompact_buffer_tokens
-        >= runtime.context_window_tokens
-    {
-        issues.push(error(
-            "agent_compaction_headroom_exceeds_context",
-            format!(
-                "agent '{agent_id}' runtime compact reserve plus autocompact buffer must be smaller than runtime.context_window_tokens"
-            ),
-            format!("agents.{agent_id}.runtime"),
-        ));
+    if let Some(reserve) = runtime.compact_output_reserve_tokens {
+        if !(AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_MIN..=AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_MAX)
+            .contains(&reserve)
+        {
+            issues.push(error(
+                "agent_compact_output_reserve_tokens_out_of_range",
+                format!(
+                    "agent '{agent_id}' runtime.compact_output_reserve_tokens must be between {AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_MIN} and {AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_MAX}"
+                ),
+                format!("agents.{agent_id}.runtime.compact_output_reserve_tokens"),
+            ));
+        }
+        if let Some(model) = model {
+            let model_limit = model.resolved_capabilities().max_output_tokens;
+            if reserve > model_limit {
+                issues.push(error(
+                    "agent_compact_output_reserve_exceeds_model_capability",
+                    format!(
+                        "agent '{agent_id}' runtime.compact_output_reserve_tokens must not exceed model output capability {model_limit}"
+                    ),
+                    format!("agents.{agent_id}.runtime.compact_output_reserve_tokens"),
+                ));
+            }
+        }
     }
     if !(AGENT_MAX_OUTPUT_RECOVERY_ATTEMPTS_MIN..=AGENT_MAX_OUTPUT_RECOVERY_ATTEMPTS_MAX)
         .contains(&runtime.max_output_recovery_attempts)
@@ -464,16 +392,58 @@ fn validate_agent_runtime_policy(
             format!("agents.{agent_id}.runtime.max_consecutive_compaction_failures"),
         ));
     }
-    if !(AGENT_STREAM_IDLE_TIMEOUT_MS_MIN..=AGENT_STREAM_IDLE_TIMEOUT_MS_MAX)
-        .contains(&runtime.stream_idle_timeout_ms)
-    {
+    issues
+}
+
+fn validate_model_capabilities(model_id: &str, model: &ModelSpec) -> Vec<ValidationIssue> {
+    let mut issues = Vec::new();
+    if let Some(context_window) = model.capabilities.context_window_tokens {
+        if !(MODEL_CONTEXT_WINDOW_TOKENS_MIN..=MODEL_CONTEXT_WINDOW_TOKENS_MAX)
+            .contains(&context_window)
+        {
+            issues.push(error(
+                "model_context_window_tokens_out_of_range",
+                format!(
+                    "model '{model_id}' capabilities.context_window_tokens must be between {MODEL_CONTEXT_WINDOW_TOKENS_MIN} and {MODEL_CONTEXT_WINDOW_TOKENS_MAX}"
+                ),
+                format!("models.{model_id}.capabilities.context_window_tokens"),
+            ));
+        }
+    }
+    if let Some(max_output_tokens) = model.capabilities.max_output_tokens {
+        if !(AGENT_MAX_OUTPUT_TOKENS_MIN..=AGENT_MAX_OUTPUT_TOKENS_MAX).contains(&max_output_tokens)
+        {
+            issues.push(error(
+                "model_max_output_tokens_out_of_range",
+                format!(
+                    "model '{model_id}' capabilities.max_output_tokens must be between {AGENT_MAX_OUTPUT_TOKENS_MIN} and {AGENT_MAX_OUTPUT_TOKENS_MAX}"
+                ),
+                format!("models.{model_id}.capabilities.max_output_tokens"),
+            ));
+        }
+    }
+    if model.capabilities.auto_compact_token_limit == Some(0) {
         issues.push(error(
-            "agent_stream_idle_timeout_ms_out_of_range",
+            "model_auto_compact_token_limit_out_of_range",
             format!(
-                "agent '{agent_id}' runtime.stream_idle_timeout_ms must be between {AGENT_STREAM_IDLE_TIMEOUT_MS_MIN} and {AGENT_STREAM_IDLE_TIMEOUT_MS_MAX}"
+                "model '{model_id}' capabilities.auto_compact_token_limit must be positive when set"
             ),
-            format!("agents.{agent_id}.runtime.stream_idle_timeout_ms"),
+            format!("models.{model_id}.capabilities.auto_compact_token_limit"),
         ));
+    }
+    if let Some(percent) = model.capabilities.effective_context_window_percent {
+        if !(MODEL_EFFECTIVE_CONTEXT_WINDOW_PERCENT_MIN
+            ..=MODEL_EFFECTIVE_CONTEXT_WINDOW_PERCENT_MAX)
+            .contains(&percent)
+        {
+            issues.push(error(
+                "model_effective_context_window_percent_out_of_range",
+                format!(
+                    "model '{model_id}' capabilities.effective_context_window_percent must be between {MODEL_EFFECTIVE_CONTEXT_WINDOW_PERCENT_MIN} and {MODEL_EFFECTIVE_CONTEXT_WINDOW_PERCENT_MAX}"
+                ),
+                format!("models.{model_id}.capabilities.effective_context_window_percent"),
+            ));
+        }
     }
     issues
 }
@@ -783,20 +753,14 @@ fn validate_harness_config(harness_id: &str, harness: &HarnessSpec) -> Vec<Valid
             &harness.permissions,
         ));
     }
-    if harness.backend == "browser-verifier" {
-        issues.extend(validate_browser_verification_policy(
-            harness_id,
-            &harness.verification,
-        ));
-    }
     issues
 }
 
 fn known_tool_for_backend(backend: &str, tool: &str) -> bool {
     match backend {
-        "planner-model" => PLANNER_MODEL_TOOLS.contains(&tool),
-        "native-rust" | "native_mock" | "mock" => NATIVE_RUST_TOOLS.contains(&tool),
-        "browser-verifier" => BROWSER_VERIFIER_TOOLS.contains(&tool),
+        "planner-model" => builtin_tool(tool)
+            .is_some_and(|definition| definition.permission == ToolPermission::ReadFiles),
+        "native-rust" | "native_mock" | "mock" => builtin_tool(tool).is_some(),
         _ => true,
     }
 }
@@ -827,54 +791,19 @@ fn validate_tool_permission(
 
 fn required_permissions_for_tool(backend: &str, tool: &str) -> &'static [&'static str] {
     match backend {
-        "planner-model" => match tool {
-            "repo_search"
-            | "repo_search_text"
-            | "read_file"
-            | "git_diff"
-            | "inspect_skill_index"
-            | "read_skill_index" => &["read_files"],
-            _ => &[],
-        },
-        "native-rust" | "native_mock" | "mock" => match tool {
-            "repo_find_files"
-            | "find_files"
-            | "repo_files"
-            | "repo_search_text"
-            | "repo_search"
-            | "search_text"
-            | "repo_read_file"
-            | "read_file"
-            | "repo_read_file_range"
-            | "read_file_range"
-            | "git_status"
-            | "git_diff"
-            | "Skill"
-            | "skill"
-            | "SkillTool"
-            | "skill_tool" => &["read_files"],
-            "agent_subagent" | "agent" | "subagent" | "cancel_subagent_background" => {
-                &["child_harness_permissions"]
-            }
-            "command_run"
-            | "run_command"
-            | "run_command_sandbox"
-            | "command_background"
-            | "cancel_command_background"
-            | "task_stop" => &["run_commands"],
-            "patch_apply" | "apply_patch" | "apply_patch_sandbox" => &["write_files"],
-            "read_command_output" | "read_subagent_status" => &["read_files"],
-            _ => &[],
-        },
-        "browser-verifier" => match tool {
-            "browser_static" | "gameplay_static" | "snake_gameplay_static" => &["read_files"],
-            "browser_dynamic"
-            | "browser_playwright"
-            | "gameplay_browser"
-            | "gameplay_dynamic"
-            | "snake_gameplay_browser"
-            | "snake_gameplay_dynamic" => &["run_commands"],
-            _ => &[],
+        "planner-model" => builtin_tool(tool)
+            .filter(|definition| definition.permission == ToolPermission::ReadFiles)
+            .map(|_| &["read_files"][..])
+            .unwrap_or(&[]),
+        "native-rust" | "native_mock" | "mock" => match builtin_tool(tool)
+            .map(|definition| definition.permission)
+            .unwrap_or(ToolPermission::None)
+        {
+            ToolPermission::None => &[],
+            ToolPermission::ReadFiles => &["read_files"],
+            ToolPermission::WriteFiles => &["write_files"],
+            ToolPermission::RunCommands => &["run_commands"],
+            ToolPermission::ChildHarnessPermissions => &["child_harness_permissions"],
         },
         _ => &[],
     }
@@ -906,30 +835,6 @@ fn validate_planner_model_permissions(
                     "planner-model harness '{harness_id}' must deny side-effect permission '{field}'"
                 ),
                 format!("harnesses.{harness_id}.permissions.{field}"),
-            ));
-        }
-    }
-    issues
-}
-
-fn validate_browser_verification_policy(
-    harness_id: &str,
-    verification: &VerificationPolicy,
-) -> Vec<ValidationIssue> {
-    let mut issues = Vec::new();
-    for check in &verification.allowed_checks {
-        let check = check.trim();
-        if check.is_empty() {
-            issues.push(error(
-                "browser_verifier_check_empty",
-                format!("harness '{harness_id}' contains an empty browser verifier check"),
-                format!("harnesses.{harness_id}.verification.allowed_checks"),
-            ));
-        } else if !BROWSER_VERIFIER_CHECKS.contains(&check) {
-            issues.push(error(
-                "browser_verifier_check_unknown",
-                format!("harness '{harness_id}' browser verifier check '{check}' is not supported"),
-                format!("harnesses.{harness_id}.verification.allowed_checks"),
             ));
         }
     }

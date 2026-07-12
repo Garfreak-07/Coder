@@ -11,7 +11,7 @@ use coder_extensions::{
     ExtensionManifestSummary, PluginManifest, RemoteSkillEntry, SkillSummary, SkillUpdateInfo,
 };
 use coder_harness::{HarnessRunEvent, HarnessRunEventRef};
-use coder_harness::{McpServerSummary, McpToolSummary, ToolRegistryEntry};
+use coder_harness::{McpServerSummary, McpToolSummary};
 use coder_memory::{
     AgentMemoryRole, KnowledgeChunk, KnowledgeRetrievalHit, KnowledgeSource, MemoryAllowedContext,
     MemoryPurpose, MemoryRecord, MemorySensitivity, ProjectMemoryFile, RetrievalBackendKind,
@@ -104,6 +104,8 @@ pub struct LibraryWorkflowGetResponse {
 pub struct PlannerChatSession {
     pub session_id: String,
     pub workflow_id: String,
+    #[serde(default)]
+    pub repo_root: Option<String>,
     pub mode: String,
     #[serde(skip)]
     pub runtime: Option<PlannerRuntimeContext>,
@@ -195,6 +197,7 @@ pub enum PlannerArtifact {
 
 #[derive(Debug, Deserialize)]
 pub struct PlannerChatSessionCreateRequest {
+    pub repo: Option<String>,
     pub workflow_id: Option<String>,
     pub planner_agent_id: Option<String>,
     pub config: Option<ProjectConfig>,
@@ -209,10 +212,23 @@ pub struct PlannerChatSessionResponse {
 #[derive(Debug, Deserialize)]
 pub struct PlannerChatTurnRequest {
     pub message: String,
+    #[serde(default)]
+    pub operation: PlannerTurnOperation,
     pub confirmed: Option<bool>,
     pub mode: Option<String>,
+    pub repo: Option<String>,
     pub planner_agent_id: Option<String>,
     pub config: Option<ProjectConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlannerTurnOperation {
+    #[default]
+    Chat,
+    UserInput,
+    Status,
+    Interrupt,
 }
 
 #[derive(Debug, Serialize)]
@@ -303,7 +319,6 @@ pub struct GoalState {
 pub struct GoalRuntimePolicy {
     pub blocked_consecutive_threshold: u32,
     pub max_goal_turns: u32,
-    pub claude_sources: Vec<&'static str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -351,9 +366,32 @@ pub enum PlannerReadiness {
     Casual,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanExecutionMode {
+    ReadOnly,
+    MustWrite,
+    #[serde(other)]
+    #[default]
+    MayWrite,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanReviewMode {
+    Qualitative,
+    #[serde(other)]
+    #[default]
+    Standard,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlanDraft {
     pub goal: String,
+    #[serde(default)]
+    pub execution_mode: PlanExecutionMode,
+    #[serde(default)]
+    pub review_mode: PlanReviewMode,
     #[serde(default)]
     pub scope: Vec<String>,
     #[serde(default)]
@@ -389,6 +427,7 @@ pub struct MemoryProposalDraft {
 pub struct PlannerConversationRequest {
     pub session_id: String,
     pub workflow_id: String,
+    pub repo_root: Option<String>,
     pub runtime: PlannerRuntimeContext,
     pub mode: String,
     pub message: String,
@@ -428,6 +467,12 @@ pub struct PlannerProviderTrace {
     pub finish_reason: Option<String>,
     #[serde(default)]
     pub provider_turns: u32,
+    #[serde(default)]
+    pub tool_turns: u32,
+    #[serde(default)]
+    pub tool_calls: u32,
+    #[serde(default)]
+    pub tool_result_bytes: u64,
     #[serde(default)]
     pub estimated_input_tokens: u64,
     #[serde(default)]
@@ -570,6 +615,23 @@ pub struct WorkflowValidationRequest {
 #[derive(Debug, Deserialize)]
 pub struct McpManifestValidationRequest {
     pub manifest: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpServerRegistrationRequest {
+    pub manifest: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct McpServerRegistrationResponse {
+    pub server: McpServerSummary,
+    pub tools: Vec<McpToolSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct McpServerRemoveResponse {
+    pub server_id: String,
+    pub removed: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -738,7 +800,6 @@ pub struct SkillInvocationRecordResponse {
     pub event_sequence: u64,
     pub content_truncated: bool,
     pub content_estimated_tokens: u32,
-    pub claude_sources: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -789,7 +850,6 @@ pub struct CacheStatusResponse {
     pub plugin_cache: CacheBucketStatus,
     pub skill_cache: CacheBucketStatus,
     pub blob_store: CacheBucketStatus,
-    pub browser_verifier: BrowserVerifierCacheStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -797,27 +857,6 @@ pub struct CacheActionResponse {
     pub status: String,
     pub message: String,
     pub store: CacheCleanupSummary,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct BrowserVerifierCacheStatus {
-    pub status: String,
-    pub runtime_root: String,
-    pub browsers_path: String,
-    pub runtime_cache: CacheBucketStatus,
-    pub node_path: Option<String>,
-    pub resolved_node_modules: Option<String>,
-    pub candidates: Vec<BrowserVerifierRuntimeCandidateStatus>,
-    pub candidate_count: usize,
-    pub message: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct BrowserVerifierRuntimeCandidateStatus {
-    pub source: String,
-    pub path: String,
-    pub path_exists: bool,
-    pub has_playwright_package: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -861,8 +900,20 @@ pub struct ProviderSettings {
     pub proxy_urls: BTreeMap<String, String>,
     #[serde(default)]
     pub proxy_modes: BTreeMap<String, String>,
+    #[serde(default)]
+    pub network: BTreeMap<String, ProviderNetworkSettings>,
     pub api_keys: BTreeMap<String, ProviderKeyState>,
     pub mock_mode: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderNetworkSettings {
+    pub request_max_retries: Option<u64>,
+    pub stream_max_retries: Option<u64>,
+    pub stream_idle_timeout_ms: Option<u64>,
+    pub websocket_connect_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub supports_websockets: bool,
 }
 
 impl Default for ProviderSettings {
@@ -876,6 +927,7 @@ impl Default for ProviderSettings {
             )]),
             proxy_urls: BTreeMap::new(),
             proxy_modes: BTreeMap::new(),
+            network: BTreeMap::new(),
             api_keys: BTreeMap::new(),
             mock_mode: false,
         }
@@ -889,6 +941,7 @@ pub struct ProviderSettingsPatch {
     pub base_urls: Option<BTreeMap<String, String>>,
     pub proxy_urls: Option<BTreeMap<String, String>>,
     pub proxy_modes: Option<BTreeMap<String, String>>,
+    pub network: Option<BTreeMap<String, ProviderNetworkSettings>>,
     pub api_keys: Option<BTreeMap<String, Value>>,
     pub mock_mode: Option<bool>,
 }
@@ -935,6 +988,11 @@ pub struct ProviderStatusItem {
     pub base_url: Option<String>,
     pub proxy_url: Option<String>,
     pub proxy_mode: String,
+    pub request_max_retries: u64,
+    pub stream_max_retries: u64,
+    pub stream_idle_timeout_ms: u64,
+    pub websocket_connect_timeout_ms: u64,
+    pub supports_websockets: bool,
     pub mode: String,
 }
 
@@ -945,17 +1003,6 @@ pub struct ProviderStatus {
     pub mock_mode: bool,
     pub default_status: ProviderStatusItem,
     pub providers: Vec<ProviderStatusItem>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ToolRegistryQuery {
-    pub harness_id: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ToolRegistryResponse {
-    pub harness_id: Option<String>,
-    pub tools: Vec<ToolRegistryEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -993,6 +1040,7 @@ pub struct CommandRunToolRequest {
     pub foreground_timeout_seconds: Option<u64>,
     pub background_on_timeout: Option<bool>,
     pub max_output_bytes: Option<usize>,
+    pub interactive: Option<bool>,
     pub source: Option<String>,
     pub sandbox: Option<bool>,
     pub approved: Option<bool>,
@@ -1014,6 +1062,7 @@ pub struct CommandBackgroundStartRequest {
     pub argv: Vec<String>,
     pub timeout_seconds: Option<u64>,
     pub max_output_bytes: Option<usize>,
+    pub interactive: Option<bool>,
     pub source: Option<String>,
     pub sandbox: Option<bool>,
     pub approved: Option<bool>,
@@ -1040,6 +1089,9 @@ pub struct CommandBackgroundStatusResponse {
     pub updated_at_ms: u64,
     pub output_preview: String,
     pub output_truncated: bool,
+    pub output_cursor: u64,
+    pub next_output_cursor: u64,
+    pub output_gap: bool,
     pub evidence_ref: Option<RepoEvidenceRef>,
     pub result: Option<CommandRunEvidence>,
     pub error: Option<String>,
@@ -1051,6 +1103,9 @@ pub struct CommandBackgroundOutputResponse {
     pub status: String,
     pub output: String,
     pub output_truncated: bool,
+    pub output_cursor: u64,
+    pub next_output_cursor: u64,
+    pub output_gap: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1058,6 +1113,22 @@ pub struct CommandBackgroundCancelResponse {
     pub task_id: String,
     pub cancelled: bool,
     pub status: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CommandWriteStdinRequest {
+    #[serde(default)]
+    pub input: String,
+    #[serde(default)]
+    pub close_stdin: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CommandWriteStdinResponse {
+    pub task_id: String,
+    pub status: String,
+    pub bytes_written: usize,
+    pub stdin_closed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1190,7 +1261,6 @@ pub struct ModelToolTurnResponse {
     pub model_tool_result_bridge: &'static str,
     pub results: Vec<ModelToolExecuteResponse>,
     pub attachments: Vec<Value>,
-    pub claude_sources: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1208,7 +1278,6 @@ pub struct ModelToolExecuteResponse {
     pub payload: Value,
     pub refs: Vec<HarnessRunEventRef>,
     pub phases: Vec<Value>,
-    pub claude_sources: Vec<&'static str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1376,7 +1445,6 @@ pub struct RunPermissionUpdateResponse {
     #[serde(default)]
     pub persistence: Vec<RunPermissionUpdatePersistence>,
     pub validation: ValidationReport,
-    pub claude_sources: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1406,7 +1474,6 @@ pub struct RunAsyncNotificationDrainResponse {
     pub notification_count: usize,
     pub returned_count: usize,
     pub next_after_sequence: Option<u64>,
-    pub claude_sources: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1447,7 +1514,6 @@ pub struct RunTranscriptCompactionResponse {
     pub event_sequence: Option<u64>,
     pub error: Option<String>,
     pub circuit: RunTranscriptCompactionCircuitResponse,
-    pub claude_sources: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize)]

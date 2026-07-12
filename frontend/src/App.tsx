@@ -629,7 +629,7 @@ export function App() {
     setStatus(`Deleted connection ${agentDisplayName(agentWorkflow, edge.from)} -> ${agentDisplayName(agentWorkflow, edge.to)}.`);
   }
 
-  async function sendPlannerTurn() {
+  async function sendPlannerTurn(operation: "chat" | "user_input" = "chat") {
     const requestText = request.trim();
     if (!requestText) return;
     setPlannerLoading(true);
@@ -661,6 +661,7 @@ export function App() {
       const response = await sendPlannerChatTurn({
         session_id: session.session_id,
         message: requestText,
+        operation,
         repo,
         workflow_id: workflow.id,
         planner_agent_id: workflow.primary_planner_id,
@@ -737,6 +738,32 @@ export function App() {
       const response = await sendPlannerChatTurn({
         session_id: plannerSession.session_id,
         message: "Stop the current task.",
+        operation: "interrupt",
+        repo,
+        workflow_id: workflow.id,
+        planner_agent_id: workflow.primary_planner_id,
+        agent_workflow: workflow,
+        scopes: linesToList(scopesText)
+      });
+      setPlannerSession(response.session);
+      setStatus(response.turn.assistant_message);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPlannerLoading(false);
+    }
+  }
+
+  async function checkWorkStatusFromPlannerSession() {
+    if (!plannerSession || plannerLoading) return;
+    setPlannerLoading(true);
+    setStatus("Checking active work...");
+    try {
+      const workflow = normalizeAgentWorkflow(agentWorkflow);
+      const response = await sendPlannerChatTurn({
+        session_id: plannerSession.session_id,
+        message: "Check current work status.",
+        operation: "status",
         repo,
         workflow_id: workflow.id,
         planner_agent_id: workflow.primary_planner_id,
@@ -905,6 +932,8 @@ export function App() {
             onScopesTextChange={setScopesText}
             onPlannerStrengthChange={updatePlannerStrength}
             onCancelWork={cancelWorkFromPlannerSession}
+            onCheckWorkStatus={checkWorkStatusFromPlannerSession}
+            onSubmitGuidance={() => void sendPlannerTurn("user_input")}
             onStartWork={startWorkFromPlannerSession}
             onSubmitRequest={sendPlannerTurn}
             onUndoChangeSet={undoReviewedChangeSet}

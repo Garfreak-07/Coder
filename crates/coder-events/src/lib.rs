@@ -127,22 +127,28 @@ fn is_numeric_token_metric(key: &str, value: &Value) -> bool {
         && (normalized.ends_with("_tokens")
             || normalized.ends_with("_token_count")
             || normalized.ends_with("_token_budget")
+            || normalized == "token_budget"
             || normalized == "tokens")
 }
 
 fn contains_secret_marker(text: &str) -> bool {
     let normalized = text.to_ascii_lowercase();
     [
-        "api_key",
-        "api-key",
-        "apikey",
-        "authorization",
+        "api_key=",
+        "api_key:",
+        "api-key=",
+        "api-key:",
+        "apikey=",
+        "apikey:",
+        "authorization:",
         "bearer ",
-        "cookie",
-        "password",
+        "cookie:",
+        "cookie=",
+        "password:",
+        "password=",
         "private_key",
-        "secret",
-        "token",
+        "secret:",
+        "secret=",
     ]
     .iter()
     .any(|marker| normalized.contains(marker))
@@ -217,6 +223,7 @@ mod tests {
             json!({
                 "input_tokens": 1200,
                 "estimated_output_tokens": 300,
+                "token_budget": 432000,
                 "session_token": "token-value",
                 "input_tokens_text": "1200"
             }),
@@ -224,6 +231,7 @@ mod tests {
 
         assert_eq!(event.payload["input_tokens"], 1200);
         assert_eq!(event.payload["estimated_output_tokens"], 300);
+        assert_eq!(event.payload["token_budget"], 432000);
         assert_eq!(event.payload["session_token"], "[REDACTED]");
         assert_eq!(event.payload["input_tokens_text"], "[REDACTED]");
     }
@@ -236,12 +244,36 @@ mod tests {
             "run.started",
             json!({
                 "task": "Use sk-live-1234567890 for the request",
+                "inline": "api_key=plain-text-secret",
                 "note": "safe value"
             }),
         );
 
         assert_eq!(event.payload["task"], "[REDACTED]");
+        assert_eq!(event.payload["inline"], "[REDACTED]");
         assert_eq!(event.payload["note"], "safe value");
+    }
+
+    #[test]
+    fn operational_token_language_remains_visible() {
+        let event = CoderEvent::new(
+            RunId::from_string("run_1"),
+            1,
+            "run.blocked",
+            json!({
+                "reason": "workflow token budget was exhausted",
+                "diagnostic": "repo evidence payload contains secret-like text"
+            }),
+        );
+
+        assert_eq!(
+            event.payload["reason"],
+            "workflow token budget was exhausted"
+        );
+        assert_eq!(
+            event.payload["diagnostic"],
+            "repo evidence payload contains secret-like text"
+        );
     }
 
     #[test]

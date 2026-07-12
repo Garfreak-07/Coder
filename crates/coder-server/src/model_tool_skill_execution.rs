@@ -1,7 +1,7 @@
 use axum::{extract::State, Json};
 use coder_config::ProjectConfig;
 use coder_core::RunId;
-use coder_workflow::ModelToolHostContext;
+use coder_workflow::TurnContext;
 use serde_json::{json, Value};
 
 use crate::model_tool_hook_runtime::{append_model_tool_event_checked, ModelToolEventWriteError};
@@ -14,8 +14,7 @@ use crate::model_tool_permissions::{
 };
 use crate::model_tool_run_context::latest_run_context;
 use crate::skill_model_tool::{
-    claude_skill_tool_sources, load_model_skill, model_tool_skill_name, LoadedModelSkill,
-    SkillExecutionPolicy,
+    load_model_skill, model_tool_skill_name, LoadedModelSkill, SkillExecutionPolicy,
 };
 use crate::{
     apply_provider_settings_to_project_config, ApiError, ApiState, ModelToolExecuteRequest,
@@ -26,7 +25,7 @@ use crate::{
 pub(crate) async fn execute_skill_model_tool(
     state: &ApiState,
     request: &ModelToolExecuteRequest,
-    host_context: &ModelToolHostContext,
+    host_context: &TurnContext,
 ) -> Result<Value, ApiError> {
     let skill_name = model_tool_skill_name(&request.input)
         .ok_or_else(|| ApiError::bad_request("Skill input requires skill or command name"))?;
@@ -90,14 +89,13 @@ pub(crate) async fn execute_skill_model_tool(
         "content_estimated_tokens": content_estimated_tokens,
         "agent_id": parent_agent_id,
         "event_kind": INVOKED_SKILL_EVENT_KIND,
-        "event_sequence": sequence,
-        "claude_sources": claude_skill_tool_sources()
+        "event_sequence": sequence
     }))
 }
 
 fn model_tool_skill_parent_agent_id(
     request: &ModelToolExecuteRequest,
-    host_context: &ModelToolHostContext,
+    host_context: &TurnContext,
 ) -> Option<String> {
     host_context
         .agent_id
@@ -117,7 +115,7 @@ fn model_tool_skill_parent_agent_id(
 struct SkillModelToolExecutionContext<'a> {
     state: &'a ApiState,
     request: &'a ModelToolExecuteRequest,
-    host_context: &'a ModelToolHostContext,
+    host_context: &'a TurnContext,
     run_id: &'a RunId,
     loaded_skill: &'a LoadedModelSkill,
     execution_policy: &'a SkillExecutionPolicy,
@@ -150,8 +148,7 @@ fn record_invoked_model_skill(
             "tool_use_id": context.request.tool_use_id,
             "tool_name": context.request.tool_name,
             "requested_skill": context.requested_skill
-        },
-        "claude_sources": claude_skill_tool_sources()
+        }
     });
     append_model_tool_event_checked(
         &context.state.store,
@@ -211,15 +208,14 @@ async fn execute_forked_skill_model_tool(
         "event_sequence": event_sequence,
         "subagent": subagent,
         "metadata_ref": subagent.get("metadata_ref").cloned().unwrap_or(Value::Null),
-        "transcript_ref": subagent.get("transcript_ref").cloned().unwrap_or(Value::Null),
-        "claude_sources": claude_skill_tool_sources()
+        "transcript_ref": subagent.get("transcript_ref").cloned().unwrap_or(Value::Null)
     }))
 }
 
 fn skill_fork_subagent_run_request(
     state: &ApiState,
     request: &ModelToolExecuteRequest,
-    host_context: &ModelToolHostContext,
+    host_context: &TurnContext,
     run_id: &RunId,
     loaded_skill: &LoadedModelSkill,
     execution_policy: &SkillExecutionPolicy,
@@ -253,7 +249,7 @@ fn skill_fork_subagent_run_request(
         .unwrap_or_else(|| "model-tool".to_owned());
     let repo_root = model_tool_string(input, &["repo_root", "cwd"]).or(run_context.repo_root);
     let backend_context = model_tool_object(input, "backend_context").unwrap_or_else(|| json!({}));
-    let subagent_name = resolve_skill_fork_agent(execution_policy, &config);
+    let subagent_name = resolve_skill_fork_agent(execution_policy, &config, &parent_agent_id)?;
     let run_in_background = model_tool_bool(input, &["run_in_background", "runInBackground"]);
     Ok(SubagentRunToolRequest {
         config,
@@ -281,26 +277,41 @@ fn skill_fork_subagent_run_request(
 fn resolve_skill_fork_agent(
     execution_policy: &SkillExecutionPolicy,
     config: &ProjectConfig,
-) -> String {
+    parent_agent_id: &str,
+) -> Result<String, ApiError> {
     let requested_agent = execution_policy
         .agent
         .as_deref()
         .map(str::trim)
         .filter(|agent| !agent.is_empty())
         .map(str::to_owned);
-    requested_agent
-        .as_ref()
-        .filter(|agent| config.agents.contains_key(agent.as_str()))
-        .cloned()
-        .or_else(|| {
-            config
-                .agents
-                .contains_key("general-purpose")
-                .then(|| "general-purpose".to_owned())
-        })
-        .or_else(|| config.agents.keys().next().cloned())
-        .or(requested_agent)
-        .unwrap_or_else(|| "general-purpose".to_owned())
+    if let Some(requested_agent) = requested_agent {
+        return config
+            .agents
+            .contains_key(&requested_agent)
+            .then_some(requested_agent.clone())
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "Skill fork requests unknown agent '{requested_agent}'"
+                ))
+            });
+    }
+    if config.agents.contains_key(parent_agent_id) {
+        return Ok(parent_agent_id.to_owned());
+    }
+    let mut executors = config
+        .agents
+        .iter()
+        .filter(|(_, agent)| agent.role == "executor")
+        .map(|(agent_id, _)| agent_id.clone());
+    if let Some(only_executor) = executors.next() {
+        if executors.next().is_none() {
+            return Ok(only_executor);
+        }
+    }
+    Err(ApiError::bad_request(
+        "Skill fork must specify an agent when the parent agent is unavailable and the config does not define exactly one executor",
+    ))
 }
 
 fn skill_fork_task(input: &Value, loaded_skill: &LoadedModelSkill) -> String {
@@ -330,24 +341,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn skill_fork_agent_resolution_falls_back_to_first_config_agent() {
+    fn skill_fork_agent_resolution_uses_the_only_executor_when_parent_is_external() {
         let policy = SkillExecutionPolicy::default();
         let config = crate::default_project_config();
-        let resolution = resolve_skill_fork_agent(&policy, &config);
+        let resolution = resolve_skill_fork_agent(&policy, &config, "model-tool").unwrap();
 
         assert_eq!(resolution, "executor");
     }
 
     #[test]
-    fn skill_fork_agent_resolution_falls_back_when_requested_agent_is_missing() {
+    fn skill_fork_agent_resolution_inherits_configured_parent() {
+        let policy = SkillExecutionPolicy::default();
+        let config = crate::default_project_config();
+        let resolution = resolve_skill_fork_agent(&policy, &config, "workflow-planner").unwrap();
+
+        assert_eq!(resolution, "workflow-planner");
+    }
+
+    #[test]
+    fn skill_fork_agent_resolution_rejects_unknown_requested_agent() {
         let policy = SkillExecutionPolicy {
             agent: Some("reviewer".to_owned()),
             ..SkillExecutionPolicy::default()
         };
         let config = crate::default_project_config();
-        let resolution = resolve_skill_fork_agent(&policy, &config);
+        let error = resolve_skill_fork_agent(&policy, &config, "model-tool").unwrap_err();
 
-        assert_eq!(resolution, "executor");
+        assert!(error.message.contains("unknown agent 'reviewer'"));
     }
 
     #[test]
@@ -357,7 +377,7 @@ mod tests {
             ..SkillExecutionPolicy::default()
         };
         let config = crate::default_project_config();
-        let resolution = resolve_skill_fork_agent(&policy, &config);
+        let resolution = resolve_skill_fork_agent(&policy, &config, "model-tool").unwrap();
 
         assert_eq!(resolution, "executor");
     }

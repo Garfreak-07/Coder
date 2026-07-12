@@ -10,10 +10,17 @@ pub(crate) fn model_tool_success_response(
     payload: Value,
 ) -> ModelToolExecuteResponse {
     let status = model_tool_status(&payload);
-    let is_error = matches!(
-        status.as_str(),
-        "blocked" | "failed" | "cancelled" | "canceled"
-    );
+    let successful_cancellation = matches!(
+        tool_name.as_str(),
+        "cancel_command_background" | "cancel_subagent_background"
+    ) && matches!(status.as_str(), "cancelled" | "canceled");
+    let successful_terminal = tool_name == "finish" && status == "blocked";
+    let is_error = !successful_cancellation
+        && !successful_terminal
+        && matches!(
+            status.as_str(),
+            "blocked" | "failed" | "cancelled" | "canceled"
+        );
     let (content, content_truncated) = model_tool_content(&payload, is_error);
     let refs = model_tool_refs(&payload);
     ModelToolExecuteResponse {
@@ -29,7 +36,6 @@ pub(crate) fn model_tool_success_response(
         payload,
         refs,
         phases: Vec::new(),
-        claude_sources: claude_tool_result_sources(),
     }
 }
 
@@ -57,7 +63,6 @@ pub(crate) fn model_tool_error_response(
         payload,
         refs: Vec::new(),
         phases: Vec::new(),
-        claude_sources: claude_tool_result_sources(),
     }
 }
 
@@ -87,7 +92,6 @@ pub(crate) fn model_tool_hook_blocked_response(
         payload,
         refs: Vec::new(),
         phases: Vec::new(),
-        claude_sources: claude_tool_result_sources(),
     }
 }
 
@@ -132,12 +136,7 @@ pub(crate) fn model_tool_permission_blocked_response(
         "permission_result": permission_phase_payload["permission_result"].clone(),
         "permission_policy_source": permission_phase_payload["permission_policy_source"].clone(),
         "permission_policy": permission_phase_payload["permission_policy"].clone(),
-        "permission_decision": permission_phase_payload,
-        "claude_sources": [
-            "src/services/tools/toolExecution.ts checkPermissionsAndCallTool",
-            "src/services/tools/toolExecution.ts resolveHookPermissionDecision",
-            "src/services/tools/toolExecution.ts runToolUse"
-        ]
+        "permission_decision": permission_phase_payload
     });
     let content = format!("<tool_use_error>{message}</tool_use_error>");
     ModelToolExecuteResponse {
@@ -153,7 +152,6 @@ pub(crate) fn model_tool_permission_blocked_response(
         payload,
         refs: Vec::new(),
         phases: Vec::new(),
-        claude_sources: claude_tool_result_sources(),
     }
 }
 
@@ -178,30 +176,13 @@ fn model_tool_status(payload: &Value) -> String {
 }
 
 fn model_tool_content(payload: &Value, is_error: bool) -> (String, bool) {
-    let model_payload = concise_subagent_payload(payload)
-        .unwrap_or_else(|| model_payload_without_provenance(payload));
+    let model_payload = concise_subagent_payload(payload).unwrap_or_else(|| payload.clone());
     let content =
         serde_json::to_string_pretty(&model_payload).unwrap_or_else(|_| model_payload.to_string());
     if is_error {
         (format!("<tool_use_error>{content}</tool_use_error>"), false)
     } else {
         (content, false)
-    }
-}
-
-fn model_payload_without_provenance(value: &Value) -> Value {
-    match value {
-        Value::Array(items) => {
-            Value::Array(items.iter().map(model_payload_without_provenance).collect())
-        }
-        Value::Object(object) => Value::Object(
-            object
-                .iter()
-                .filter(|(key, _)| key.as_str() != "claude_sources")
-                .map(|(key, value)| (key.clone(), model_payload_without_provenance(value)))
-                .collect(),
-        ),
-        _ => value.clone(),
     }
 }
 
@@ -249,11 +230,7 @@ pub(crate) fn apply_model_tool_post_hook_updated_output(
         "hook_event": "PostToolUse",
         "output": updated_output,
         "original_payload": original_payload,
-        "original_refs": original_refs,
-        "claude_sources": [
-            "src/services/tools/toolHooks.ts runPostToolUseHooks updatedMCPToolOutput",
-            "src/utils/hooks.ts processHookJSONOutput PostToolUse updatedMCPToolOutput"
-        ]
+        "original_refs": original_refs
     });
     response.content = content;
     response.content_truncated = false;
@@ -339,21 +316,27 @@ pub(crate) fn model_tool_execute_response_from_result_block(
         payload: result.payload,
         refs: result.refs,
         phases: result.phases,
-        claude_sources: result.claude_sources,
     }
-}
-
-fn claude_tool_result_sources() -> Vec<&'static str> {
-    vec![
-        "src/query.ts",
-        "src/services/tools/StreamingToolExecutor.ts",
-        "src/services/tools/toolExecution.ts",
-    ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_cancellation_status_is_a_successful_tool_result() {
+        for tool_name in ["cancel_command_background", "cancel_subagent_background"] {
+            let response = model_tool_success_response(
+                "call-cancel".to_owned(),
+                tool_name.to_owned(),
+                json!({"status": "cancelled", "cancelled": true}),
+            );
+
+            assert_eq!(response.status, "cancelled");
+            assert!(!response.is_error);
+            assert!(!response.content.contains("<tool_use_error>"));
+        }
+    }
 
     #[test]
     fn subagent_model_content_uses_summary_and_durable_refs() {
@@ -376,22 +359,5 @@ mod tests {
         assert!(response.content.contains("subagent://transcript"));
         assert!(!response.content.contains("large-event"));
         assert_eq!(response.payload["events"][0]["kind"], "large-event");
-    }
-
-    #[test]
-    fn model_content_omits_provenance_but_api_payload_keeps_it() {
-        let payload = json!({
-            "status": "completed",
-            "result": {"value": 1, "claude_sources": ["src/query.ts"]}
-        });
-
-        let response =
-            model_tool_success_response("call-1".to_owned(), "repo_read_file".to_owned(), payload);
-
-        assert!(!response.content.contains("claude_sources"));
-        assert_eq!(
-            response.payload["result"]["claude_sources"][0],
-            "src/query.ts"
-        );
     }
 }

@@ -15,6 +15,12 @@ use crate::model_tool_hook_output::{
 };
 use crate::model_tool_hook_phase::{hook_command_kind, hook_event_name, ModelToolHookContext};
 use crate::model_tool_hook_runtime::ModelToolHookExecution;
+#[cfg(test)]
+use crate::outbound_http::environment_proxy_route_from_map;
+use crate::outbound_http::{
+    environment_proxy_route, ClientRouteClass, EnvironmentProxyRoute, HttpClientFactory,
+    OutboundProxyRoute,
+};
 
 pub(crate) async fn execute_webhook_model_tool_hook(
     hook: &HookCommandSpec,
@@ -72,40 +78,44 @@ pub(crate) async fn execute_webhook_model_tool_hook(
             }
         }
     };
-    let mut client_builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_seconds))
-        .redirect(reqwest::redirect::Policy::none());
-    if let Some(proxy_url) = proxy_policy.proxy_url.as_deref() {
-        let proxy = match reqwest::Proxy::all(proxy_url) {
-            Ok(proxy) => proxy,
-            Err(error) => {
-                return ModelToolHookExecution {
-                    payload: json!({
-                        "type": "webhook",
-                        "hook_transport": "webhook",
-                        "url": url,
-                        "hook_event": hook_event_name(event),
-                        "tool_name": requested_tool_name,
-                        "outcome": "execution_error",
-                        "error": format!(
-                            "webhook hook proxy URL from {} is invalid: {error}",
-                            proxy_policy.proxy_source.unwrap_or("environment")
-                        ),
-                        "duration_ms": started.elapsed().as_millis() as u64,
-                        "timeout_seconds": timeout_seconds,
-                        "default_timeout_seconds": CLAUDE_TOOL_HOOK_EXECUTION_TIMEOUT_SECONDS,
-                        "transport": proxy_policy.report(),
-                        "ssrf_guard": webhook_ssrf_report(ssrf_guard.as_ref(), &proxy_policy)
-                    }),
-                    blocking_error: None,
-                    effects: ModelToolHookEffects::default(),
-                };
-            }
-        };
-        client_builder = client_builder.proxy(proxy);
-    } else {
-        client_builder = client_builder.no_proxy();
-    }
+    let client_factory = HttpClientFactory::new(OutboundProxyRoute::from_optional_url(
+        proxy_policy.proxy_url.as_deref(),
+    ));
+    let mut client_builder = match client_factory.configure(
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(timeout_seconds))
+            .redirect(reqwest::redirect::Policy::none()),
+        url,
+        ClientRouteClass::Webhook,
+    ) {
+        Ok(builder) => builder,
+        Err(error) => {
+            return ModelToolHookExecution {
+                payload: json!({
+                    "type": "webhook",
+                    "hook_transport": "webhook",
+                    "url": url,
+                    "hook_event": hook_event_name(event),
+                    "tool_name": requested_tool_name,
+                    "outcome": "execution_error",
+                    "error": format!(
+                        "webhook hook proxy configuration from {} is invalid: {error}",
+                        proxy_policy
+                            .proxy_source
+                            .as_deref()
+                            .unwrap_or("environment")
+                    ),
+                    "duration_ms": started.elapsed().as_millis() as u64,
+                    "timeout_seconds": timeout_seconds,
+                    "default_timeout_seconds": CLAUDE_TOOL_HOOK_EXECUTION_TIMEOUT_SECONDS,
+                    "transport": proxy_policy.report(),
+                    "ssrf_guard": webhook_ssrf_report(ssrf_guard.as_ref(), &proxy_policy)
+                }),
+                blocking_error: None,
+                effects: ModelToolHookEffects::default(),
+            };
+        }
+    };
     if let Some(ssrf_guard) = ssrf_guard.as_ref() {
         client_builder = client_builder.dns_resolver(Arc::new(ssrf_guard.resolver()));
     }
@@ -318,12 +328,7 @@ fn webhook_policy_error(
             "duration_ms": started.elapsed().as_millis() as u64,
             "timeout_seconds": timeout_seconds,
             "default_timeout_seconds": CLAUDE_TOOL_HOOK_EXECUTION_TIMEOUT_SECONDS,
-            "request_protocol": "claude.hook_input.v1",
-            "claude_sources": [
-                "src/utils/hooks/execHttpHook.ts getHttpHookPolicy",
-                "src/utils/hooks/execHttpHook.ts urlMatchesPattern",
-                "src/utils/hooks/ssrfGuard.ts"
-            ]
+            "request_protocol": "claude.hook_input.v1"
         }),
         blocking_error: None,
         effects: ModelToolHookEffects::default(),
@@ -419,58 +424,10 @@ fn wildcard_pattern_matches(value: &str, pattern: &str) -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WebhookProxyPolicy {
-    pub(crate) proxy_url: Option<String>,
-    pub(crate) proxy_source: Option<&'static str>,
-    no_proxy_source: Option<&'static str>,
-    bypassed: bool,
-}
-
-impl WebhookProxyPolicy {
-    pub(crate) fn uses_proxy(&self) -> bool {
-        self.proxy_url.is_some() && !self.bypassed
-    }
-
-    pub(crate) fn report(&self) -> Value {
-        json!({
-            "mode": if self.uses_proxy() {
-                "env_proxy"
-            } else if self.bypassed {
-                "env_proxy_bypassed"
-            } else {
-                "direct"
-            },
-            "proxy_configured": self.proxy_source.is_some(),
-            "proxy_source": self.proxy_source,
-            "no_proxy_configured": self.no_proxy_source.is_some(),
-            "no_proxy_source": self.no_proxy_source,
-            "proxy_bypassed": self.bypassed,
-            "claude_sources": [
-                "src/utils/hooks/execHttpHook.ts envProxyActive",
-                "src/utils/proxy.ts getProxyUrl",
-                "src/utils/proxy.ts shouldBypassProxy"
-            ]
-        })
-    }
-}
+pub(crate) type WebhookProxyPolicy = EnvironmentProxyRoute;
 
 pub(crate) fn webhook_proxy_policy(url: &str) -> WebhookProxyPolicy {
-    let proxy =
-        first_webhook_env_value(&["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"]);
-    let no_proxy = first_webhook_env_value(&["no_proxy", "NO_PROXY"]);
-    let bypassed = proxy.is_some()
-        && webhook_should_bypass_proxy(url, no_proxy.as_ref().map(|(value, _)| value.as_str()));
-    WebhookProxyPolicy {
-        proxy_url: if bypassed {
-            None
-        } else {
-            proxy.as_ref().map(|(value, _)| value.clone())
-        },
-        proxy_source: proxy.as_ref().map(|(_, source)| *source),
-        no_proxy_source: no_proxy.as_ref().map(|(_, source)| *source),
-        bypassed,
-    }
+    environment_proxy_route(url, &[])
 }
 
 #[cfg(test)]
@@ -478,87 +435,7 @@ pub(crate) fn webhook_proxy_policy_for_env(
     url: &str,
     env_map: &std::collections::BTreeMap<String, String>,
 ) -> WebhookProxyPolicy {
-    let proxy = first_webhook_env_value_from_map(
-        env_map,
-        &["https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"],
-    );
-    let no_proxy = first_webhook_env_value_from_map(env_map, &["no_proxy", "NO_PROXY"]);
-    let bypassed = proxy.is_some()
-        && webhook_should_bypass_proxy(url, no_proxy.as_ref().map(|(value, _)| value.as_str()));
-    WebhookProxyPolicy {
-        proxy_url: if bypassed {
-            None
-        } else {
-            proxy.as_ref().map(|(value, _)| value.clone())
-        },
-        proxy_source: proxy.as_ref().map(|(_, source)| *source),
-        no_proxy_source: no_proxy.as_ref().map(|(_, source)| *source),
-        bypassed,
-    }
-}
-
-fn first_webhook_env_value(candidates: &[&'static str]) -> Option<(String, &'static str)> {
-    for name in candidates {
-        let Some(value) = env::var_os(name).and_then(|value| value.into_string().ok()) else {
-            continue;
-        };
-        let value = value.trim();
-        if !value.is_empty() {
-            return Some((value.to_owned(), *name));
-        }
-    }
-    None
-}
-
-#[cfg(test)]
-fn first_webhook_env_value_from_map(
-    env_map: &std::collections::BTreeMap<String, String>,
-    candidates: &[&'static str],
-) -> Option<(String, &'static str)> {
-    for name in candidates {
-        let Some(value) = env_map.get(*name).map(|value| value.trim()) else {
-            continue;
-        };
-        if !value.is_empty() {
-            return Some((value.to_owned(), *name));
-        }
-    }
-    None
-}
-
-pub(crate) fn webhook_should_bypass_proxy(url: &str, no_proxy: Option<&str>) -> bool {
-    let Some(no_proxy) = no_proxy.map(str::trim).filter(|value| !value.is_empty()) else {
-        return false;
-    };
-    if no_proxy == "*" {
-        return true;
-    }
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        return false;
-    };
-    let Some(hostname) = parsed.host_str().map(|host| host.to_ascii_lowercase()) else {
-        return false;
-    };
-    let port = parsed
-        .port_or_known_default()
-        .map(|port| port.to_string())
-        .unwrap_or_default();
-    let host_with_port = format!("{hostname}:{port}");
-    no_proxy
-        .split(|ch: char| ch == ',' || ch.is_ascii_whitespace())
-        .filter_map(|pattern| {
-            let pattern = pattern.trim().to_ascii_lowercase();
-            (!pattern.is_empty()).then_some(pattern)
-        })
-        .any(|pattern| {
-            if pattern.contains(':') {
-                return host_with_port == pattern;
-            }
-            if let Some(suffix) = pattern.strip_prefix('.') {
-                return hostname == suffix || hostname.ends_with(&format!(".{suffix}"));
-            }
-            hostname == pattern
-        })
+    environment_proxy_route_from_map(url, &[], env_map)
 }
 
 pub(crate) fn webhook_ssrf_report(
@@ -572,11 +449,7 @@ pub(crate) fn webhook_ssrf_report(
         "mode": "skipped_proxy",
         "reason": "proxy_handles_target_dns",
         "socket_bound": false,
-        "proxy_source": proxy_policy.proxy_source,
-        "claude_sources": [
-            "src/utils/hooks/execHttpHook.ts lookup",
-            "src/utils/hooks/execHttpHook.ts envProxyActive"
-        ]
+        "proxy_source": proxy_policy.proxy_source
     })
 }
 

@@ -5,9 +5,9 @@ use serde::{de::Error as _, Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::api_types::{
-    MemoryProposalDraft, PlanDraft, PlannerArtifact, PlannerConversationEngine,
-    PlannerConversationRequest, PlannerConversationResponse, PlannerReadiness,
-    PlannerRuntimeContext,
+    MemoryProposalDraft, PlanDraft, PlanExecutionMode, PlanReviewMode, PlannerArtifact,
+    PlannerConversationEngine, PlannerConversationRequest, PlannerConversationResponse,
+    PlannerReadiness, PlannerRuntimeContext,
 };
 use crate::planner_provider_runtime::LivePlannerMessage;
 
@@ -42,10 +42,11 @@ pub(crate) fn planner_system_prompt(runtime: &PlannerRuntimeContext) -> String {
 - You do not edit files or run commands in chat.
 - You prepare the task and decide whether it is ready for Start Work.
 - Infer the task domain, implicit user expectations, and an observable quality bar when that is safer than asking about non-blocking details.
-- Separate known facts from assumptions. Do not invent repository facts; make repository inspection an execution step.
+- Separate known facts from assumptions. Use the bounded read-only repository tools for relevant facts when a repository is bound; never invent repository facts.
 - Prefer the smallest complete plan. Include dependencies, likely challenges, trade-offs, and task-specific acceptance criteria only when they affect execution.
 - Make every material requested or inferred behavior in goal/scope traceable to an observable acceptance criterion. A generic build/pass criterion is insufficient when behavior matters.
 - Make qualitative criteria falsifiable. Do not repeat bare adjectives such as functional, enjoyable, clean, responsive, polished, or deliverable; name a representative user flow plus the relevant state, viewport, or observable evidence that would disprove completion.
+- Classify plan_draft.execution_mode as read_only, may_write, or must_write and plan_draft.review_mode as standard or qualitative. These typed fields control execution and review; do not omit them.
 - Ask only questions whose answers materially change scope, safety, or the implementation direction.
 - If the user says to use your judgement or decide details yourself, treat optional product and design choices as delegated: keep open_questions empty and normally set ready_for_start_work=true.
 - When the user asks you to do work, explain briefly that execution happens after Start Work.
@@ -56,7 +57,7 @@ pub(crate) fn planner_system_prompt(runtime: &PlannerRuntimeContext) -> String {
 - Keep assistant_message under 250 visible words when possible and always under 600 words.
 - Return only one compact JSON object matching the strict_output_contract in the supplied planner context. Do not wrap it in markdown fences."#;
     format!(
-        "{}\n\n{}\n\nRuntime boundary:\n- workflow_id: {}\n- workflow_name: {}\n- node_id: {}\n- agent_id: {}\n- harness_id: {}\n- execution_tools: none\n- allowed_context: preloaded Coder Planner session and allowed memory/context only\n- terminal: disabled\n- file_editor: disabled\n- command_execution: disabled\n- network_tools: disabled\n- side effects: denied\n\nNever claim execution happened during Planner Chat.",
+        "{}\n\n{}\n\nRuntime boundary:\n- workflow_id: {}\n- workflow_name: {}\n- node_id: {}\n- agent_id: {}\n- harness_id: {}\n- repository_tools: bounded read-only snapshot when a repository is bound\n- terminal: disabled\n- file_editor: disabled\n- command_execution: disabled\n- network_tools: disabled\n- side effects: denied\n\nRepository inspection is not task execution. Never claim files changed or commands ran during Planner Chat.",
         runtime.agent.system,
         CONTRACT,
         runtime.workflow_id,
@@ -187,7 +188,7 @@ pub(crate) fn deterministic_planner_response(
     }
 
     let deterministic_plan = planner_plan_draft(request);
-    let mut plan = model_envelope
+    let plan = model_envelope
         .as_ref()
         .and_then(|envelope| envelope.plan_draft.clone())
         .map(|model_plan| {
@@ -200,10 +201,15 @@ pub(crate) fn deterministic_planner_response(
                 &explicit_paths,
                 &explicit_criteria,
                 &explicit_risks,
+                (request.current_plan.is_some()
+                    && message_is_pure_plan_confirmation(&request.message))
+                    || message_explicitly_read_only(&request.message),
+                (request.current_plan.is_some()
+                    && message_is_pure_plan_confirmation(&request.message))
+                    || message_explicitly_qualitative(&request.message),
             )
         })
         .unwrap_or(deterministic_plan);
-    add_qualitative_evidence_criteria(&mut plan, &request.message);
     let planning_only = message_requests_planning_only(&request.message) && mode != "work";
     let readiness = if planning_only
         || model_envelope
@@ -319,9 +325,17 @@ fn merge_model_plan(
     explicit_paths: &[String],
     explicit_criteria: &[String],
     explicit_risks: &[String],
+    preserve_execution_mode: bool,
+    preserve_review_mode: bool,
 ) -> PlanDraft {
     if !model.goal.trim().is_empty() {
         deterministic.goal = single_line_preview(&model.goal, 600);
+    }
+    if !preserve_execution_mode {
+        deterministic.execution_mode = model.execution_mode;
+    }
+    if !preserve_review_mode {
+        deterministic.review_mode = model.review_mode;
     }
     merge_plan_items_preserving_explicit(&mut deterministic.scope, model.scope, explicit_paths, 12);
     merge_plan_items(&mut deterministic.non_goals, model.non_goals, 12);
@@ -346,86 +360,6 @@ fn merge_model_plan(
     merge_plan_items_preserving_explicit(&mut deterministic.risks, model.risks, explicit_risks, 12);
     deterministic.open_questions = bounded_plan_items(model.open_questions, 8);
     deterministic
-}
-
-fn add_qualitative_evidence_criteria(plan: &mut PlanDraft, message: &str) {
-    let text = format!(
-        "{}\n{}\n{}\n{}",
-        message,
-        plan.goal,
-        plan.scope.join(" "),
-        plan.acceptance_criteria.join(" ")
-    )
-    .to_ascii_lowercase();
-    if !contains_any(
-        &text,
-        &[
-            "fun",
-            "polish",
-            "engaging",
-            "delightful",
-            "beautiful",
-            "refine",
-            "improve",
-            "better",
-            "production-ready",
-            "production ready",
-            "high quality",
-            "deliverable",
-            "\u{597d}\u{73a9}",
-            "\u{7cbe}\u{81f4}",
-            "\u{9ad8}\u{8d28}\u{91cf}",
-            "\u{4f18}\u{5316}",
-            "\u{5b8c}\u{5584}",
-            "\u{7f8e}\u{89c2}",
-        ],
-    ) {
-        return;
-    }
-    let criteria_text = plan.acceptance_criteria.join(" ").to_ascii_lowercase();
-    if !contains_any(
-        &criteria_text,
-        &[
-            "playtest",
-            "end to end",
-            "representative",
-            "before and after",
-        ],
-    ) {
-        plan.acceptance_criteria.push(
-            "A focused task-specific review exercises a representative primary flow and records observable evidence for the highest-impact defects before and after the change."
-                .to_owned(),
-        );
-    }
-    if contains_any(
-        &text,
-        &[
-            "game",
-            "browser",
-            "frontend",
-            "interface",
-            " ui ",
-            " ux ",
-            "website",
-            "web app",
-            "mobile",
-            "\u{6e38}\u{620f}",
-            "\u{754c}\u{9762}",
-            "\u{524d}\u{7aef}",
-        ],
-    ) && !(criteria_text.contains("desktop") && criteria_text.contains("mobile"))
-    {
-        plan.acceptance_criteria.push(
-            "The primary experience is inspected at one desktop and one mobile viewport; no content or controls are clipped, overlapped, overflowed, or unreachable."
-                .to_owned(),
-        );
-    }
-    plan.acceptance_criteria =
-        bounded_plan_items(std::mem::take(&mut plan.acceptance_criteria), 16);
-}
-
-fn contains_any(text: &str, markers: &[&str]) -> bool {
-    markers.iter().any(|marker| text.contains(marker))
 }
 
 fn merge_plan_items(target: &mut Vec<String>, source: Vec<String>, max_items: usize) {
@@ -852,6 +786,26 @@ fn planner_plan_draft(request: &PlannerConversationRequest) -> PlanDraft {
     };
     PlanDraft {
         goal,
+        execution_mode: current
+            .as_ref()
+            .map(|plan| plan.execution_mode.clone())
+            .unwrap_or_else(|| {
+                if message_explicitly_read_only(&request.message) {
+                    PlanExecutionMode::ReadOnly
+                } else {
+                    PlanExecutionMode::default()
+                }
+            }),
+        review_mode: current
+            .as_ref()
+            .map(|plan| plan.review_mode.clone())
+            .unwrap_or_else(|| {
+                if message_explicitly_qualitative(&request.message) {
+                    PlanReviewMode::Qualitative
+                } else {
+                    PlanReviewMode::default()
+                }
+            }),
         scope,
         non_goals: current
             .as_ref()
@@ -1087,7 +1041,26 @@ pub(crate) fn message_is_pure_plan_confirmation(message: &str) -> bool {
             | "\u{786e}\u{8ba4}"
             | "\u{5f00}\u{59cb}"
             | "\u{6267}\u{884c}"
-    )
+    ) || (normalized.starts_with("confirm ")
+        && normalized.ends_with(" plan")
+        && normalized.split_whitespace().count() <= 8)
+}
+
+fn message_explicitly_read_only(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("read-only")
+        || lower.contains("read only")
+        || lower.contains("without modifying")
+        || lower.contains("without changing files")
+        || lower.contains("do not modify")
+        || message.contains("\u{53ea}\u{8bfb}")
+        || message.contains("\u{4e0d}\u{4fee}\u{6539}")
+}
+
+fn message_explicitly_qualitative(message: &str) -> bool {
+    message.to_ascii_lowercase().contains("qualitative")
+        || message.contains("\u{5b9a}\u{6027}\u{8bc4}\u{5ba1}")
+        || message.contains("\u{5b9a}\u{6027}\u{8bc4}\u{4f30}")
 }
 
 fn message_has_whole_repo_scope(message: &str) -> bool {
@@ -1263,12 +1236,12 @@ fn unique_strings(items: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_qualitative_evidence_criteria, extract_acceptance_criteria, extract_affected_paths,
-        extract_risks, merge_model_plan, message_has_whole_repo_scope,
+        extract_acceptance_criteria, extract_affected_paths, extract_risks, merge_model_plan,
+        message_explicitly_qualitative, message_explicitly_read_only, message_has_whole_repo_scope,
         message_is_pure_plan_confirmation, parse_model_planner_envelope,
         planner_message_claims_start_work_ready,
     };
-    use crate::api_types::PlanDraft;
+    use crate::api_types::{PlanDraft, PlanExecutionMode, PlanReviewMode};
 
     #[test]
     fn whole_repo_scope_detects_repository_root_phrases() {
@@ -1292,6 +1265,32 @@ mod tests {
     }
 
     #[test]
+    fn qualified_confirmation_without_new_scope_is_pure_confirmation() {
+        assert!(message_is_pure_plan_confirmation(
+            "Confirm this read-only qualitative review plan."
+        ));
+        assert!(!message_is_pure_plan_confirmation(
+            "Confirm this plan and also edit README.md."
+        ));
+    }
+
+    #[test]
+    fn explicit_typed_constraints_are_detected_without_generic_task_classification() {
+        assert!(message_explicitly_read_only(
+            "Review README.md without modifying files."
+        ));
+        assert!(message_explicitly_read_only(
+            "\u{53ea}\u{8bfb}\u{8bc4}\u{5ba1} README.md"
+        ));
+        assert!(message_explicitly_qualitative(
+            "Perform a qualitative review."
+        ));
+        assert!(!message_explicitly_read_only(
+            "Review and improve README.md."
+        ));
+    }
+
+    #[test]
     fn model_plan_adds_domain_quality_without_changing_workflow_authority() {
         let envelope = parse_model_planner_envelope(
             r#"{
@@ -1299,6 +1298,8 @@ mod tests {
                 "ready_for_start_work":true,
                 "plan_draft":{
                     "goal":["Build a recognizable lane-defense browser game."],
+                    "execution_mode":"must_write",
+                    "review_mode":"qualitative",
                     "steps":["Implement resource, placement, wave, combat, win, and loss loops."],
                     "acceptance_criteria":["At least two strategically distinct plant types are usable.","A complete wave can be won or lost."],
                     "risks":["Visual polish must not replace gameplay depth."],
@@ -1309,6 +1310,8 @@ mod tests {
         .expect("structured planner envelope");
         let deterministic = PlanDraft {
             goal: "Make a plant game.".to_owned(),
+            execution_mode: PlanExecutionMode::ReadOnly,
+            review_mode: PlanReviewMode::Standard,
             scope: vec![".".to_owned()],
             non_goals: Vec::new(),
             assumptions: Vec::new(),
@@ -1321,12 +1324,52 @@ mod tests {
             memory_proposals: Vec::new(),
         };
 
-        let merged = merge_model_plan(deterministic, envelope.plan_draft.unwrap(), &[], &[], &[]);
+        let merged = merge_model_plan(
+            deterministic,
+            envelope.plan_draft.unwrap(),
+            &[],
+            &[],
+            &[],
+            false,
+            false,
+        );
 
         assert!(merged.acceptance_criteria[0].contains("plant types"));
         assert!(merged.steps[0].contains("resource"));
         assert_eq!(merged.selected_workflow_id, "planner-led");
         assert!(merged.open_questions.is_empty());
+        assert!(matches!(
+            merged.execution_mode,
+            PlanExecutionMode::MustWrite
+        ));
+        assert!(matches!(merged.review_mode, PlanReviewMode::Qualitative));
+    }
+
+    #[test]
+    fn confirmation_preserves_existing_typed_control_modes() {
+        let deterministic = PlanDraft {
+            goal: "Review README.md.".to_owned(),
+            execution_mode: PlanExecutionMode::ReadOnly,
+            review_mode: PlanReviewMode::Qualitative,
+            scope: vec!["README.md".to_owned()],
+            non_goals: Vec::new(),
+            assumptions: Vec::new(),
+            steps: Vec::new(),
+            affected_paths: vec!["README.md".to_owned()],
+            acceptance_criteria: vec!["Findings cite current content.".to_owned()],
+            risks: Vec::new(),
+            open_questions: Vec::new(),
+            selected_workflow_id: "planner-led".to_owned(),
+            memory_proposals: Vec::new(),
+        };
+        let mut model = deterministic.clone();
+        model.execution_mode = PlanExecutionMode::MustWrite;
+        model.review_mode = PlanReviewMode::Standard;
+
+        let merged = merge_model_plan(deterministic, model, &[], &[], &[], true, true);
+
+        assert!(matches!(merged.execution_mode, PlanExecutionMode::ReadOnly));
+        assert!(matches!(merged.review_mode, PlanReviewMode::Qualitative));
     }
 
     #[test]
@@ -1336,6 +1379,8 @@ mod tests {
         );
         let deterministic = PlanDraft {
             goal: "Build the game.".to_owned(),
+            execution_mode: PlanExecutionMode::MustWrite,
+            review_mode: PlanReviewMode::Qualitative,
             scope: vec![".".to_owned()],
             non_goals: Vec::new(),
             assumptions: Vec::new(),
@@ -1352,7 +1397,7 @@ mod tests {
             ..deterministic.clone()
         };
 
-        let merged = merge_model_plan(deterministic, model, &[], &explicit, &[]);
+        let merged = merge_model_plan(deterministic, model, &[], &explicit, &[], false, false);
 
         assert_eq!(merged.acceptance_criteria.len(), 5);
         assert_eq!(merged.acceptance_criteria[0], "keyboard navigation works");
@@ -1371,6 +1416,8 @@ mod tests {
         let explicit_risks = extract_risks(message);
         let deterministic = PlanDraft {
             goal: "Refactor the requested module.".to_owned(),
+            execution_mode: PlanExecutionMode::MustWrite,
+            review_mode: PlanReviewMode::Standard,
             scope: explicit_paths.clone(),
             non_goals: Vec::new(),
             assumptions: Vec::new(),
@@ -1389,7 +1436,15 @@ mod tests {
             ..deterministic.clone()
         };
 
-        let merged = merge_model_plan(deterministic, model, &explicit_paths, &[], &explicit_risks);
+        let merged = merge_model_plan(
+            deterministic,
+            model,
+            &explicit_paths,
+            &[],
+            &explicit_risks,
+            false,
+            false,
+        );
 
         assert_eq!(merged.scope[0], "crates/coder-server/src/planner_api.rs");
         assert_eq!(
@@ -1401,59 +1456,6 @@ mod tests {
             .risks
             .iter()
             .any(|risk| risk == "The UI may need regression testing."));
-    }
-
-    #[test]
-    fn qualitative_rendered_plan_gets_falsifiable_flow_and_viewport_criteria() {
-        let mut plan = PlanDraft {
-            goal: "Improve the game to a deliverable standard.".to_owned(),
-            scope: vec!["Review game logic and UI.".to_owned()],
-            non_goals: Vec::new(),
-            assumptions: Vec::new(),
-            steps: vec!["Inspect and improve the game.".to_owned()],
-            affected_paths: Vec::new(),
-            acceptance_criteria: vec![
-                "Core gameplay loop is functional and responsive.".to_owned(),
-                "UI is usable on desktop viewports.".to_owned(),
-            ],
-            risks: Vec::new(),
-            open_questions: Vec::new(),
-            selected_workflow_id: "planner-led".to_owned(),
-            memory_proposals: Vec::new(),
-        };
-
-        add_qualitative_evidence_criteria(&mut plan, "Make this game better.");
-
-        assert!(plan
-            .acceptance_criteria
-            .iter()
-            .any(|criterion| criterion.contains("representative primary flow")));
-        assert!(plan.acceptance_criteria.iter().any(|criterion| {
-            criterion.contains("desktop")
-                && criterion.contains("mobile")
-                && criterion.contains("clipped")
-        }));
-    }
-
-    #[test]
-    fn closed_plan_does_not_gain_qualitative_review_criteria() {
-        let mut plan = PlanDraft {
-            goal: "Create README.md with supplied text.".to_owned(),
-            scope: vec!["README.md".to_owned()],
-            non_goals: Vec::new(),
-            assumptions: Vec::new(),
-            steps: vec!["Write the supplied text.".to_owned()],
-            affected_paths: vec!["README.md".to_owned()],
-            acceptance_criteria: vec!["README.md contains the supplied text.".to_owned()],
-            risks: Vec::new(),
-            open_questions: Vec::new(),
-            selected_workflow_id: "planner-led".to_owned(),
-            memory_proposals: Vec::new(),
-        };
-
-        add_qualitative_evidence_criteria(&mut plan, "Create README.md.");
-
-        assert_eq!(plan.acceptance_criteria.len(), 1);
     }
 
     #[test]

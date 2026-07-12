@@ -6,15 +6,15 @@ execution, verification, evidence, cache policy, and review surfaces.
 
 ## Product Path
 
-Coder is split into cooperating agents:
+Coder has three runtime roles with isolated contexts:
 
 - Planner talks to the user, clarifies scope, tracks readiness, and writes
   public summaries.
-- Workflow Planner receives verifier evidence and makes a bounded
+- Workflow Planner receives Executor evidence and makes a bounded
   finish-or-improve decision. Closed, objective success takes a zero-provider
   fast path; failures and open-ended quality goals use the real model.
-- Executor performs the native ReAct work loop through harness-controlled tools.
-- Verifier checks the result and feeds PASS/FAIL evidence back to the loop.
+- Executor performs and verifies the native ReAct work loop through
+  harness-controlled tools.
 
 ```text
 User configures a provider in Settings
@@ -22,31 +22,47 @@ User configures a provider in Settings
 -> Planner marks the task ready
 -> User clicks Start Work
 -> WorkflowRunner loads examples/coder.yaml
--> native-code-edit executes through native-rust tools or provider-backed exact edits/file writes
--> browser-verification or verifier checks the result
+-> native-code-edit executes through native-rust tools and atomic multi-file apply_patch calls
 -> Workflow Planner finishes, requests one bounded improvement, or reports a blocker
 -> Timeline, evidence, report, Review Changes, and Undo are exposed in the UI
 ```
 
-Planner Chat is side-effect free. It can ask questions, maintain plan state,
-and mark work ready, but it must not write files, run commands, or start work.
-It remains usable while Start Work runs: status/cancel/guidance are local
-control operations and newer chat turns are revision-merged after completion.
+Planner Chat is side-effect free. When a repository is bound to the session, it
+can inspect files and git status through a frozen read-only tool snapshot. It
+can ask questions, maintain plan state, and mark work ready, but it must not
+write files, run model-supplied commands, access the network, or start work.
+Its agent and harness are selected by the explicit
+`surface_bindings.planner_chat` config entry. It remains usable while Start
+Work runs: `status`, `interrupt`, and `user_input` are typed local operations,
+and newer chat turns are revision-merged after completion.
 Execution starts only from Start Work.
 
 Harnesses are the execution boundary. A harness controls backend selection,
-tool availability, permissions, sandbox policy, memory scope, approvals,
+tool availability, permissions, command approval policy, memory scope, approvals,
 verification, event capture, and evidence. Runtime claims must be backed by
 tool events, repo evidence, patch refs, command checks, stored blobs, or final
 reports.
 
-After Start Work, the Rust API can inject a provider-backed
-`native-model-file-write` executor behind `native-rust`. The preferred path is
-a runtime-bounded tool-call loop where the model asks for repo, git, command, skill,
-subagent, and write tools. Rust executes them through the shared tool pipeline,
-and observations are returned to the model. The default non-interactive
-Executor uses 24 turns and stops immediately on `finish`. Providers that do not
-return tool calls can still use the strict JSON file-plan fallback.
+After Start Work, the Rust API injects the provider-backed
+`native-model-tool-loop` executor behind `native-rust`. The model asks for repo,
+git, command, skill, subagent, and write tools from one built-in tool catalog;
+registered stdio MCP tools are discovered once at run start and appended as a
+frozen dynamic tool snapshot. Rust routes every call through the shared
+permission and tool pipeline and returns observations to the model. The
+Executor stops immediately on
+`finish`. A deployment may override `max_turns`; otherwise Coder derives a
+provider/model-aware host bound (24 turns for normal-output models and 16 for
+high-output reasoning models). The same resolved model capabilities produce a
+visible run token budget. All repository side effects use the shared
+`ToolRuntime`; a plain assistant response can summarize a read-only task but
+cannot become an alternate file-write protocol. Missing credentials block with
+an explicit reason. The deterministic backend is used only when mock mode is
+explicitly enabled.
+
+A plan explicitly typed `read_only` narrows the Executor to repo/git inspection
+plus `finish`, caps it at eight provider turns, and removes command, write,
+Skill, subagent, and MCP schemas even after Start Work. Repository evidence is
+redacted before persistence without turning safe source reads into tool errors.
 
 Rust v3 covers the ordinary product surface behind the React UI:
 
@@ -54,11 +70,19 @@ Rust v3 covers the ordinary product surface behind the React UI:
 - workflow validation, import/export, and library storage
 - Planner Chat sessions, readiness, and explicit Start Work
 - native executor tools for repo search/read, git status/diff, command preview
-  and run, background commands, patch preview/apply, skills, and subagents
+  and run, background commands with incremental output and interactive stdin,
+  atomic multi-file model patches, patch-file preview/apply, skills, and
+  subagents
 - stored run inspection, timeline projection, changesets, undo, reports,
   artifacts, blobs, checkpoints, and repo evidence
 - provider settings, provider tests, proxy isolation, memory, knowledge, MCP,
   plugin/skill developer surfaces, and cache status
+
+MCP support is local stdio. Registration starts a persistent child process,
+performs `initialize` and paginated `tools/list`, and exposes valid tools to
+normal Executor runs as `mcp__server__tool`. Start Work approval remains
+host-owned; model arguments cannot approve or reroute an MCP call. Remote MCP
+transports are not part of the current product boundary.
 
 Maintained docs start at [`docs/README.md`](docs/README.md). The current
 architecture is summarized in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -153,6 +177,9 @@ $env:CODER_SELFTEST_LIVE="1"
 powershell -ExecutionPolicy Bypass -File .\scripts\live-coder-selftest-suite.ps1 -SkipIfMissingLiveConfig
 ```
 
+Add `-Minimal -IncludeMcpCase` to exercise a real provider call through a local
+stdio MCP tool without running the broader self-test suite.
+
 Installer dry-runs:
 
 ```powershell
@@ -194,6 +221,11 @@ DeepSeek and Ollama default to direct provider networking. Providers that often
 need a proxy default to environment proxy mode. See
 [`docs/PROVIDER_SETUP.md`](docs/PROVIDER_SETUP.md).
 
+`CODER_CA_CERTIFICATE`, falling back to `SSL_CERT_FILE`, adds an enterprise CA
+bundle to every provider, SSE, and webhook client. Model-generated commands do
+not inherit provider API key environment variables; provider credentials remain
+owned by Coder's host transport.
+
 Local helper files such as `.local-env.ps1` are ignored by Git and are for one
 developer machine only. Do not commit API keys into scripts, docs, examples, or
 workflow specs.
@@ -207,6 +239,8 @@ workflow specs.
   advanced developer surface.
 - Executors must not ask the user directly, commit, push, deploy, publish
   externally, or write long-term memory directly.
+- Model-supplied `approved` or `sandbox` flags are not authority; host policy
+  owns approval, and no sandbox flag lowers it without a real OS sandbox.
 - Keep environment variables as developer/headless fallback, not normal setup.
 - Keep GPU support optional and provider-scoped; it is not core runtime.
 

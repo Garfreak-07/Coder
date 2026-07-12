@@ -324,7 +324,6 @@ fn timeline_backend_display_name(backend: &str) -> &'static str {
     match backend {
         "native-rust" | "native_mock" | "mock" => "Native",
         "planner-model" => "Planner",
-        "browser-verifier" => "Browser verifier",
         _ => "unknown",
     }
 }

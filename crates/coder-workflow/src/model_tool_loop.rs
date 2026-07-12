@@ -4,8 +4,10 @@ use std::{
 };
 
 use async_trait::async_trait;
+use coder_config::{PermissionPolicy, ResolvedModelCapabilities};
 use coder_core::RunId;
 use coder_harness::HarnessRunEventRef;
+use coder_tools::{builtin_tool, canonical_builtin_tool_name, ToolConcurrencyClass};
 use serde_json::{json, Value};
 use tokio::task::JoinSet;
 
@@ -52,21 +54,28 @@ impl ModelToolUseBlock {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ModelToolExecutionRequest {
     pub tool_use_id: String,
     pub tool_name: String,
     pub input: Value,
-    pub host_context: ModelToolHostContext,
+    pub turn_context: TurnContext,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ModelToolHostContext {
+#[derive(Debug, Clone, Default)]
+pub struct TurnContext {
     pub run_id: Option<String>,
+    pub repo_root: Option<String>,
     pub harness_id: Option<String>,
     pub agent_id: Option<String>,
+    pub agent_role: Option<String>,
     pub current_model: Option<String>,
+    pub model_capabilities: Option<ResolvedModelCapabilities>,
     pub current_effort: Option<Value>,
+    pub selected_tools: Vec<String>,
+    pub permission_policy: Option<PermissionPolicy>,
+    pub start_work_authorized: bool,
+    pub token_budget: Option<u64>,
     pub drain_later_notifications: bool,
     pub skill_context_modifiers: Vec<Value>,
 }
@@ -173,20 +182,19 @@ pub struct ModelToolResultBlock {
     pub payload: Value,
     pub refs: Vec<HarnessRunEventRef>,
     pub phases: Vec<Value>,
-    pub claude_sources: Vec<&'static str>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ModelToolLoopOptions {
     pub max_tool_use_concurrency: usize,
-    pub host_context: ModelToolHostContext,
+    pub turn_context: TurnContext,
 }
 
 impl Default for ModelToolLoopOptions {
     fn default() -> Self {
         Self {
             max_tool_use_concurrency: max_tool_use_concurrency_from_env(),
-            host_context: ModelToolHostContext::default(),
+            turn_context: TurnContext::default(),
         }
     }
 }
@@ -195,12 +203,12 @@ impl ModelToolLoopOptions {
     pub fn with_max_tool_use_concurrency(max_tool_use_concurrency: usize) -> Self {
         Self {
             max_tool_use_concurrency: max_tool_use_concurrency.max(1),
-            host_context: ModelToolHostContext::default(),
+            turn_context: TurnContext::default(),
         }
     }
 
-    pub fn with_host_context(mut self, host_context: ModelToolHostContext) -> Self {
-        self.host_context = host_context;
+    pub fn with_turn_context(mut self, turn_context: TurnContext) -> Self {
+        self.turn_context = turn_context;
         self
     }
 }
@@ -211,7 +219,6 @@ pub struct ModelToolTurnOutput {
     pub source: &'static str,
     pub results: Vec<ModelToolResultBlock>,
     pub attachments: Vec<Value>,
-    pub claude_sources: Vec<&'static str>,
 }
 
 #[async_trait]
@@ -230,7 +237,7 @@ pub trait ModelToolExecutor: Send + Sync {
 
     async fn drain_model_tool_turn_attachments(
         &self,
-        _host_context: &ModelToolHostContext,
+        _turn_context: &TurnContext,
         _results: &[ModelToolResultBlock],
     ) -> Vec<Value> {
         Vec::new()
@@ -248,12 +255,12 @@ pub async fn execute_model_tool_turn(
 ) -> ModelToolTurnOutput {
     let mut state =
         StreamingToolExecutorState::with_max_concurrency(options.max_tool_use_concurrency);
-    let mut host_context = options.host_context.clone();
+    let mut turn_context = options.turn_context.clone();
     if tool_uses
         .iter()
         .any(|block| is_model_tool_sleep_name(&block.name))
     {
-        host_context.drain_later_notifications = true;
+        turn_context.drain_later_notifications = true;
     }
     let mut tools_by_id = BTreeMap::new();
     let mut ready_ids = Vec::new();
@@ -274,14 +281,14 @@ pub async fn execute_model_tool_turn(
                 continue;
             };
             let executor = Arc::clone(&executor);
-            let host_context = host_context.clone();
+            let turn_context = turn_context.clone();
             let tool_id = tool_id.clone();
             join_set.spawn(async move {
                 let request = ModelToolExecutionRequest {
                     tool_use_id: block.id.clone(),
                     tool_name: block.name.clone(),
                     input: block.input.clone(),
-                    host_context,
+                    turn_context,
                 };
                 let outcome = executor.execute_model_tool(request).await;
                 (tool_id, block, outcome)
@@ -336,7 +343,7 @@ pub async fn execute_model_tool_turn(
     );
     let results = executor.finalize_model_tool_turn_results(results).await;
     let attachments = executor
-        .drain_model_tool_turn_attachments(&host_context, &results)
+        .drain_model_tool_turn_attachments(&turn_context, &results)
         .await;
 
     ModelToolTurnOutput {
@@ -344,12 +351,11 @@ pub async fn execute_model_tool_turn(
         source: "coder-workflow",
         results,
         attachments,
-        claude_sources: claude_tool_loop_sources(),
     }
 }
 
 fn is_model_tool_sleep_name(tool_name: &str) -> bool {
-    matches!(tool_name, "sleep" | "Sleep" | "sleep_tool" | "SleepTool")
+    canonical_builtin_tool_name(tool_name) == Some("sleep")
 }
 
 pub fn synthesize_missing_model_tool_results(
@@ -371,51 +377,9 @@ pub fn synthesize_missing_model_tool_results(
 }
 
 pub fn model_tool_concurrency(tool_name: &str) -> ToolConcurrency {
-    match tool_name {
-        "repo_find_files"
-        | "find_files"
-        | "repo_files"
-        | "search_files"
-        | "repo_search_text"
-        | "repo_search"
-        | "search_text"
-        | "repo_read_file"
-        | "read_file"
-        | "repo_read_file_range"
-        | "read_file_range"
-        | "git_status"
-        | "git_diff"
-        | "inspect_git_diff"
-        | "read_command_output"
-        | "read_subagent_status"
-        | "TaskOutput"
-        | "task_output"
-        | "AgentOutputTool"
-        | "BashOutputTool" => ToolConcurrency::ConcurrentSafe,
-        "agent_subagent"
-        | "agent"
-        | "subagent"
-        | "Skill"
-        | "skill"
-        | "SkillTool"
-        | "skill_tool"
-        | "command_run"
-        | "run_command"
-        | "run_command_sandbox"
-        | "command_background"
-        | "cancel_command_background"
-        | "cancel_subagent_background"
-        | "TaskStop"
-        | "task_stop"
-        | "KillShell"
-        | "kill_shell"
-        | "patch_preview"
-        | "preview_patch"
-        | "propose_patch"
-        | "patch_apply"
-        | "apply_patch"
-        | "apply_patch_sandbox" => ToolConcurrency::Exclusive,
-        _ => ToolConcurrency::ConcurrentSafe,
+    match builtin_tool(tool_name).map(|tool| tool.concurrency) {
+        Some(ToolConcurrencyClass::Exclusive) => ToolConcurrency::Exclusive,
+        Some(ToolConcurrencyClass::Concurrent) | None => ToolConcurrency::ConcurrentSafe,
     }
 }
 
@@ -466,7 +430,6 @@ fn result_block_from_execution(result: ModelToolExecutionResult) -> ModelToolRes
         payload: result.payload,
         refs: result.refs,
         phases: result.phases,
-        claude_sources: claude_tool_loop_sources(),
     }
 }
 
@@ -515,7 +478,6 @@ fn synthetic_result_block_from_update(update: StreamingToolUpdate) -> ModelToolR
         }),
         refs: Vec::new(),
         phases: Vec::new(),
-        claude_sources: claude_tool_loop_sources(),
     }
 }
 
@@ -525,14 +487,6 @@ fn tool_use_error_content(message: &str) -> String {
     } else {
         format!("<tool_use_error>{message}</tool_use_error>")
     }
-}
-
-fn claude_tool_loop_sources() -> Vec<&'static str> {
-    vec![
-        "src/query.ts",
-        "src/services/tools/StreamingToolExecutor.ts",
-        "src/services/tools/toolExecution.ts",
-    ]
 }
 
 #[cfg(test)]
@@ -633,12 +587,12 @@ mod tests {
 
         async fn drain_model_tool_turn_attachments(
             &self,
-            host_context: &ModelToolHostContext,
+            turn_context: &TurnContext,
             results: &[ModelToolResultBlock],
         ) -> Vec<Value> {
             self.events.lock().unwrap().push(format!(
                 "drain:{}:{}",
-                host_context.run_id.as_deref().unwrap_or("none"),
+                turn_context.run_id.as_deref().unwrap_or("none"),
                 results.len()
             ));
             vec![json!({
@@ -707,11 +661,11 @@ mod tests {
                 json!({}),
             )],
             executor,
-            ModelToolLoopOptions::with_max_tool_use_concurrency(10).with_host_context(
-                ModelToolHostContext {
+            ModelToolLoopOptions::with_max_tool_use_concurrency(10).with_turn_context(
+                TurnContext {
                     run_id: Some("run-attachments".to_owned()),
                     harness_id: Some("native-code-edit".to_owned()),
-                    ..ModelToolHostContext::default()
+                    ..TurnContext::default()
                 },
             ),
         )
@@ -890,19 +844,7 @@ mod tests {
             ToolConcurrency::ConcurrentSafe
         );
         assert_eq!(
-            model_tool_concurrency("TaskOutput"),
-            ToolConcurrency::ConcurrentSafe
-        );
-        assert_eq!(
             model_tool_concurrency("command_run"),
-            ToolConcurrency::Exclusive
-        );
-        assert_eq!(
-            model_tool_concurrency("TaskStop"),
-            ToolConcurrency::Exclusive
-        );
-        assert_eq!(
-            model_tool_concurrency("KillShell"),
             ToolConcurrency::Exclusive
         );
         assert_eq!(

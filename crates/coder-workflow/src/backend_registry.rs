@@ -1,43 +1,48 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use coder_config::ProjectConfig;
 use coder_core::FinalReport;
 use coder_harness::{
     HarnessBackend, HarnessError, HarnessRunEvent, HarnessRunRequest, HarnessRunResult,
 };
+#[cfg(test)]
 use coder_store::RunStore;
 use serde_json::{json, Value};
 
-use crate::{
-    workflow_control::workflow_planner_result, BrowserVerifierBackend, NativeMockBackend,
-    NativeRustBackend,
-};
+#[cfg(test)]
+use crate::DeterministicNativeBackend;
+use crate::{workflow_control::workflow_planner_result, NativeMockBackend};
 
 #[derive(Clone)]
 pub struct BackendRegistry {
     planner_model: Arc<dyn HarnessBackend>,
     native_rust: Arc<dyn HarnessBackend>,
     native_mock: Arc<dyn HarnessBackend>,
-    browser_verifier: Arc<dyn HarnessBackend>,
 }
 
 impl BackendRegistry {
+    pub fn for_host() -> Self {
+        Self {
+            planner_model: Arc::new(UnavailableHostBackend("planner-model")),
+            native_rust: Arc::new(UnavailableHostBackend("native-rust")),
+            native_mock: Arc::new(NativeMockBackend::default()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_deterministic_tests(store: RunStore) -> Self {
+        Self {
+            planner_model: Arc::new(PlannerModelBackend),
+            native_rust: Arc::new(DeterministicNativeBackend::new(store)),
+            native_mock: Arc::new(NativeMockBackend::default()),
+        }
+    }
+
     pub fn native_only() -> Self {
         Self {
             planner_model: Arc::new(PlannerModelBackend),
             native_rust: Arc::new(NativeMockBackend::default()),
             native_mock: Arc::new(NativeMockBackend::default()),
-            browser_verifier: Arc::new(BrowserVerifierBackend::default()),
-        }
-    }
-
-    pub fn from_project_config(_config: &ProjectConfig, store: RunStore) -> Self {
-        Self {
-            planner_model: Arc::new(PlannerModelBackend),
-            native_rust: Arc::new(NativeRustBackend::new(store.clone())),
-            native_mock: Arc::new(NativeMockBackend::default()),
-            browser_verifier: Arc::new(BrowserVerifierBackend::new(store.clone())),
         }
     }
 
@@ -51,19 +56,26 @@ impl BackendRegistry {
         self
     }
 
-    pub fn with_browser_verifier_backend(mut self, backend: Arc<dyn HarnessBackend>) -> Self {
-        self.browser_verifier = backend;
-        self
-    }
-
     pub fn backend_for(&self, backend: &str) -> Option<Arc<dyn HarnessBackend>> {
         match backend {
             "planner-model" => Some(Arc::clone(&self.planner_model)),
             "native-rust" => Some(Arc::clone(&self.native_rust)),
             "native_mock" | "mock" => Some(Arc::clone(&self.native_mock)),
-            "browser-verifier" => Some(Arc::clone(&self.browser_verifier)),
             _ => None,
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct UnavailableHostBackend(&'static str);
+
+#[async_trait]
+impl HarnessBackend for UnavailableHostBackend {
+    async fn run(&self, _request: HarnessRunRequest) -> Result<HarnessRunResult, HarnessError> {
+        Err(HarnessError::Failed(format!(
+            "backend '{}' must be injected by the runtime host",
+            self.0
+        )))
     }
 }
 
@@ -81,17 +93,7 @@ impl HarnessBackend for PlannerModelBackend {
         {
             return Ok(workflow_planner_result(request));
         }
-        let plan_goal = request
-            .backend_context
-            .pointer("/coder/plan_context/plan_draft/goal")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                request
-                    .backend_context
-                    .pointer("/coder/plan_context/original_user_request")
-                    .and_then(Value::as_str)
-            })
-            .unwrap_or("Confirmed workflow plan");
+        let plan_goal = request.task.as_str();
         let mut report = FinalReport::completed(
             "Planner Conversation Harness accepted the confirmed plan without side effects.",
         );

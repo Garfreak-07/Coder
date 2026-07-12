@@ -107,8 +107,7 @@ pub(crate) async fn apply_run_permission_updates(
                 "updates": &request.updates,
                 "runtime_agent_rules": runtime_agent_rules.clone(),
                 "applications": applications.clone(),
-                "persistence": persistence.clone(),
-                "claude_sources": claude_permission_update_sources()
+                "persistence": persistence.clone()
             }),
         );
         state.store.append_event(&run_id, &event)?;
@@ -129,7 +128,6 @@ pub(crate) async fn apply_run_permission_updates(
         applications,
         persistence,
         validation,
-        claude_sources: claude_permission_update_sources(),
     }))
 }
 
@@ -170,11 +168,7 @@ fn runtime_agent_permission_rules_payload(updates: &[PermissionUpdate]) -> Value
         "contract": "coder.runtime_agent_permission_rules.v1",
         "source": "non-persisted PermissionUpdate session/cliArg rules",
         "rule_count": rule_count,
-        "updates": runtime_updates,
-        "claude_sources": [
-            "src/utils/permissions/permissions.ts getDenyRuleForAgent",
-            "src/utils/permissions/PermissionUpdate.ts applyPermissionUpdate"
-        ]
+        "updates": runtime_updates
     })
 }
 
@@ -316,13 +310,4 @@ fn latest_run_permission_harness_id(store: &RunStore, run_id: &RunId) -> Option<
             .filter(|harness_id| !harness_id.is_empty())
             .map(str::to_owned)
     })
-}
-
-fn claude_permission_update_sources() -> Vec<&'static str> {
-    vec![
-        "utils/permissions/PermissionUpdateSchema.ts",
-        "utils/permissions/PermissionUpdate.ts applyPermissionUpdate",
-        "utils/permissions/PermissionUpdate.ts persistPermissionUpdate",
-        "cli/structuredIO.ts executePermissionRequestHooksForSDK",
-    ]
 }

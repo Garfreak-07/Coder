@@ -1,38 +1,15 @@
 use coder_core::RunId;
-use coder_workflow::{ModelToolHostContext, ModelToolUseBlock};
+use coder_tools::canonical_builtin_tool_name;
+use coder_workflow::{ModelToolUseBlock, TurnContext};
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use crate::{ApiError, ModelToolExecuteRequest, ModelToolUseRequestBlock};
 
+const MODEL_COMMAND_FOREGROUND_YIELD_SECONDS: u64 = 10;
+
 pub(crate) fn canonical_model_tool_name(tool_name: &str) -> &'static str {
-    match tool_name {
-        "repo_find_files" | "find_files" | "repo_files" | "search_files" => "repo_find_files",
-        "repo_search_text" | "repo_search" | "search_text" => "repo_search_text",
-        "repo_read_file" | "read_file" => "repo_read_file",
-        "repo_read_file_range" | "read_file_range" => "repo_read_file_range",
-        "git_status" => "git_status",
-        "git_diff" | "inspect_git_diff" => "git_diff",
-        "command_run" | "run_command" | "run_command_sandbox" => "command_run",
-        "command_background" | "bash_background" => "command_background",
-        "read_command_output" => "read_command_output",
-        "cancel_command_background" => "cancel_command_background",
-        "patch_preview" | "preview_patch" | "propose_patch" => "patch_preview",
-        "patch_apply" | "apply_patch" | "apply_patch_sandbox" => "patch_apply",
-        "agent_subagent" | "Agent" | "agent" | "Task" | "task" | "subagent" => "agent_subagent",
-        "Skill" | "skill" | "SkillTool" | "skill_tool" => "skill",
-        "read_subagent_status"
-        | "TaskOutput"
-        | "task_output"
-        | "AgentOutputTool"
-        | "BashOutputTool" => "read_subagent_status",
-        "cancel_subagent_background" => "cancel_subagent_background",
-        "TaskStop" | "task_stop" | "KillShell" | "kill_shell" => "task_stop",
-        "sleep" | "Sleep" | "sleep_tool" | "SleepTool" => "sleep",
-        "write_text_file" | "write_file" | "file_write" => "write_text_file",
-        "finish" | "final" | "final_report" => "finish",
-        _ => "unknown",
-    }
+    canonical_builtin_tool_name(tool_name).unwrap_or("unknown")
 }
 
 pub(crate) fn apply_model_tool_defaults(request: &mut ModelToolExecuteRequest) -> Value {
@@ -51,11 +28,11 @@ pub(crate) fn apply_model_tool_defaults(request: &mut ModelToolExecuteRequest) -
     if !input.contains_key("foreground_timeout_seconds") {
         input.insert(
             "foreground_timeout_seconds".to_owned(),
-            json!(coder_tools::DEFAULT_COMMAND_TIMEOUT_SECONDS),
+            json!(MODEL_COMMAND_FOREGROUND_YIELD_SECONDS),
         );
         defaults.insert(
             "foreground_timeout_seconds".to_owned(),
-            json!(coder_tools::DEFAULT_COMMAND_TIMEOUT_SECONDS),
+            json!(MODEL_COMMAND_FOREGROUND_YIELD_SECONDS),
         );
     }
     Value::Object(defaults)
@@ -76,7 +53,7 @@ pub(crate) fn apply_model_tool_policy_approval_defaults(
     let Some(input) = input.as_object_mut() else {
         return json!({});
     };
-    if input.get("approved").and_then(Value::as_bool).is_some() {
+    if input.get("approved").and_then(Value::as_bool) == Some(true) {
         return json!({});
     }
     input.insert("approved".to_owned(), Value::Bool(true));
@@ -92,13 +69,13 @@ pub(crate) fn apply_model_tool_policy_approval_defaults(
 fn model_tool_uses_underlying_approval(canonical_tool_name: &str) -> bool {
     matches!(
         canonical_tool_name,
-        "command_run" | "command_background" | "patch_apply"
+        "command_run" | "command_background" | "patch_apply" | "apply_patch"
     )
 }
 
 pub(crate) fn apply_model_tool_request_context(
     request: &mut ModelToolExecuteRequest,
-) -> ModelToolHostContext {
+) -> TurnContext {
     if let Some(run_id) = request
         .run_id
         .as_deref()
@@ -111,13 +88,14 @@ pub(crate) fn apply_model_tool_request_context(
                 .or_insert_with(|| Value::String(run_id.to_owned()));
         }
     }
-    ModelToolHostContext {
+    TurnContext {
         run_id: request
             .run_id
             .as_deref()
             .map(str::trim)
             .filter(|run_id| !run_id.is_empty())
             .map(str::to_owned),
+        repo_root: model_tool_string(&request.input, &["repo_root", "repoRoot"]),
         harness_id: request
             .harness_id
             .as_deref()
@@ -161,7 +139,7 @@ pub(crate) fn apply_model_tool_request_context(
                 .filter(|value| !value.is_null())
                 .cloned()
         }),
-        ..ModelToolHostContext::default()
+        ..TurnContext::default()
     }
 }
 
@@ -257,11 +235,6 @@ mod tests {
     #[test]
     fn model_tool_input_normalizes_claude_tool_aliases() {
         assert_eq!(canonical_model_tool_name("Agent"), "agent_subagent");
-        assert_eq!(
-            canonical_model_tool_name("BashOutputTool"),
-            "read_subagent_status"
-        );
-        assert_eq!(canonical_model_tool_name("KillShell"), "task_stop");
         assert_eq!(canonical_model_tool_name("SleepTool"), "sleep");
         assert_eq!(
             canonical_model_tool_name("bash_background"),
@@ -278,7 +251,7 @@ mod tests {
         assert_eq!(defaults["background_on_timeout"], json!(true));
         assert_eq!(
             command.input["foreground_timeout_seconds"],
-            json!(coder_tools::DEFAULT_COMMAND_TIMEOUT_SECONDS)
+            json!(MODEL_COMMAND_FOREGROUND_YIELD_SECONDS)
         );
 
         let mut read = request("repo_read_file", json!({}));

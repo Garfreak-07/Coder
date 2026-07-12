@@ -13,6 +13,8 @@ Provider Settings can configure:
 - API key per provider
 - proxy mode per provider: `direct`, `explicit`, or `environment`
 - explicit proxy URL per provider
+- provider network parameters: request retries, stream retries, stream idle
+  timeout, WebSocket connect timeout, and provider WebSocket capability
 - mock mode for local plumbing tests
 
 Settings are kept in the local Coder store. API keys must never be committed to
@@ -86,10 +88,44 @@ Proxy modes:
 - `explicit`: use the provider's configured proxy URL.
 - `environment`: use `CODER_{PROVIDER}_PROXY_URL`,
   `CODER_PROVIDER_PROXY_URL`, `HTTPS_PROXY`, or `HTTP_PROXY`, respecting
-  `NO_PROXY`.
+  `NO_PROXY`. When none is set, preserve reqwest's platform/system proxy
+  discovery instead of forcing direct access.
 
 This keeps local providers and DeepSeek direct by default while still allowing
 OpenAI-compatible providers to use a developer proxy when required.
+
+All active external HTTP paths share one route resolver. Provider and webhook
+traffic therefore use the same `NO_PROXY` host/port matching and credential-safe
+route diagnostics. Loopback destinations always bypass an explicit proxy.
+
+## Custom CA
+
+For an enterprise TLS proxy or private gateway, set one PEM bundle:
+
+1. `CODER_CA_CERTIFICATE`
+2. `SSL_CERT_FILE` fallback
+
+The selected bundle is added to system trust for provider, SSE, and webhook
+clients. An unreadable, empty, or invalid bundle fails client construction with
+the selecting environment variable and file path, without logging certificate
+contents or provider credentials.
+
+Provider network defaults match Codex:
+
+- request retries: 4, capped at 100
+- stream reconnect budget: 5, capped at 100
+- stream idle timeout: 300,000 ms
+- WebSocket connect timeout: 15,000 ms
+
+Coder currently uses OpenAI-compatible Chat Completions over HTTP/SSE. A
+provider's WebSocket capability is metadata until a supported wire protocol can
+preserve turn state and fall back to HTTP without replaying completed output.
+
+Provider keys belong to the host model transport. Model-generated foreground
+and background commands do not inherit the provider key environment variables.
+This prevents accidental key disclosure but is not OS-level network isolation;
+commands can still open sockets until a platform sandbox and managed proxy are
+implemented together.
 
 ## Live Tests
 
@@ -107,11 +143,10 @@ $env:CODER_SELFTEST_LIVE="1"
 powershell -ExecutionPolicy Bypass -File .\scripts\live-coder-selftest-suite.ps1 -SkipIfMissingLiveConfig
 ```
 
-Open-ended browser cases additionally preflight Coder's owned verifier runtime.
-Developers can prepare the package without modifying a target repo:
+Real provider plus local stdio MCP path:
 
 ```powershell
-npm run browser-verifier:install
+powershell -ExecutionPolicy Bypass -File .\scripts\live-coder-selftest-suite.ps1 -Live -LoadLocalEnv -Minimal -IncludeMcpCase -Force
 ```
 
 Live tests send the temporary task context to the configured provider. They
@@ -121,12 +156,13 @@ variables for keys; Coder does not write plaintext provider secrets to run
 artifacts or print them in status output.
 
 During Start Work, `native-code-edit` can use the configured provider through
-`native-model-file-write`. The preferred path is an OpenAI-compatible tool-call
-loop for repo/git/write/finish operations. If no tool calls are returned, Coder
-uses the strict JSON file-plan fallback. Rust still owns the side-effect
-boundary: it writes only repo-relative files through the native file tool,
-records `file.written` events, stores repo evidence, and falls back to the
-deterministic native backend when credentials are missing or mock mode is on.
+`native-model-tool-loop`. It is an OpenAI-compatible tool-call loop for
+repo/git/write/finish operations and a frozen snapshot of registered stdio MCP
+tools. Rust owns the only side-effect
+boundary: it writes only repo-relative files through native tools, records
+`file.written` events, and stores repo evidence. Missing credentials return an
+explicit blocked result. The deterministic backend runs only when mock mode is
+explicitly enabled. Plain assistant text is summary-only and cannot write files.
 
 ## Secret Hygiene
 

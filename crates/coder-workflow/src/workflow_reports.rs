@@ -1,5 +1,4 @@
 use coder_core::{FinalReport, ReportStatus, RunId, RunStatus};
-use serde_json::Value;
 
 pub(crate) struct WorkflowReportInput<'a> {
     pub(crate) run_id: &'a RunId,
@@ -13,7 +12,6 @@ pub(crate) struct WorkflowReportInput<'a> {
     pub(crate) blockers: Vec<String>,
     pub(crate) changed_files: Vec<String>,
     pub(crate) patch_refs: Vec<String>,
-    pub(crate) plan_context: Option<Value>,
 }
 
 pub(crate) fn workflow_run_report(input: WorkflowReportInput<'_>) -> FinalReport {
@@ -33,9 +31,6 @@ pub(crate) fn workflow_run_report(input: WorkflowReportInput<'_>) -> FinalReport
         ),
     );
     report.checks = input.checks;
-    if let Some(summary) = plan_context_summary(input.plan_context.as_ref()) {
-        report.checks.push(format!("plan_context: {summary}"));
-    }
     report.blockers = input.blockers;
     report.changed_files = input.changed_files;
     report.patch_refs = input.patch_refs;
@@ -62,45 +57,6 @@ pub(crate) fn workflow_run_report(input: WorkflowReportInput<'_>) -> FinalReport
     }
     report.refresh_planner_style_summary(Some(input.request), &completed);
     report
-}
-
-fn plan_context_summary(plan_context: Option<&Value>) -> Option<String> {
-    let plan_context = plan_context?;
-    let summary = plan_context
-        .get("plan_draft")
-        .and_then(|plan| plan.get("goal"))
-        .and_then(Value::as_str)
-        .or_else(|| {
-            plan_context
-                .get("original_user_request")
-                .and_then(Value::as_str)
-        })
-        .or_else(|| {
-            plan_context
-                .get("planner_conversation_summary")
-                .and_then(Value::as_str)
-        })?
-        .trim();
-    if summary.is_empty() {
-        None
-    } else {
-        Some(summary.chars().take(240).collect())
-    }
-}
-
-pub(crate) fn string_array(value: Option<&Value>) -> Vec<String> {
-    value
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|item| !item.is_empty())
-                .map(str::to_owned)
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 pub(crate) fn run_status_str(status: RunStatus) -> &'static str {

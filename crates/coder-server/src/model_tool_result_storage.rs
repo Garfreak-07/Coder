@@ -49,11 +49,7 @@ pub(crate) fn clear_content_replacement_state_for_run(
         "removed_tool_run_ids": 0,
         "removed_seen_ids": 0,
         "removed_replacements": 0,
-        "removed_loaded_run_id": false,
-        "claude_sources": [
-            "src/services/compact/postCompactCleanup.ts runPostCompactCleanup",
-            "src/services/compact/microCompact.ts resetMicrocompactState"
-        ]
+        "removed_loaded_run_id": false
     });
 
     let Ok(mut state) = state.lock() else {
@@ -150,8 +146,7 @@ pub(crate) fn maybe_persist_large_model_tool_result(
         "estimated_persisted_tokens": estimated_tokens(persisted_size_bytes),
         "truncated": large_ref.truncated,
         "preview": large_ref.preview,
-        "blob_ref": large_ref.blob_ref,
-        "claude_sources": claude_tool_result_storage_sources()
+        "blob_ref": large_ref.blob_ref
     });
     insert_model_tool_result_storage_metadata(&mut response.payload, metadata);
     Ok(())
@@ -512,8 +507,7 @@ fn aggregate_tool_result_storage_metadata(
             "toolUseId": tool_use_id,
             "replacement": replacement
         },
-        "content_replacement_persistence": content_replacement_persistence_json(persistence),
-        "claude_sources": claude_tool_result_storage_sources()
+        "content_replacement_persistence": content_replacement_persistence_json(persistence)
     })
 }
 
@@ -538,8 +532,7 @@ fn aggregate_tool_result_reapplied_metadata(
             "kind": "tool-result",
             "toolUseId": tool_use_id,
             "replacement": replacement
-        },
-        "claude_sources": claude_tool_result_storage_sources()
+        }
     })
 }
 
@@ -635,12 +628,4 @@ fn trim_trailing_decimal_zero(value: f64) -> String {
         .strip_suffix(".0")
         .unwrap_or(&formatted)
         .to_owned()
-}
-
-fn claude_tool_result_storage_sources() -> Vec<&'static str> {
-    vec![
-        "src/constants/toolLimits.ts",
-        "src/utils/toolResultStorage.ts",
-        "src/utils/format.ts",
-    ]
 }

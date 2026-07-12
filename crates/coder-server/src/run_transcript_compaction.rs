@@ -4,7 +4,10 @@ use axum::{
     extract::{Path, Query, State},
     Json,
 };
-use coder_config::{AgentRuntimePolicy, ProjectConfig};
+use coder_config::{
+    resolve_agent_runtime_policy, AgentRuntimePolicy, ModelCapabilities, ModelSpec, ProjectConfig,
+    ResolvedAgentRuntimePolicy,
+};
 use coder_core::RunId;
 use coder_store::{
     CompactionCircuitState, DurableJsonlPageOptions, RunStore, MAX_DURABLE_JSONL_PAGE_LIMIT,
@@ -16,7 +19,8 @@ use serde_json::{json, Value};
 use crate::provider_runtime::{
     normalize_provider, provider_api_key, provider_base_url, provider_chat_completions_endpoint,
     provider_chat_completions_endpoint_for_display, provider_http_client_builder,
-    provider_proxy_url_for_url, redact_provider_error,
+    provider_proxy_url_for_url, provider_request_max_retries, redact_provider_error,
+    send_provider_request_with_retry,
 };
 use crate::run_token_budget::{
     check_existing_run_token_budget, provider_token_usage, record_existing_run_token_usage,
@@ -209,7 +213,6 @@ pub(crate) async fn compact_run_transcript_for_run(
                         max_consecutive_failures,
                         Some(&circuit_state),
                     ),
-                    claude_sources: transcript_compaction_claude_sources(),
                 };
                 response.event_sequence = Some(append_run_transcript_compaction_event(
                     &state.store,
@@ -246,7 +249,7 @@ pub(crate) struct RunTranscriptAutoCompactionDecision {
     pub runtime_source: String,
     pub runtime_agent_id: Option<String>,
     pub runtime_context_window_tokens: u32,
-    pub runtime_autocompact_buffer_tokens: u32,
+    pub runtime_auto_compact_token_limit: Option<u32>,
     pub effective_estimated_tokens: u32,
     pub projected_tokens: u32,
     pub threshold_tokens: u32,
@@ -423,7 +426,7 @@ pub(crate) fn run_transcript_auto_compaction_decision_for_agent(
         runtime_source: runtime.source.to_owned(),
         runtime_agent_id: runtime.agent_id,
         runtime_context_window_tokens: runtime.policy.context_window_tokens,
-        runtime_autocompact_buffer_tokens: runtime.policy.autocompact_buffer_tokens,
+        runtime_auto_compact_token_limit: Some(runtime.policy.auto_compact_token_limit),
         effective_estimated_tokens,
         projected_tokens,
         threshold_tokens: budget.autocompact_threshold_tokens,
@@ -572,7 +575,7 @@ fn effective_run_transcript_tokens_after_compaction_boundary(
 
 #[derive(Debug, Clone)]
 struct RunTranscriptRuntimeResolution {
-    policy: AgentRuntimePolicy,
+    policy: ResolvedAgentRuntimePolicy,
     source: &'static str,
     agent_id: Option<String>,
 }
@@ -587,7 +590,7 @@ fn resolve_run_transcript_runtime_policy(
         requested_agent_id.or_else(|| latest_node_started_agent_id(store, run_id));
     let Some(agent_id) = inferred_agent_id else {
         return RunTranscriptRuntimeResolution {
-            policy: AgentRuntimePolicy::default(),
+            policy: default_resolved_agent_runtime(),
             source: "default_runtime_no_agent_id",
             agent_id: None,
         };
@@ -595,7 +598,7 @@ fn resolve_run_transcript_runtime_policy(
 
     let Some(config) = read_run_project_config_snapshot(store, run_id) else {
         return RunTranscriptRuntimeResolution {
-            policy: AgentRuntimePolicy::default(),
+            policy: default_resolved_agent_runtime(),
             source: "default_runtime_missing_config",
             agent_id: Some(agent_id),
         };
@@ -603,16 +606,35 @@ fn resolve_run_transcript_runtime_policy(
 
     let Some(agent) = config.agents.get(&agent_id) else {
         return RunTranscriptRuntimeResolution {
-            policy: AgentRuntimePolicy::default(),
+            policy: default_resolved_agent_runtime(),
             source: "default_runtime_missing_agent",
             agent_id: Some(agent_id),
         };
     };
 
+    let model = config
+        .models
+        .get(&agent.model)
+        .cloned()
+        .unwrap_or_else(default_compaction_model);
     RunTranscriptRuntimeResolution {
-        policy: agent.runtime.clone(),
+        policy: resolve_agent_runtime_policy(&model, &agent.runtime),
         source: "run_config_agent_runtime",
         agent_id: Some(agent_id),
+    }
+}
+
+fn default_resolved_agent_runtime() -> ResolvedAgentRuntimePolicy {
+    resolve_agent_runtime_policy(&default_compaction_model(), &AgentRuntimePolicy::default())
+}
+
+fn default_compaction_model() -> ModelSpec {
+    ModelSpec {
+        provider: "openai-compatible".to_owned(),
+        model: "default".to_owned(),
+        base_url_env: None,
+        api_key_env: None,
+        capabilities: ModelCapabilities::default(),
     }
 }
 
@@ -763,12 +785,6 @@ fn post_compact_file_restore_payload(
                 "type": "text",
                 "text": prompt
             }
-        ],
-        "claude_sources": [
-            "src/services/compact/compact.ts POST_COMPACT_MAX_FILES_TO_RESTORE",
-            "src/services/compact/compact.ts POST_COMPACT_TOKEN_BUDGET",
-            "src/services/compact/compact.ts POST_COMPACT_MAX_TOKENS_PER_FILE",
-            "src/services/compact/compact.ts createPostCompactFileAttachments"
         ]
     }))
 }
@@ -846,13 +862,6 @@ fn post_compact_skill_restore_payload(
                 "type": "text",
                 "text": prompt
             }
-        ],
-        "claude_sources": [
-            "src/bootstrap/state.ts addInvokedSkill",
-            "src/bootstrap/state.ts getInvokedSkillsForAgent",
-            "src/services/compact/compact.ts POST_COMPACT_MAX_TOKENS_PER_SKILL",
-            "src/services/compact/compact.ts POST_COMPACT_SKILLS_TOKEN_BUDGET",
-            "src/services/compact/compact.ts createSkillAttachmentIfNeeded"
         ]
     }))
 }
@@ -1073,7 +1082,7 @@ fn run_transcript_compaction_attachment(
             "runtime_source": decision.runtime_source,
             "runtime_agent_id": decision.runtime_agent_id,
             "runtime_context_window_tokens": decision.runtime_context_window_tokens,
-            "runtime_autocompact_buffer_tokens": decision.runtime_autocompact_buffer_tokens,
+            "runtime_auto_compact_token_limit": decision.runtime_auto_compact_token_limit,
             "effective_estimated_tokens": decision.effective_estimated_tokens,
             "projected_tokens": decision.projected_tokens,
             "threshold_tokens": decision.threshold_tokens,
@@ -1086,14 +1095,7 @@ fn run_transcript_compaction_attachment(
         },
         "post_compact_file_restore": post_compact_file_restore,
         "post_compact_skill_restore": post_compact_skill_restore,
-        "model_content": model_content,
-        "claude_sources": [
-            "src/services/compact/autoCompact.ts shouldAutoCompact",
-            "src/services/compact/autoCompact.ts autoCompactIfNeeded",
-            "src/services/compact/compact.ts createPostCompactFileAttachments",
-            "src/services/compact/compact.ts createSkillAttachmentIfNeeded",
-            "src/query.ts buildPostCompactMessages"
-        ]
+        "model_content": model_content
     })
 }
 
@@ -1139,7 +1141,7 @@ async fn request_run_transcript_compaction_summary(
         .as_ref()
         .map(|(secret, _)| secret.as_str())
         .unwrap_or("");
-    let client = provider_http_client_builder(&url, proxy_url.as_deref())
+    let client = provider_http_client_builder(settings, &provider, &url)
         .map_err(|error| {
             redact_provider_error(
                 &error,
@@ -1159,16 +1161,26 @@ async fn request_run_transcript_compaction_summary(
         &model,
         transcript_compaction_prompt(transcript_text, request.custom_instructions.as_deref()),
     );
-    let mut builder = client.post(&url).json(&request_body);
-    if let Some((secret, _)) = api_key.as_ref() {
-        builder = builder.bearer_auth(secret);
-    }
-    let response = builder.send().await.map_err(|error| {
+    let response = send_provider_request_with_retry(
+        || {
+            let builder = client.post(&url).json(&request_body);
+            if let Some((secret, _)) = api_key.as_ref() {
+                builder.bearer_auth(secret)
+            } else {
+                builder
+            }
+        },
+        None,
+        provider_request_max_retries(settings, &provider),
+    )
+    .await
+    .map_err(|error| {
         redact_provider_error(
             &format!("transcript compaction model request failed: {error}"),
             &[api_secret, &base_url, proxy_url.as_deref().unwrap_or("")],
         )
-    })?;
+    })?
+    .response;
     if !response.status().is_success() {
         return Err(format!(
             "transcript compaction model returned HTTP {}",
@@ -1412,7 +1424,6 @@ fn transcript_compaction_response_base(
         event_sequence,
         error,
         circuit,
-        claude_sources: transcript_compaction_claude_sources(),
     }
 }
 
@@ -1456,8 +1467,7 @@ fn transcript_compaction_event_payload(response: &RunTranscriptCompactionRespons
         "transcript_estimated_tokens": response.transcript_estimated_tokens,
         "artifact_ref": &response.artifact_ref,
         "error": &response.error,
-        "circuit": &response.circuit,
-        "claude_sources": &response.claude_sources
+        "circuit": &response.circuit
     })
 }
 
@@ -1479,16 +1489,6 @@ fn append_run_transcript_compaction_event(
     }
     store.append_event(run_id, &event)?;
     Ok(sequence)
-}
-
-fn transcript_compaction_claude_sources() -> Vec<&'static str> {
-    vec![
-        "src/services/compact/prompt.ts getCompactPrompt",
-        "src/services/compact/prompt.ts formatCompactSummary",
-        "src/services/compact/autoCompact.ts MAX_OUTPUT_TOKENS_FOR_SUMMARY=20000",
-        "src/services/compact/autoCompact.ts MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES=3",
-        "src/services/compact/compact.ts streaming fallback disables thinking and uses no-tools summary prompt",
-    ]
 }
 
 pub(crate) async fn list_run_content_replacements(

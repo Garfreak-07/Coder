@@ -90,12 +90,22 @@ function New-SmokeConfig {
       executor = @{
         role = "executor"
         model = "default"
-        system = "Inspect the requested repository scope with native read-only tools and report evidence."
+        system = "Inspect the requested repository scope with native tools and report evidence."
         memory = @{
           read = @("workflow", "run")
           write = @("run")
         }
         output_contract = "execution_result"
+      }
+      "workflow-planner" = @{
+        role = "planner"
+        model = "default"
+        system = "Read compact executor evidence and return finish, continue, or blocked without editing files."
+        memory = @{
+          read = @("workflow", "run")
+          write = @("run")
+        }
+        output_contract = "workflow_decision"
       }
     }
     harnesses = @{
@@ -121,13 +131,14 @@ function New-SmokeConfig {
           require_evidence = $false
         }
       }
-      "review-only" = @{
+      "native-code-edit" = @{
         backend = "native-rust"
-        tools = @("repo_find_files", "read_file", "git_diff")
+        tools = @("repo_find_files", "repo_read_file", "git_diff")
         permissions = @{
           read_files = "allow"
           write_files = "deny"
           run_commands = "deny"
+          child_harness_permissions = "deny"
           network = "deny"
           secrets = "deny"
           publish_external = "deny"
@@ -140,21 +151,48 @@ function New-SmokeConfig {
           write = @("run")
         }
       }
+      "workflow-planner" = @{
+        backend = "planner-model"
+        tools = @()
+        permissions = @{
+          read_files = "allow"
+          write_files = "deny"
+          run_commands = "deny"
+          child_harness_permissions = "deny"
+          network = "deny"
+          secrets = "deny"
+          publish_external = "deny"
+          git_commit = "deny"
+          git_push = "deny"
+          deploy = "deny"
+        }
+        memory = @{
+          read = @("workflow", "run")
+          write = @("run")
+        }
+        verification = @{
+          require_evidence = $false
+        }
+      }
     }
     workflows = @{
       "planner-led" = @{
-        name = "Planner to Review Smoke"
+        name = "Executor to Workflow Planner Smoke"
         max_rounds = 1
         nodes = @(
-          @{ id = "planner"; agent = "planner"; harness = "planner-conversation" },
-          @{ id = "executor"; agent = "executor"; harness = "review-only" }
+          @{ id = "executor"; agent = "executor"; harness = "native-code-edit" },
+          @{ id = "workflow-planner"; agent = "workflow-planner"; harness = "workflow-planner" }
         )
         edges = @(
-          @{ from = "planner"; to = "executor"; on = "ready" }
+          @{ from = "executor"; to = "workflow-planner"; on = "completed" },
+          @{ from = "executor"; to = "workflow-planner"; on = "blocked" },
+          @{ from = "executor"; to = "workflow-planner"; on = "failed" },
+          @{ from = "workflow-planner"; to = "executor"; on = "ready" },
+          @{ from = "workflow-planner"; to = "executor"; on = "continue" }
         )
         stop = @{
           on_status = @("completed", "blocked", "failed")
-          final_report_agent = "planner"
+          final_report_agent = "workflow-planner"
         }
       }
     }
@@ -166,7 +204,10 @@ function New-SmokeConfig {
 # from this script process before starting the server.
 $processEnv = [Environment]::GetEnvironmentVariables("Process")
 if ($processEnv.Contains("Path") -and $processEnv.Contains("PATH")) {
+  $preservedPath = [string]$processEnv["Path"]
+  if ([string]::IsNullOrWhiteSpace($preservedPath)) { $preservedPath = [string]$processEnv["PATH"] }
   [Environment]::SetEnvironmentVariable("PATH", $null, "Process")
+  [Environment]::SetEnvironmentVariable("Path", $preservedPath, "Process")
 }
 [Environment]::SetEnvironmentVariable("CODER_RUNTIME_CACHE_DIR", (Join-Path $repoRoot "tmp\coder-runtime-cache"), "Process")
 

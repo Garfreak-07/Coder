@@ -1,4 +1,4 @@
-use coder_config::{AgentSpec, WorkflowNodeSpec};
+use coder_config::{resolve_agent_runtime_policy, AgentSpec, ModelSpec, WorkflowNodeSpec};
 use coder_core::RunId;
 use coder_store::CompactionCircuitState;
 use serde_json::{json, Value};
@@ -12,6 +12,7 @@ pub(super) struct ContextCompactionEventInput<'a> {
     pub(super) round: u32,
     pub(super) node: &'a WorkflowNodeSpec,
     pub(super) agent: &'a AgentSpec,
+    pub(super) model: &'a ModelSpec,
     pub(super) plan_context: Option<&'a Value>,
     pub(super) current_state: Option<&'a CompactionCircuitState>,
 }
@@ -23,11 +24,9 @@ impl WorkflowRunner {
         sequence: &mut u64,
         input: ContextCompactionEventInput<'_>,
     ) -> Result<Option<CompactionCircuitState>, WorkflowError> {
-        let output = compact_plan_context_with_circuit(
-            input.plan_context,
-            &input.agent.runtime,
-            input.current_state,
-        );
+        let runtime = resolve_agent_runtime_policy(input.model, &input.agent.runtime);
+        let output =
+            compact_plan_context_with_circuit(input.plan_context, &runtime, input.current_state);
         let Some(outcome) = output.circuit_outcome else {
             return Ok(input.current_state.cloned());
         };

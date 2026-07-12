@@ -255,12 +255,7 @@ pub(crate) fn drain_async_hook_response_attachments(
                     "toolName": event.payload["toolName"].clone(),
                     "delivery_status": "delivered",
                     "delivery_channel": "model_tool_turn_attachment",
-                    "attachment_contract": MODEL_TOOL_TURN_ATTACHMENT_CONTRACT,
-                    "claude_sources": [
-                        "src/utils/hooks/AsyncHookRegistry.ts checkForAsyncHookResponses",
-                        "src/utils/attachments.ts getAsyncHookResponseAttachments",
-                        "src/utils/messages.ts async_hook_response"
-                    ]
+                    "attachment_contract": MODEL_TOOL_TURN_ATTACHMENT_CONTRACT
                 }),
             );
             if store.append_event(run_id, &delivery_event).is_ok() {
@@ -297,13 +292,7 @@ fn async_hook_response_attachment(event: &CoderEvent) -> Value {
             "hook_output_kind": event.payload["hook_output_kind"].clone(),
             "output_channel": event.payload["output_channel"].clone(),
             "tool_use_id": event.payload["tool_use_id"].clone()
-        },
-        "claude_sources": [
-            "src/utils/hooks/AsyncHookRegistry.ts checkForAsyncHookResponses",
-            "src/utils/attachments.ts getAsyncHookResponseAttachments",
-            "src/utils/messages.ts async_hook_response",
-            "src/utils/messages.ts wrapMessagesInSystemReminder"
-        ]
+        }
     });
     let response = attachment
         .get("response")
@@ -404,7 +393,6 @@ fn drain_async_rewake_notification_attachments_for_delivery(
         {
             let attachment = async_rewake_notification_attachment(event);
             let target_agent_id = queued_notification_agent_id(&event.payload);
-            let claude_sources = async_rewake_delivery_claude_sources(delivery_channel);
             let Ok(sequence) = store.event_count(run_id).map(|count| count as u64 + 1) else {
                 continue;
             };
@@ -428,8 +416,7 @@ fn drain_async_rewake_notification_attachments_for_delivery(
                     "delivery_status": "delivered",
                     "delivery_channel": delivery_channel,
                     "drain_later_notifications": drain_later_notifications,
-                    "attachment_contract": MODEL_TOOL_TURN_ATTACHMENT_CONTRACT,
-                    "claude_sources": claude_sources
+                    "attachment_contract": MODEL_TOOL_TURN_ATTACHMENT_CONTRACT
                 }),
             );
             if store.append_event(run_id, &delivery_event).is_ok() {
@@ -439,23 +426,6 @@ fn drain_async_rewake_notification_attachments_for_delivery(
         attachments
     })
     .unwrap_or_default()
-}
-
-fn async_rewake_delivery_claude_sources(delivery_channel: &str) -> Vec<&'static str> {
-    if delivery_channel == ASYNC_REWAKE_IDLE_QUEUE_DELIVERY_CHANNEL {
-        return vec![
-            "src/utils/hooks.ts executeInBackground asyncRewake",
-            "src/utils/messageQueueManager.ts enqueuePendingNotification",
-            "src/utils/queueProcessor.ts processQueueIfReady",
-            "src/utils/attachments.ts getQueuedCommandAttachments",
-        ];
-    }
-    vec![
-        "src/utils/hooks.ts executeInBackground asyncRewake",
-        "src/utils/messageQueueManager.ts enqueuePendingNotification",
-        "src/query.ts Drain pending notifications",
-        "src/utils/attachments.ts getQueuedCommandAttachments",
-    ]
 }
 
 fn queued_notification_priority_allows(payload: &Value, drain_later_notifications: bool) -> bool {
@@ -530,14 +500,7 @@ fn async_rewake_notification_attachment(event: &CoderEvent) -> Value {
             "agentId": event.payload["agentId"].clone(),
             "mode": "task-notification",
             "priority": "later"
-        },
-        "claude_sources": [
-            "src/utils/hooks.ts executeInBackground asyncRewake",
-            "src/utils/messageQueueManager.ts enqueuePendingNotification",
-            "src/query.ts Drain pending notifications",
-            "src/utils/attachments.ts getQueuedCommandAttachments",
-            "src/utils/messages.ts wrapInSystemReminder"
-        ]
+        }
     })
 }
 

@@ -45,6 +45,9 @@ import type {
   RustMcpManifestValidation,
   RustMcpManifestValidationRequest,
   RustMcpServerListResponse,
+  RustMcpServerRegistrationRequest,
+  RustMcpServerRegistrationResponse,
+  RustMcpServerRemoveResponse,
   RustMcpToolCallRequest,
   RustMcpToolCallResult,
   RustMcpToolListResponse,
@@ -71,7 +74,6 @@ import type {
   RustExtensionPluginValidationRequest,
   RustProjectConfig,
   RustPluginManifestValidation,
-  RustToolRegistryResponse,
   RustValidationReport,
   SkillUpdateInfo,
   StoredRunDetail,
@@ -115,6 +117,7 @@ declare global {
 interface RustPlannerChatSession {
   session_id: string;
   workflow_id: string;
+  repo_root?: string | null;
   mode: PlannerInteractionMode | string;
   ready: boolean;
   readiness?: "ready" | "needs_clarification" | "blocked" | "casual" | string;
@@ -136,6 +139,8 @@ interface RustPlannerChatSession {
 
 interface RustPlannerPlanDraft {
   goal: string;
+  execution_mode?: "read_only" | "may_write" | "must_write" | string;
+  review_mode?: "standard" | "qualitative" | string;
   scope?: string[];
   non_goals?: string[];
   assumptions?: string[];
@@ -693,6 +698,23 @@ export function getRustMcpServers(): Promise<RustMcpServerListResponse> {
   return requestJson<RustMcpServerListResponse>("/api/v3/mcp/servers");
 }
 
+export function registerRustMcpServer(
+  request: RustMcpServerRegistrationRequest
+): Promise<RustMcpServerRegistrationResponse> {
+  return requestJson<RustMcpServerRegistrationResponse>("/api/v3/mcp/servers", {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify(request)
+  });
+}
+
+export function removeRustMcpServer(serverId: string): Promise<RustMcpServerRemoveResponse> {
+  return requestJson<RustMcpServerRemoveResponse>(
+    `/api/v3/mcp/servers/${encodeURIComponent(serverId)}`,
+    { method: "DELETE" }
+  );
+}
+
 export function getRustMcpTools(): Promise<RustMcpToolListResponse> {
   return requestJson<RustMcpToolListResponse>("/api/v3/mcp/tools");
 }
@@ -705,11 +727,6 @@ export function invokeRustMcpTool(
     headers: jsonHeaders,
     body: JSON.stringify(request)
   });
-}
-
-export function getRustHarnessTools(harnessId?: string | null): Promise<RustToolRegistryResponse> {
-  const query = harnessId ? `?harness_id=${encodeURIComponent(harnessId)}` : "";
-  return requestJson<RustToolRegistryResponse>(`/api/v3/harness/tools${query}`);
 }
 
 export function getRustExtensionPlugins(): Promise<RustExtensionPluginListResponse> {
@@ -888,6 +905,7 @@ export function createPlannerChatSession(input: {
 export function sendPlannerChatTurn(input: {
   session_id: string;
   message: string;
+  operation?: "chat" | "user_input" | "status" | "interrupt";
   repo?: string;
   workflow_id?: string;
   planner_agent_id?: string;
@@ -972,6 +990,7 @@ async function createRustPlannerChatSession(input: {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify({
+      repo: input.repo,
       workflow_id: input.workflow_id,
       planner_agent_id: input.planner_agent_id,
       config: canvasToWorkflowSpec(input.agent_workflow),
@@ -993,6 +1012,7 @@ async function getRustPlannerChatSession(sessionId: string): Promise<PlannerChat
 async function sendRustPlannerChatTurn(input: {
   session_id: string;
   message: string;
+  operation?: "chat" | "user_input" | "status" | "interrupt";
   repo?: string;
   workflow_id?: string;
   planner_agent_id?: string;
@@ -1013,8 +1033,10 @@ async function sendRustPlannerChatTurn(input: {
       headers: jsonHeaders,
       body: JSON.stringify({
         message: input.message,
+        operation: input.operation ?? "chat",
         confirmed: false,
         mode: "discuss",
+        repo: input.repo,
         planner_agent_id: input.planner_agent_id,
         config: input.agent_workflow ? canvasToWorkflowSpec(input.agent_workflow) : undefined
       })
@@ -1152,7 +1174,7 @@ function mapRustPlannerSession(
     workflow_id: session.workflow_id,
     planner_agent_id: context?.plannerAgentId ?? "planner",
     agent_workflow: context?.agentWorkflow ?? fallbackAgentWorkflow(session.workflow_id),
-    repo: context?.repo,
+    repo: context?.repo ?? session.repo_root ?? undefined,
     scopes: context?.scopes ?? [],
     knowledge_pack_ids: context?.knowledgePackIds ?? [],
     skill_pack_ids: context?.skillPackIds ?? [],

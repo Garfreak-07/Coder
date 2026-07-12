@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use coder_config::validate_project_config;
+use coder_config::{resolve_workflow_cost_policy, validate_project_config};
 use coder_core::{RunRequest, RunState, RunStatus, WorkflowId};
 use serde_json::{json, Value};
 
@@ -39,6 +39,14 @@ impl WorkflowRunner {
             .workflows
             .get(&options.workflow_id)
             .ok_or_else(|| WorkflowError::WorkflowNotFound(options.workflow_id.clone()))?;
+        let cost_policy = resolve_workflow_cost_policy(&self.config, &options.workflow_id)
+            .ok_or_else(|| {
+                WorkflowError::InvalidConfig(format!(
+                    "workflow '{}' has no model-backed node for cost policy resolution",
+                    options.workflow_id
+                ))
+            })?;
+        let token_budget = Some(cost_policy.token_budget);
 
         let run_id = options.run_id.clone().unwrap_or_default();
         let request = RunRequest {
@@ -66,7 +74,16 @@ impl WorkflowRunner {
                 "git_head": git_head,
                 "dry_run": options.dry_run,
                 "max_rounds": workflow.max_rounds,
-                "token_budget": workflow.token_budget,
+                "token_budget": token_budget,
+                "cost_policy": {
+                    "token_budget": cost_policy.token_budget,
+                    "budget_source": cost_policy.token_budget_source,
+                    "model_id": cost_policy.model_id,
+                    "provider": cost_policy.provider,
+                    "model": cost_policy.model,
+                    "default_max_turns": cost_policy.default_max_turns,
+                    "max_rounds": cost_policy.max_rounds
+                },
                 "config_ref": config_ref,
                 "plan_context": options.plan_context.clone()
             }),
@@ -157,7 +174,7 @@ impl WorkflowRunner {
                     "agent": node.agent,
                     "harness": node.harness,
                     "backend": harness.backend,
-                    "runtime": agent_runtime_event_summary(&agent.runtime)
+                    "runtime": agent_runtime_event_summary(model, &agent.runtime)
                 }),
             )?;
 
@@ -168,6 +185,7 @@ impl WorkflowRunner {
                     round,
                     node,
                     agent,
+                    model,
                     plan_context: options.plan_context.as_ref(),
                     current_state: compaction_circuit_state.as_ref(),
                 },
@@ -186,7 +204,7 @@ impl WorkflowRunner {
                 plan_context: options.plan_context.as_ref(),
                 loop_feedback: loop_feedback.as_ref(),
                 max_rounds: max_rounds_limit,
-                token_budget: workflow.token_budget,
+                token_budget,
                 executor_evidence_this_round,
                 executor_evidence_summary: &executor_evidence_summary,
                 previous_planner_improvements: &planner_improvement_history,
@@ -510,7 +528,6 @@ impl WorkflowRunner {
             blockers,
             changed_files: changed_files.into_iter().collect(),
             patch_refs: patch_refs.into_iter().collect(),
-            plan_context: options.plan_context.clone(),
         });
         let report_ref = self.store.write_report(&run_id, &report)?;
         self.emit(

@@ -1,8 +1,9 @@
 use coder_config::HookEvent;
+use coder_workflow::TurnContext;
 use serde_json::{json, Value};
 use std::time::Instant;
 
-use crate::model_tool_dispatch::execute_model_tool_request;
+use crate::model_tool_dispatch::{execute_model_tool_request_with_route, ModelMcpToolRoute};
 use crate::model_tool_hook_phase::{execute_model_tool_hook_phase, ModelToolHookInvocation};
 use crate::model_tool_input::{
     apply_model_tool_defaults, apply_model_tool_policy_approval_defaults,
@@ -26,11 +27,29 @@ pub(crate) async fn execute_model_tool_response(
     state: ApiState,
     mut request: ModelToolExecuteRequest,
 ) -> ModelToolExecuteResponse {
+    let turn_context = apply_model_tool_request_context(&mut request);
+    execute_model_tool_response_with_turn_context(state, request, turn_context).await
+}
+
+pub(crate) async fn execute_model_tool_response_with_turn_context(
+    state: ApiState,
+    request: ModelToolExecuteRequest,
+    turn_context: TurnContext,
+) -> ModelToolExecuteResponse {
+    execute_model_tool_response_with_turn_context_and_route(state, request, turn_context, None)
+        .await
+}
+
+pub(crate) async fn execute_model_tool_response_with_turn_context_and_route(
+    state: ApiState,
+    mut request: ModelToolExecuteRequest,
+    turn_context: TurnContext,
+    mcp_route: Option<ModelMcpToolRoute>,
+) -> ModelToolExecuteResponse {
     let store = state.store.clone();
     let tool_use_id = request.tool_use_id.clone();
     let tool_name = request.tool_name.clone();
     let canonical_tool_name = canonical_model_tool_name(&request.tool_name);
-    let host_context = apply_model_tool_request_context(&mut request);
     let mut recorder = ModelToolPhaseRecorder::new(
         &state.store,
         &tool_use_id,
@@ -53,7 +72,7 @@ pub(crate) async fn execute_model_tool_response(
             tool_input: &tool_input_for_hooks,
             tool_response: None,
             tool_error: None,
-            host_context: &host_context,
+            host_context: &turn_context,
         },
     )
     .await;
@@ -108,7 +127,7 @@ pub(crate) async fn execute_model_tool_response(
         canonical_tool_name,
         &tool_use_id,
         &request.input,
-        &host_context,
+        &turn_context,
     );
     recorder.set_required_permission_override(
         permission_phase_payload
@@ -173,7 +192,14 @@ pub(crate) async fn execute_model_tool_response(
     let started = Instant::now();
     let executed_tool_input = request.input.clone();
     recorder.record_phase_started("tool_execution");
-    let response = match execute_model_tool_request(state.clone(), request, &host_context).await {
+    let response = match execute_model_tool_request_with_route(
+        state.clone(),
+        request,
+        &turn_context,
+        mcp_route.as_ref(),
+    )
+    .await
+    {
         Ok(payload) => model_tool_success_response(tool_use_id.clone(), tool_name.clone(), payload),
         Err(error) => model_tool_error_response(tool_use_id.clone(), tool_name.clone(), error),
     };
@@ -197,8 +223,8 @@ pub(crate) async fn execute_model_tool_response(
         &tool_name,
         &executed_tool_input,
         &response,
-        host_context.agent_id.as_deref(),
-        host_context.harness_id.as_deref(),
+        turn_context.agent_id.as_deref(),
+        turn_context.harness_id.as_deref(),
     ) {
         if let Some(object) = tool_execution_payload.as_object_mut() {
             object.insert("post_compact_restore_candidate".to_owned(), candidate);
@@ -234,7 +260,7 @@ pub(crate) async fn execute_model_tool_response(
             } else {
                 None
             },
-            host_context: &host_context,
+            host_context: &turn_context,
         },
     )
     .await;

@@ -1,6 +1,6 @@
 use coder_config::{HookCommandSpec, HookEvent, ModelSpec};
 use coder_core::RunId;
-use coder_workflow::ModelToolHostContext;
+use coder_workflow::TurnContext;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
@@ -10,7 +10,7 @@ use crate::model_tool_hook_runtime::ModelToolHookExecution;
 use crate::provider_runtime::{
     model_provider_base_url, model_provider_for_settings, provider_api_key,
     provider_chat_completions_endpoint, provider_http_client_builder, provider_proxy_url_for_url,
-    redact_provider_error,
+    provider_request_max_retries, redact_provider_error, send_provider_request_with_retry,
 };
 use crate::run_token_budget::{
     check_existing_run_token_budget, provider_token_usage, record_existing_run_token_usage,
@@ -37,7 +37,7 @@ pub(crate) async fn execute_prompt_model_tool_hook(
     event: HookEvent,
     requested_tool_name: &str,
     hook_input: &Value,
-    host_context: &ModelToolHostContext,
+    host_context: &TurnContext,
     context: &ModelToolHookContext,
 ) -> ModelToolHookExecution {
     let HookCommandSpec::Prompt {
@@ -130,44 +130,56 @@ pub(crate) async fn execute_prompt_model_tool_hook(
 
     let url = provider_chat_completions_endpoint(&base_url);
     let proxy_url = provider_proxy_url_for_url(&provider_settings, &provider, Some(&url));
-    let client =
-        match provider_http_client_builder(&url, proxy_url.as_deref()).and_then(|builder| {
+    let client = match provider_http_client_builder(&provider_settings, &provider, &url).and_then(
+        |builder| {
             builder
                 .timeout(Duration::from_secs(timeout_seconds))
                 .build()
                 .map_err(|error| error.to_string())
-        }) {
-            Ok(client) => client,
-            Err(error) => {
-                let error = redact_provider_error(
-                    &error,
-                    &[&api_key, &base_url, proxy_url.as_deref().unwrap_or("")],
-                );
-                return prompt_hook_non_blocking_error(
-                    &report_context,
-                    "client_build_error",
-                    &error,
-                    None,
-                );
-            }
-        };
+        },
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            let error = redact_provider_error(
+                &error,
+                &[&api_key, &base_url, proxy_url.as_deref().unwrap_or("")],
+            );
+            return prompt_hook_non_blocking_error(
+                &report_context,
+                "client_build_error",
+                &error,
+                None,
+            );
+        }
+    };
 
     let processed_prompt = prompt_hook_prompt_with_arguments(prompt, hook_input);
     let request_body = prompt_hook_completion_body(&provider, &model_name, &processed_prompt);
-    let response = match client
-        .post(&url)
-        .bearer_auth(&api_key)
-        .json(&request_body)
-        .send()
-        .await
+    let response = match tokio::time::timeout(
+        Duration::from_secs(timeout_seconds),
+        send_provider_request_with_retry(
+            || client.post(&url).bearer_auth(&api_key).json(&request_body),
+            None,
+            provider_request_max_retries(&provider_settings, &provider),
+        ),
+    )
+    .await
     {
-        Ok(response) => response,
-        Err(error) => {
+        Ok(Ok(outcome)) => outcome.response,
+        Ok(Err(error)) => {
             let error = redact_provider_error(
                 &format!("prompt hook model request failed: {error}"),
                 &[&api_key, &base_url, proxy_url.as_deref().unwrap_or("")],
             );
             return prompt_hook_non_blocking_error(&report_context, "request_error", &error, None);
+        }
+        Err(_) => {
+            return prompt_hook_non_blocking_error(
+                &report_context,
+                "request_timeout",
+                &format!("Prompt hook timed out after {timeout_seconds} second(s)."),
+                None,
+            );
         }
     };
     let status_code = response.status().as_u16();
@@ -264,12 +276,7 @@ pub(crate) async fn execute_prompt_model_tool_hook(
             "blocking_error": blocking_error.clone(),
             "output_preview": output_preview,
             "output_truncated": output_truncated,
-            "token_budget": token_budget.map(|budget| budget.as_json()),
-            "claude_sources": [
-                "src/utils/hooks/execPromptHook.ts",
-                "src/utils/hooks/hookHelpers.ts hookResponseSchema",
-                "src/utils/hooks/hookHelpers.ts addArgumentsToPrompt"
-            ]
+            "token_budget": token_budget.map(|budget| budget.as_json())
         }),
         blocking_error,
         effects: ModelToolHookEffects::default(),
@@ -298,11 +305,7 @@ fn prompt_hook_non_blocking_error(
         "prompt_argument_protocol": "claude.addArgumentsToPrompt",
         "hook_output_kind": error_kind,
         "hook_json_output": Value::Null,
-        "hook_output_validation_error": error,
-        "claude_sources": [
-            "src/utils/hooks/execPromptHook.ts",
-            "src/utils/hooks/hookHelpers.ts hookResponseSchema"
-        ]
+        "hook_output_validation_error": error
     });
     if let Some(status_code) = status_code {
         if let Value::Object(payload) = &mut payload {
@@ -331,6 +334,7 @@ pub(crate) fn prompt_hook_model_spec(
                 model: model.to_owned(),
                 base_url_env: None,
                 api_key_env: None,
+                capabilities: coder_config::ModelCapabilities::default(),
             },
             "hook_literal_model",
         );
@@ -338,18 +342,13 @@ pub(crate) fn prompt_hook_model_spec(
     if let Some(spec) = context.models.get("default") {
         return (spec.clone(), "config_default_model");
     }
-    if let Some(spec) = context.models.get("planner_chat") {
-        return (spec.clone(), "config_planner_chat_model");
-    }
-    if let Some((_, spec)) = context.models.iter().next() {
-        return (spec.clone(), "config_first_model");
-    }
     (
         ModelSpec {
             provider: provider_settings.default_provider.clone(),
             model: "best".to_owned(),
             base_url_env: None,
             api_key_env: None,
+            capabilities: coder_config::ModelCapabilities::default(),
         },
         "provider_default_model",
     )
@@ -441,5 +440,43 @@ fn provider_assistant_content(payload: &Value) -> String {
             .collect::<Vec<_>>()
             .join(""),
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use coder_config::{HookSettings, ModelSpec};
+
+    use super::*;
+
+    fn hook_context(models: BTreeMap<String, ModelSpec>) -> ModelToolHookContext {
+        ModelToolHookContext {
+            source: "test",
+            disable_all_hooks: false,
+            hooks: HookSettings::default(),
+            models,
+            allowed_webhook_urls: None,
+            webhook_allowed_env_vars: None,
+        }
+    }
+
+    #[test]
+    fn unspecified_hook_model_does_not_select_an_unrelated_config_entry() {
+        let unrelated = ModelSpec {
+            provider: "deepseek".to_owned(),
+            model: "planner-only".to_owned(),
+            base_url_env: None,
+            api_key_env: None,
+            capabilities: coder_config::ModelCapabilities::default(),
+        };
+        let context = hook_context(BTreeMap::from([("planner_chat".to_owned(), unrelated)]));
+        let settings = ProviderSettings::default();
+
+        let (model, source) = prompt_hook_model_spec(&context, &settings, None);
+
+        assert_eq!(source, "provider_default_model");
+        assert_eq!(model.model, "best");
     }
 }

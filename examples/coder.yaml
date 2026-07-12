@@ -34,26 +34,23 @@ agents:
       write: [run]
     output_contract: planner_conversation
     runtime:
-      max_output_tokens: 900
-      context_window_tokens: 200000
-      compact_output_reserve_tokens: 20000
-      autocompact_buffer_tokens: 13000
-      max_output_recovery_attempts: 3
+      max_output_tokens: 1400
+      max_output_recovery_attempts: 1
       max_consecutive_compaction_failures: 3
-      stream_idle_timeout_ms: 90000
 
   workflow-planner:
     role: planner
     model: default
     system: |
       You are Coder Workflow Planner, the control loop for Start Work. You do
-      not talk to the user. Read executor and verifier evidence, then choose one
+      not talk to the user. Read the executor's action and verification evidence,
+      then choose one
       control signal: continue for a concrete high-value repair or refinement,
       finish after verified completion, or blocked when external input is
       required. Follow
       the workflow_feedback loop_contract: diagnose the signal, plan the next
       action, send actionable feedback back to the executor when repair is
-      possible, require verifier evidence before finish, and choose blocked only
+      possible, require executor evidence before finish, and choose blocked only
       for user input, external-state dependency, or exhausted bounded progress.
       Do not spend another round on generic polish, repeated advice, or low
       marginal gain. For explicit qualitative goals, smoke-test success alone
@@ -66,12 +63,8 @@ agents:
     output_contract: workflow_decision
     runtime:
       max_output_tokens: 900
-      context_window_tokens: 200000
-      compact_output_reserve_tokens: 20000
-      autocompact_buffer_tokens: 13000
       max_output_recovery_attempts: 3
       max_consecutive_compaction_failures: 3
-      stream_idle_timeout_ms: 90000
 
   executor:
     role: executor
@@ -87,41 +80,13 @@ agents:
     output_contract: execution_result
     runtime:
       max_output_tokens: 8000
-      # Claude Code's maxTurns is optional. Coder sets an explicit product
-      # bound for its non-interactive Start Work executor.
-      max_turns: 24
-      context_window_tokens: 200000
-      compact_output_reserve_tokens: 20000
-      autocompact_buffer_tokens: 13000
       max_output_recovery_attempts: 3
       max_consecutive_compaction_failures: 3
-      stream_idle_timeout_ms: 90000
-
-  verifier:
-    role: verifier
-    model: default
-    system: |
-      You are a read-only verification agent. Your job is to check the work
-      after the executor finishes and report evidence-backed PASS or FAIL
-      signals. Do not edit project files, install dependencies, commit, push, or
-      publish. Prefer concrete checks over narrative review.
-    memory:
-      read: [workflow, run]
-      write: [run]
-    output_contract: verification_result
-    runtime:
-      max_output_tokens: 4096
-      context_window_tokens: 200000
-      compact_output_reserve_tokens: 20000
-      autocompact_buffer_tokens: 13000
-      max_output_recovery_attempts: 3
-      max_consecutive_compaction_failures: 3
-      stream_idle_timeout_ms: 90000
 
 harnesses:
   planner-conversation:
     backend: planner-model
-    tools: []
+    tools: [repo_find_files, repo_search_text, repo_read_file_range, git_status]
     permissions:
       read_files: allow
       write_files: deny
@@ -159,27 +124,9 @@ harnesses:
     verification:
       require_evidence: false
 
-  review-only:
-    backend: native-rust
-    tools: [repo_search, read_file, git_diff]
-    permissions:
-      read_files: allow
-      write_files: deny
-      run_commands: deny
-      child_harness_permissions: ask
-      network: deny
-      secrets: deny
-      publish_external: deny
-      git_commit: deny
-      git_push: deny
-      deploy: deny
-    memory:
-      read: [workflow, run]
-      write: [run]
-
   native-code-edit:
     backend: native-rust
-    tools: [repo_find_files, repo_search_text, repo_read_file, repo_read_file_range, git_status, git_diff, agent_subagent, read_subagent_status, cancel_subagent_background, command_preview, command_run, command_background, read_command_output, cancel_command_background, patch_preview, patch_apply, Skill]
+    tools: [repo_find_files, repo_search_text, repo_read_file, repo_read_file_range, git_status, git_diff, agent_subagent, read_subagent_status, cancel_subagent_background, command_preview, command_run, command_background, read_command_output, write_stdin, cancel_command_background, apply_patch, Skill]
     permissions:
       read_files: allow
       write_files: ask
@@ -197,26 +144,10 @@ harnesses:
     verification:
       require_evidence: true
 
-  browser-verification:
-    backend: browser-verifier
-    tools: [browser_static, gameplay_static, snake_gameplay_static, browser_dynamic, gameplay_browser, snake_gameplay_browser]
-    permissions:
-      read_files: allow
-      write_files: deny
-      run_commands: allow
-      child_harness_permissions: deny
-      network: deny
-      secrets: deny
-      publish_external: deny
-      git_commit: deny
-      git_push: deny
-      deploy: deny
-    memory:
-      read: [workflow, run]
-      write: [run]
-    verification:
-      require_evidence: true
-      allowed_checks: [auto]
+surface_bindings:
+  planner_chat:
+    agent: planner
+    harness: planner-conversation
 
 workflows:
   planner-led:
@@ -226,26 +157,17 @@ workflows:
       - id: executor
         agent: executor
         harness: native-code-edit
-      - id: verifier
-        agent: verifier
-        harness: browser-verification
       - id: workflow-planner
         agent: workflow-planner
         harness: workflow-planner
     edges:
       - from: executor
-        to: verifier
+        to: workflow-planner
         on: completed
       - from: executor
-        to: verifier
-        on: blocked
-      - from: verifier
-        to: workflow-planner
-        on: completed
-      - from: verifier
         to: workflow-planner
         on: blocked
-      - from: verifier
+      - from: executor
         to: workflow-planner
         on: failed
       - from: workflow-planner
@@ -256,4 +178,4 @@ workflows:
         on: continue
     stop:
       on_status: [completed, blocked, failed]
-      final_report_agent: verifier
+      final_report_agent: workflow-planner

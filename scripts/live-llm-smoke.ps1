@@ -11,6 +11,7 @@ param(
   [string]$ProviderProxyUrl = "",
   [switch]$LoadLocalEnv,
   [switch]$ProviderTestOnly,
+  [switch]$PlannerTestOnly,
   [switch]$Live,
   [switch]$SkipIfMissingProvider
 )
@@ -163,7 +164,10 @@ New-Item -ItemType Directory -Force -Path $storePath | Out-Null
 # rejects duplicate environment keys, so keep Path and drop duplicate PATH.
 $processEnv = [Environment]::GetEnvironmentVariables("Process")
 if ($processEnv.Contains("Path") -and $processEnv.Contains("PATH")) {
+  $preservedPath = [string]$processEnv["Path"]
+  if ([string]::IsNullOrWhiteSpace($preservedPath)) { $preservedPath = [string]$processEnv["PATH"] }
   [Environment]::SetEnvironmentVariable("PATH", $null, "Process")
+  [Environment]::SetEnvironmentVariable("Path", $preservedPath, "Process")
 }
 
 [Environment]::SetEnvironmentVariable("CODER_RUNTIME_CACHE_DIR", (Join-Path $repoRoot "tmp\coder-runtime-cache"), "Process")
@@ -248,6 +252,7 @@ try {
   $config.models.default.api_key_env = "LLM_API_KEY"
 
   $createBody = @{
+    repo = "."
     workflow_id = $defaultWorkflow.workflow_id
     planner_agent_id = "planner"
     config = $config
@@ -263,6 +268,7 @@ try {
     param([string]$Message)
     $body = @{
       message = $Message
+      repo = "."
       confirmed = $false
       mode = "discuss"
       planner_agent_id = "planner"
@@ -271,7 +277,7 @@ try {
     Invoke-RestMethod -Method Post -Uri "$base/api/v3/planner-chat/sessions/$sessionId/turn" -Headers $jsonHeaders -Body $body
   }
 
-  $firstTurn = Send-PlannerTurn -Message "Live smoke only: discuss how to inspect README.md. Do not start work."
+  $firstTurn = Send-PlannerTurn -Message "Plan a read-only qualitative review of README.md. Summarize its current strengths and gaps without modifying files. Do not start work."
   if ([string]::IsNullOrWhiteSpace($firstTurn.assistant_message)) {
     throw "First live Planner turn did not return an assistant message."
   }
@@ -279,8 +285,14 @@ try {
     throw "First Planner chat turn unexpectedly requested workflow start."
   }
   Assert-ProviderTrace -Turn $firstTurn -Label "First Planner chat turn"
+  if ([int]$firstTurn.provider_trace.tool_calls -lt 1) {
+    throw "First Planner chat turn did not inspect the bound repository."
+  }
+  if ([int]$firstTurn.provider_trace.tool_result_bytes -lt 1) {
+    throw "First Planner chat turn did not return a bounded repository observation."
+  }
 
-  $secondTurn = Send-PlannerTurn -Message "Second live smoke turn: keep this conversational and side-effect free."
+  $secondTurn = Send-PlannerTurn -Message "Confirm this read-only qualitative review plan."
   if ([string]::IsNullOrWhiteSpace($secondTurn.assistant_message)) {
     throw "Second live Planner turn did not return an assistant message."
   }
@@ -290,7 +302,35 @@ try {
   if ($secondTurn.session.turns.Count -lt 4) {
     throw "Planner session did not retain two user/assistant turns."
   }
-  Assert-ProviderTrace -Turn $secondTurn -Label "Second Planner chat turn"
+  if ($null -ne $secondTurn.provider_trace) {
+    Assert-ProviderTrace -Turn $secondTurn -Label "Second Planner chat turn"
+  } elseif ($secondTurn.readiness -ne "ready") {
+    throw "Second Planner chat turn skipped the provider without confirming a ready plan."
+  }
+  if ($secondTurn.plan_draft.execution_mode -ne "read_only") {
+    throw "Planner did not return execution_mode=read_only."
+  }
+  if ($secondTurn.plan_draft.review_mode -ne "qualitative") {
+    throw "Planner did not return review_mode=qualitative."
+  }
+
+  if ($PlannerTestOnly) {
+    [pscustomobject]@{
+      status = "ok"
+      provider = $normalizedProvider
+      model = $Model
+      credential_source = $apiKey.Name
+      provider_test = $providerTest.test.mode
+      first_turn_provider_trace = $firstTurn.provider_trace
+      second_turn_provider_trace = $secondTurn.provider_trace
+      execution_mode = $secondTurn.plan_draft.execution_mode
+      review_mode = $secondTurn.plan_draft.review_mode
+      turns = $secondTurn.session.turns.Count
+      chat_started_run = $false
+      api_key_exposed = $false
+    } | ConvertTo-Json -Depth 10
+    return
+  }
 
   $startBody = @{
     repo = "."
@@ -300,8 +340,50 @@ try {
     scopes = @("README.md")
   } | ConvertTo-Json -Depth 50
   $startWork = Invoke-RestMethod -Method Post -Uri "$base/api/v3/planner-chat/sessions/$sessionId/start-work" -Headers $jsonHeaders -Body $startBody
-  if ([string]::IsNullOrWhiteSpace($startWork.run_id) -and [string]::IsNullOrWhiteSpace($startWork.assistant_message)) {
-    throw "Start Work returned neither a run_id nor a Planner clarification."
+  if ([string]::IsNullOrWhiteSpace($startWork.run_id)) {
+    throw "Start Work did not start the confirmed read-only workflow: $($startWork.status)"
+  }
+
+  $runEvents = $null
+  $terminalEvent = $null
+  foreach ($attempt in 1..180) {
+    $runEvents = Invoke-RestMethod -Method Get -Uri "$base/api/v3/runs/$($startWork.run_id)/events?tail=true&limit=1000"
+    $terminalEvent = $runEvents.events | Where-Object { $_.kind -in @("run.completed", "run.blocked", "run.failed", "run.cancelled") } | Select-Object -Last 1
+    if ($null -ne $terminalEvent) {
+      break
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  if ($null -eq $terminalEvent) {
+    throw "Start Work did not reach a terminal state within 90 seconds."
+  }
+  if ($terminalEvent.kind -ne "run.completed") {
+    throw "Start Work ended with $($terminalEvent.kind)."
+  }
+  $nativeStarted = $runEvents.events | Where-Object {
+    $_.kind -eq "backend.native_rust.started" -and $_.payload.implementation -eq "native-model-tool-loop"
+  } | Select-Object -First 1
+  if ($null -eq $nativeStarted) {
+    throw "Start Work did not use the native model tool loop."
+  }
+  $readCompleted = $runEvents.events | Where-Object {
+    $_.kind -eq "model.tool_call.completed" -and $_.payload.tool_name -eq "repo_read_file" -and $_.payload.status -eq "completed"
+  } | Select-Object -First 1
+  if ($null -eq $readCompleted) {
+    throw "The native Executor did not complete repo_read_file."
+  }
+  $workflowPlanner = $runEvents.events | Where-Object {
+    $_.kind -eq "planner.workflow_decision" -and $_.payload.implementation -eq "provider-backed-bounded-planner"
+  } | Select-Object -First 1
+  if ($null -eq $workflowPlanner) {
+    throw "The provider-backed Workflow Planner did not record a decision."
+  }
+  if ($runEvents.events | Where-Object { $_.kind -eq "file.written" }) {
+    throw "The read-only live smoke unexpectedly wrote a file."
+  }
+  $serializedEvents = $runEvents | ConvertTo-Json -Depth 40 -Compress
+  if ($serializedEvents.Contains($apiKey.Value)) {
+    throw "The live run event payload exposed the provider API key."
   }
 
   [pscustomobject]@{
@@ -312,11 +394,20 @@ try {
     provider_test = $providerTest.test.mode
     first_turn_provider_trace = $firstTurn.provider_trace
     second_turn_provider_trace = $secondTurn.provider_trace
+    execution_mode = $secondTurn.plan_draft.execution_mode
+    review_mode = $secondTurn.plan_draft.review_mode
     session_id = $sessionId
     turns = $secondTurn.session.turns.Count
     chat_started_run = $false
     start_work_status = $startWork.status
-    run_started = -not [string]::IsNullOrWhiteSpace($startWork.run_id)
+    run_started = $true
+    run_terminal_event = $terminalEvent.kind
+    executor_implementation = $nativeStarted.payload.implementation
+    workflow_planner_implementation = $workflowPlanner.payload.implementation
+    workflow_planner_decision = $workflowPlanner.payload.decision
+    repo_read_completed = $true
+    file_write_events = 0
+    api_key_exposed = $false
   } | ConvertTo-Json -Depth 10
 } finally {
   if ($server -and -not $server.HasExited) {

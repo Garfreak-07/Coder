@@ -4,6 +4,7 @@ use std::{
     path::Path,
 };
 
+use coder_tools::canonical_builtin_tool_name;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -19,7 +20,7 @@ pub use permissions::{
     PermissionEvaluation, PermissionMode, PermissionRule, PermissionRuleSource,
     PermissionRuleValue, PermissionSettingsRecord, PermissionSettingsRules,
     PermissionSettingsUpdateApplication, PermissionUpdate, PermissionUpdateApplication,
-    PermissionUpdateDestination, CLAUDE_PERMISSION_CONTRACT_SOURCES, PERMISSION_FIELDS,
+    PermissionUpdateDestination, PERMISSION_FIELDS,
 };
 pub use validation::{validate_project_config, validate_workflow};
 
@@ -41,7 +42,21 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub harnesses: BTreeMap<String, HarnessSpec>,
     #[serde(default)]
+    pub surface_bindings: SurfaceBindings,
+    #[serde(default)]
     pub workflows: BTreeMap<String, WorkflowSpec>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SurfaceBindings {
+    #[serde(default)]
+    pub planner_chat: Option<AgentHarnessBinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentHarnessBinding {
+    pub agent: String,
+    pub harness: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -154,6 +169,77 @@ pub struct ModelSpec {
     pub model: String,
     pub base_url_env: Option<String>,
     pub api_key_env: Option<String>,
+    #[serde(default)]
+    pub capabilities: ModelCapabilities,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelCapabilities {
+    #[serde(default)]
+    pub context_window_tokens: Option<u32>,
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default)]
+    pub auto_compact_token_limit: Option<u32>,
+    #[serde(default)]
+    pub effective_context_window_percent: Option<u8>,
+    #[serde(default)]
+    pub supports_streaming: Option<bool>,
+    #[serde(default)]
+    pub supports_tool_calls: Option<bool>,
+    #[serde(default)]
+    pub supports_parallel_tool_calls: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedModelCapabilities {
+    pub context_window_tokens: u32,
+    pub max_output_tokens: u32,
+    pub auto_compact_token_limit: u32,
+    pub effective_context_window_percent: u8,
+    pub supports_streaming: bool,
+    pub supports_tool_calls: bool,
+    pub supports_parallel_tool_calls: bool,
+}
+
+impl ModelSpec {
+    pub fn resolved_capabilities(&self) -> ResolvedModelCapabilities {
+        let defaults = default_model_capabilities(&self.provider, &self.model);
+        let context_window_tokens = self
+            .capabilities
+            .context_window_tokens
+            .unwrap_or(defaults.context_window_tokens);
+        let codex_auto_compact_limit = context_window_tokens.saturating_mul(9) / 10;
+        ResolvedModelCapabilities {
+            context_window_tokens,
+            max_output_tokens: self
+                .capabilities
+                .max_output_tokens
+                .unwrap_or(defaults.max_output_tokens),
+            auto_compact_token_limit: self
+                .capabilities
+                .auto_compact_token_limit
+                .unwrap_or(codex_auto_compact_limit)
+                .min(codex_auto_compact_limit),
+            effective_context_window_percent: self
+                .capabilities
+                .effective_context_window_percent
+                .unwrap_or(MODEL_EFFECTIVE_CONTEXT_WINDOW_PERCENT_DEFAULT),
+            supports_streaming: self
+                .capabilities
+                .supports_streaming
+                .unwrap_or(defaults.supports_streaming),
+            supports_tool_calls: self
+                .capabilities
+                .supports_tool_calls
+                .unwrap_or(defaults.supports_tool_calls),
+            supports_parallel_tool_calls: self
+                .capabilities
+                .supports_parallel_tool_calls
+                .unwrap_or(defaults.supports_parallel_tool_calls),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +259,7 @@ pub struct AgentSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentRuntimePolicy {
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
@@ -180,18 +267,12 @@ pub struct AgentRuntimePolicy {
     pub max_turns: Option<u32>,
     #[serde(default)]
     pub effort: Option<String>,
-    #[serde(default = "default_context_window_tokens")]
-    pub context_window_tokens: u32,
-    #[serde(default = "default_compact_output_reserve_tokens")]
-    pub compact_output_reserve_tokens: u32,
-    #[serde(default = "default_autocompact_buffer_tokens")]
-    pub autocompact_buffer_tokens: u32,
+    #[serde(default)]
+    pub compact_output_reserve_tokens: Option<u32>,
     #[serde(default = "default_max_output_recovery_attempts")]
     pub max_output_recovery_attempts: u8,
     #[serde(default = "default_max_consecutive_compaction_failures")]
     pub max_consecutive_compaction_failures: u8,
-    #[serde(default = "default_stream_idle_timeout_ms")]
-    pub stream_idle_timeout_ms: u64,
 }
 
 impl Default for AgentRuntimePolicy {
@@ -200,48 +281,113 @@ impl Default for AgentRuntimePolicy {
             max_output_tokens: None,
             max_turns: None,
             effort: None,
-            context_window_tokens: AGENT_CONTEXT_WINDOW_TOKENS_DEFAULT,
-            compact_output_reserve_tokens: AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_DEFAULT,
-            autocompact_buffer_tokens: AGENT_AUTOCOMPACT_BUFFER_TOKENS_DEFAULT,
+            compact_output_reserve_tokens: None,
             max_output_recovery_attempts: AGENT_MAX_OUTPUT_RECOVERY_ATTEMPTS_DEFAULT,
             max_consecutive_compaction_failures: AGENT_MAX_CONSECUTIVE_COMPACTION_FAILURES_DEFAULT,
-            stream_idle_timeout_ms: AGENT_STREAM_IDLE_TIMEOUT_MS_DEFAULT,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAgentRuntimePolicy {
+    pub max_output_tokens: u32,
+    pub max_turns: u32,
+    pub effort: Option<String>,
+    pub context_window_tokens: u32,
+    pub effective_context_window_tokens: u32,
+    pub compact_output_reserve_tokens: u32,
+    pub auto_compact_token_limit: u32,
+    pub max_output_recovery_attempts: u8,
+    pub max_consecutive_compaction_failures: u8,
+    pub supports_streaming: bool,
+    pub supports_tool_calls: bool,
+    pub supports_parallel_tool_calls: bool,
+}
+
+pub fn resolve_agent_runtime_policy(
+    model: &ModelSpec,
+    runtime: &AgentRuntimePolicy,
+) -> ResolvedAgentRuntimePolicy {
+    let capabilities = model.resolved_capabilities();
+    let max_output_tokens = runtime
+        .max_output_tokens
+        .unwrap_or(capabilities.max_output_tokens)
+        .min(capabilities.max_output_tokens);
+    let compact_output_reserve_tokens = runtime
+        .compact_output_reserve_tokens
+        .unwrap_or(AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_DEFAULT.min(max_output_tokens))
+        .min(max_output_tokens);
+    ResolvedAgentRuntimePolicy {
+        max_output_tokens,
+        max_turns: runtime.max_turns.unwrap_or({
+            if capabilities.max_output_tokens >= 32_000 {
+                16
+            } else {
+                24
+            }
+        }),
+        effort: runtime.effort.clone(),
+        context_window_tokens: capabilities.context_window_tokens,
+        effective_context_window_tokens: capabilities
+            .context_window_tokens
+            .saturating_mul(u32::from(capabilities.effective_context_window_percent))
+            / 100,
+        compact_output_reserve_tokens,
+        auto_compact_token_limit: capabilities.auto_compact_token_limit,
+        max_output_recovery_attempts: runtime.max_output_recovery_attempts,
+        max_consecutive_compaction_failures: runtime.max_consecutive_compaction_failures,
+        supports_streaming: capabilities.supports_streaming,
+        supports_tool_calls: capabilities.supports_tool_calls,
+        supports_parallel_tool_calls: capabilities.supports_parallel_tool_calls,
     }
 }
 
 pub const AGENT_MAX_OUTPUT_TOKENS_MIN: u32 = 256;
 pub const AGENT_MAX_OUTPUT_TOKENS_MAX: u32 = 64_000;
 pub const AGENT_EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
-pub const AGENT_CONTEXT_WINDOW_TOKENS_DEFAULT: u32 = 200_000;
-pub const AGENT_CONTEXT_WINDOW_TOKENS_MIN: u32 = 32_000;
-pub const AGENT_CONTEXT_WINDOW_TOKENS_MAX: u32 = 1_000_000;
+pub const MODEL_CONTEXT_WINDOW_TOKENS_DEFAULT: u32 = 200_000;
+pub const MODEL_CONTEXT_WINDOW_TOKENS_MIN: u32 = 32_000;
+pub const MODEL_CONTEXT_WINDOW_TOKENS_MAX: u32 = 1_000_000;
+pub const MODEL_EFFECTIVE_CONTEXT_WINDOW_PERCENT_DEFAULT: u8 = 95;
+pub const MODEL_EFFECTIVE_CONTEXT_WINDOW_PERCENT_MIN: u8 = 1;
+pub const MODEL_EFFECTIVE_CONTEXT_WINDOW_PERCENT_MAX: u8 = 100;
 pub const AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_DEFAULT: u32 = 20_000;
 pub const AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_MIN: u32 = 1_000;
 pub const AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_MAX: u32 = AGENT_MAX_OUTPUT_TOKENS_MAX;
-pub const AGENT_AUTOCOMPACT_BUFFER_TOKENS_DEFAULT: u32 = 13_000;
-pub const AGENT_AUTOCOMPACT_BUFFER_TOKENS_MIN: u32 = 1_000;
-pub const AGENT_AUTOCOMPACT_BUFFER_TOKENS_MAX: u32 = 100_000;
 pub const AGENT_MAX_OUTPUT_RECOVERY_ATTEMPTS_DEFAULT: u8 = 3;
 pub const AGENT_MAX_OUTPUT_RECOVERY_ATTEMPTS_MIN: u8 = 0;
 pub const AGENT_MAX_OUTPUT_RECOVERY_ATTEMPTS_MAX: u8 = 10;
 pub const AGENT_MAX_CONSECUTIVE_COMPACTION_FAILURES_DEFAULT: u8 = 3;
 pub const AGENT_MAX_CONSECUTIVE_COMPACTION_FAILURES_MIN: u8 = 1;
 pub const AGENT_MAX_CONSECUTIVE_COMPACTION_FAILURES_MAX: u8 = 10;
-pub const AGENT_STREAM_IDLE_TIMEOUT_MS_DEFAULT: u64 = 90_000;
-pub const AGENT_STREAM_IDLE_TIMEOUT_MS_MIN: u64 = 10_000;
-pub const AGENT_STREAM_IDLE_TIMEOUT_MS_MAX: u64 = 600_000;
 
-fn default_context_window_tokens() -> u32 {
-    AGENT_CONTEXT_WINDOW_TOKENS_DEFAULT
-}
-
-fn default_compact_output_reserve_tokens() -> u32 {
-    AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_DEFAULT
-}
-
-fn default_autocompact_buffer_tokens() -> u32 {
-    AGENT_AUTOCOMPACT_BUFFER_TOKENS_DEFAULT
+fn default_model_capabilities(provider: &str, model: &str) -> ResolvedModelCapabilities {
+    let provider = provider.trim().to_ascii_lowercase();
+    let model = model.trim().to_ascii_lowercase();
+    let (context_window_tokens, max_output_tokens) = if provider == "deepseek" {
+        (
+            128_000,
+            if model.contains("reasoner") {
+                64_000
+            } else {
+                8_000
+            },
+        )
+    } else {
+        (
+            MODEL_CONTEXT_WINDOW_TOKENS_DEFAULT,
+            AGENT_MAX_OUTPUT_TOKENS_MAX,
+        )
+    };
+    ResolvedModelCapabilities {
+        context_window_tokens,
+        max_output_tokens,
+        auto_compact_token_limit: context_window_tokens.saturating_mul(9) / 10,
+        effective_context_window_percent: MODEL_EFFECTIVE_CONTEXT_WINDOW_PERCENT_DEFAULT,
+        supports_streaming: true,
+        supports_tool_calls: true,
+        supports_parallel_tool_calls: true,
+    }
 }
 
 fn default_max_output_recovery_attempts() -> u8 {
@@ -250,10 +396,6 @@ fn default_max_output_recovery_attempts() -> u8 {
 
 fn default_max_consecutive_compaction_failures() -> u8 {
     AGENT_MAX_CONSECUTIVE_COMPACTION_FAILURES_DEFAULT
-}
-
-fn default_stream_idle_timeout_ms() -> u64 {
-    AGENT_STREAM_IDLE_TIMEOUT_MS_DEFAULT
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -413,10 +555,9 @@ fn parsed_tool_specs(tool_specs: &[String]) -> Vec<ToolSpec> {
 }
 
 fn canonical_config_tool_name(tool_name: &str) -> String {
-    match tool_name {
-        "Agent" | "agent" | "Task" | "task" | "subagent" => "agent_subagent".to_owned(),
-        _ => tool_name.to_owned(),
-    }
+    canonical_builtin_tool_name(tool_name)
+        .unwrap_or(tool_name)
+        .to_owned()
 }
 
 fn resolve_allowed_agent_types(
@@ -554,6 +695,55 @@ pub struct WorkflowSpec {
     pub edges: Vec<WorkflowEdgeSpec>,
     #[serde(default)]
     pub stop: StopPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedWorkflowCostPolicy {
+    pub token_budget: u64,
+    pub token_budget_source: String,
+    pub model_id: String,
+    pub provider: String,
+    pub model: String,
+    pub default_max_turns: u32,
+    pub max_rounds: u32,
+}
+
+pub fn resolve_workflow_cost_policy(
+    config: &ProjectConfig,
+    workflow_id: &str,
+) -> Option<ResolvedWorkflowCostPolicy> {
+    let workflow = config.workflows.get(workflow_id)?;
+    let node = workflow
+        .nodes
+        .iter()
+        .find(|node| {
+            config
+                .agents
+                .get(&node.agent)
+                .is_some_and(|agent| agent.role == "executor")
+        })
+        .or_else(|| workflow.nodes.first())?;
+    let agent = config.agents.get(&node.agent)?;
+    let model = config.models.get(&agent.model)?;
+    let runtime = resolve_agent_runtime_policy(model, &agent.runtime);
+    let derived_budget = (u64::from(runtime.context_window_tokens)
+        .saturating_add(u64::from(runtime.max_output_tokens).saturating_mul(2)))
+    .saturating_mul(u64::from(workflow.max_rounds.max(1)))
+    .clamp(64_000, 2_000_000);
+    Some(ResolvedWorkflowCostPolicy {
+        token_budget: workflow.token_budget.unwrap_or(derived_budget),
+        token_budget_source: if workflow.token_budget.is_some() {
+            "configured"
+        } else {
+            "model_capability_default"
+        }
+        .to_owned(),
+        model_id: agent.model.clone(),
+        provider: model.provider.clone(),
+        model: model.model.clone(),
+        default_max_turns: runtime.max_turns,
+        max_rounds: workflow.max_rounds,
+    })
 }
 
 fn default_max_rounds() -> u32 {
@@ -953,13 +1143,14 @@ PostToolUse:
         runtime.max_output_tokens = Some(AGENT_MAX_OUTPUT_TOKENS_MAX + 1);
         runtime.max_turns = Some(0);
         runtime.effort = Some("ultracode".to_owned());
-        runtime.context_window_tokens = AGENT_CONTEXT_WINDOW_TOKENS_MIN;
-        runtime.compact_output_reserve_tokens = AGENT_CONTEXT_WINDOW_TOKENS_MIN;
-        runtime.autocompact_buffer_tokens = AGENT_AUTOCOMPACT_BUFFER_TOKENS_MAX + 1;
+        runtime.compact_output_reserve_tokens = Some(AGENT_COMPACT_OUTPUT_RESERVE_TOKENS_MAX + 1);
         runtime.max_output_recovery_attempts = AGENT_MAX_OUTPUT_RECOVERY_ATTEMPTS_MAX + 1;
         runtime.max_consecutive_compaction_failures =
             AGENT_MAX_CONSECUTIVE_COMPACTION_FAILURES_MAX + 1;
-        runtime.stream_idle_timeout_ms = AGENT_STREAM_IDLE_TIMEOUT_MS_MIN - 1;
+        let capabilities = &mut config.models.get_mut("default").unwrap().capabilities;
+        capabilities.context_window_tokens = Some(MODEL_CONTEXT_WINDOW_TOKENS_MIN - 1);
+        capabilities.auto_compact_token_limit = Some(0);
+        capabilities.effective_context_window_percent = Some(0);
 
         let report = validate_project_config(&config);
 
@@ -968,18 +1159,82 @@ PostToolUse:
             "agent_max_output_tokens_out_of_range",
             "agent_max_turns_out_of_range",
             "agent_effort_level_unknown",
-            "agent_compact_output_reserve_exceeds_context",
-            "agent_compaction_headroom_exceeds_context",
-            "agent_autocompact_buffer_tokens_out_of_range",
+            "agent_compact_output_reserve_tokens_out_of_range",
             "agent_max_output_recovery_attempts_out_of_range",
             "agent_max_consecutive_compaction_failures_out_of_range",
-            "agent_stream_idle_timeout_ms_out_of_range",
+            "model_context_window_tokens_out_of_range",
+            "model_auto_compact_token_limit_out_of_range",
+            "model_effective_context_window_percent_out_of_range",
         ] {
             assert!(
                 report.issues.iter().any(|issue| issue.code == code),
                 "missing {code}"
             );
         }
+    }
+
+    #[test]
+    fn model_capabilities_use_provider_defaults_and_codex_context_bounds() {
+        let model = |name: &str| ModelSpec {
+            provider: "deepseek".to_owned(),
+            model: name.to_owned(),
+            base_url_env: None,
+            api_key_env: None,
+            capabilities: ModelCapabilities::default(),
+        };
+
+        let chat = model("deepseek-chat").resolved_capabilities();
+        assert_eq!(chat.context_window_tokens, 128_000);
+        assert_eq!(chat.max_output_tokens, 8_000);
+        assert_eq!(chat.auto_compact_token_limit, 115_200);
+        assert_eq!(chat.effective_context_window_percent, 95);
+
+        let reasoner = model("deepseek-reasoner").resolved_capabilities();
+        assert_eq!(reasoner.context_window_tokens, 128_000);
+        assert_eq!(reasoner.max_output_tokens, 64_000);
+    }
+
+    #[test]
+    fn agent_runtime_overrides_are_clamped_to_model_capabilities() {
+        let model = ModelSpec {
+            provider: "deepseek".to_owned(),
+            model: "deepseek-chat".to_owned(),
+            base_url_env: None,
+            api_key_env: None,
+            capabilities: ModelCapabilities::default(),
+        };
+        let runtime = resolve_agent_runtime_policy(
+            &model,
+            &AgentRuntimePolicy {
+                max_output_tokens: Some(64_000),
+                compact_output_reserve_tokens: Some(20_000),
+                ..AgentRuntimePolicy::default()
+            },
+        );
+
+        assert_eq!(runtime.max_output_tokens, 8_000);
+        assert_eq!(runtime.compact_output_reserve_tokens, 8_000);
+        assert_eq!(runtime.effective_context_window_tokens, 121_600);
+        assert_eq!(runtime.auto_compact_token_limit, 115_200);
+    }
+
+    #[test]
+    fn workflow_cost_policy_is_model_aware_bounded_and_explicitly_overridable() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        let derived = resolve_workflow_cost_policy(&config, "planner-led").unwrap();
+        assert_eq!(derived.token_budget, 432_000);
+        assert_eq!(derived.token_budget_source, "model_capability_default");
+        assert_eq!(derived.default_max_turns, 24);
+
+        config
+            .workflows
+            .get_mut("planner-led")
+            .unwrap()
+            .token_budget = Some(90_000);
+        let explicit = resolve_workflow_cost_policy(&config, "planner-led").unwrap();
+        assert_eq!(explicit.token_budget, 90_000);
+        assert_eq!(explicit.token_budget_source, "configured");
     }
 
     #[test]
@@ -1002,7 +1257,7 @@ PostToolUse:
             resolution.selected_tools,
             vec!["command_run".to_owned(), "agent_subagent".to_owned()]
         );
-        assert_eq!(resolution.invalid_requested_tools, vec!["patch_apply"]);
+        assert_eq!(resolution.invalid_requested_tools, vec!["apply_patch"]);
         assert!(!resolution.wildcard);
     }
 
@@ -1022,11 +1277,11 @@ PostToolUse:
 
         assert_eq!(
             resolution.selected_tools,
-            vec!["agent_subagent".to_owned(), "patch_apply".to_owned()]
+            vec!["agent_subagent".to_owned(), "apply_patch".to_owned()]
         );
         assert_eq!(
             resolution.requested_tools,
-            vec!["agent_subagent".to_owned(), "patch_apply".to_owned()]
+            vec!["agent_subagent".to_owned(), "apply_patch".to_owned()]
         );
         assert_eq!(
             resolution.allowed_agent_types,
@@ -1068,7 +1323,7 @@ PostToolUse:
             .get_mut("executor")
             .unwrap()
             .tools
-            .push("browser_static".to_owned());
+            .push("unsupported_tool".to_owned());
 
         let report = validate_project_config(&config);
 
@@ -1083,7 +1338,7 @@ PostToolUse:
     fn unknown_harness_backend_and_tools_are_reported() {
         let mut config: ProjectConfig =
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
-        let harness = config.harnesses.get_mut("review-only").unwrap();
+        let harness = config.harnesses.get_mut("native-code-edit").unwrap();
         harness.backend = "mystery-backend".to_owned();
         harness.tools.push("definitely_not_a_tool".to_owned());
 
@@ -1097,6 +1352,40 @@ PostToolUse:
     }
 
     #[test]
+    fn domain_specific_verifier_backend_is_not_part_of_core() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        config
+            .harnesses
+            .get_mut("native-code-edit")
+            .unwrap()
+            .backend = "browser-verifier".to_owned();
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "error");
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "harness_backend_unknown"));
+    }
+
+    #[test]
+    fn planner_chat_surface_binding_must_reference_explicit_contracts() {
+        let mut config: ProjectConfig =
+            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
+        config.surface_bindings.planner_chat.as_mut().unwrap().agent = "executor".to_owned();
+
+        let report = validate_project_config(&config);
+
+        assert_eq!(report.status, "error");
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "planner_chat_agent_contract_invalid"));
+    }
+
+    #[test]
     fn backend_specific_unknown_tool_is_reported() {
         let mut config: ProjectConfig =
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
@@ -1105,7 +1394,7 @@ PostToolUse:
             .get_mut("native-code-edit")
             .unwrap()
             .tools
-            .push("browser_static".to_owned());
+            .push("unsupported_tool".to_owned());
 
         let report = validate_project_config(&config);
 
@@ -1140,19 +1429,16 @@ PostToolUse:
     fn native_harness_tool_denied_permission_is_reported() {
         let mut config: ProjectConfig =
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
-        config
-            .harnesses
-            .get_mut("review-only")
-            .unwrap()
-            .tools
-            .push("run_command_sandbox".to_owned());
+        let harness = config.harnesses.get_mut("native-code-edit").unwrap();
+        harness.tools.push("run_command_sandbox".to_owned());
+        harness.permissions.run_commands = PermissionDecision::Deny;
 
         let report = validate_project_config(&config);
 
         assert_eq!(report.status, "error");
         assert!(report.issues.iter().any(|issue| {
             issue.code == "harness_tool_permission_denied"
-                && issue.target == "harnesses.review-only.permissions.run_commands"
+                && issue.target == "harnesses.native-code-edit.permissions.run_commands"
         }));
     }
 
@@ -1160,7 +1446,7 @@ PostToolUse:
     fn subagent_tool_denied_child_harness_permission_is_reported() {
         let mut config: ProjectConfig =
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
-        let harness = config.harnesses.get_mut("review-only").unwrap();
+        let harness = config.harnesses.get_mut("native-code-edit").unwrap();
         harness.tools.push("agent_subagent".to_owned());
         harness.permissions.child_harness_permissions = PermissionDecision::Deny;
 
@@ -1169,7 +1455,8 @@ PostToolUse:
         assert_eq!(report.status, "error");
         assert!(report.issues.iter().any(|issue| {
             issue.code == "harness_tool_permission_denied"
-                && issue.target == "harnesses.review-only.permissions.child_harness_permissions"
+                && issue.target
+                    == "harnesses.native-code-edit.permissions.child_harness_permissions"
         }));
     }
 
@@ -1199,7 +1486,7 @@ PostToolUse:
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
         config
             .harnesses
-            .get_mut("review-only")
+            .get_mut("native-code-edit")
             .unwrap()
             .permissions
             .read_files = PermissionDecision::Deny;
@@ -1209,7 +1496,7 @@ PostToolUse:
         assert_eq!(report.status, "error");
         assert!(report.issues.iter().any(|issue| {
             issue.code == "harness_tool_permission_denied"
-                && issue.target == "harnesses.review-only.permissions.read_files"
+                && issue.target == "harnesses.native-code-edit.permissions.read_files"
         }));
     }
 
@@ -1231,26 +1518,5 @@ PostToolUse:
             .issues
             .iter()
             .any(|issue| issue.code == "planner_model_side_effect_permission_not_denied"));
-    }
-
-    #[test]
-    fn browser_verifier_unknown_check_is_reported() {
-        let mut config: ProjectConfig =
-            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
-        config
-            .harnesses
-            .get_mut("browser-verification")
-            .unwrap()
-            .verification
-            .allowed_checks
-            .push("visual_magic".to_owned());
-
-        let report = validate_project_config(&config);
-
-        assert_eq!(report.status, "error");
-        assert!(report
-            .issues
-            .iter()
-            .any(|issue| issue.code == "browser_verifier_check_unknown"));
     }
 }

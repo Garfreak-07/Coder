@@ -155,12 +155,6 @@ pub(crate) async fn drain_run_async_notifications(
         notification_count,
         returned_count,
         next_after_sequence,
-        claude_sources: vec![
-            "src/utils/queueProcessor.ts processQueueIfReady",
-            "src/utils/messageQueueManager.ts dequeueAllMatching",
-            "src/utils/attachments.ts getQueuedCommandAttachments",
-            "src/query.ts Subagents only drain task-notifications addressed to them",
-        ],
     }))
 }
 

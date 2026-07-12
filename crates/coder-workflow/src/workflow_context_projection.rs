@@ -1,61 +1,55 @@
 use coder_config::{
-    permission_policy_explanation, AgentRuntimePolicy, AgentSpec, HarnessSpec, ModelSpec,
+    permission_policy_explanation, resolve_agent_runtime_policy, AgentRuntimePolicy, HarnessSpec,
+    ModelSpec,
 };
 use serde_json::{json, Value};
 
 use crate::context_budget::context_budget_for_runtime;
 
-pub(crate) fn model_reference(agent: &AgentSpec, model: &ModelSpec) -> Value {
+pub(crate) fn model_reference(model: &ModelSpec) -> Value {
     json!({
-        "profile_ref": &agent.model,
         "provider": &model.provider,
         "model": &model.model,
         "base_url_env": &model.base_url_env,
-        "api_key_env": &model.api_key_env
-    })
-}
-
-pub(crate) fn memory_scope_summary(agent: &AgentSpec, harness: &HarnessSpec) -> Value {
-    json!({
-        "agent": &agent.memory,
-        "harness": &harness.memory,
-        "note": "scope names only; memory contents are not embedded"
+        "api_key_env": &model.api_key_env,
+        "capabilities": model.resolved_capabilities()
     })
 }
 
 pub(crate) fn permission_summary(harness: &HarnessSpec) -> Value {
-    let mut explanation = permission_policy_explanation(&harness.permissions);
-    if let Some(object) = explanation.as_object_mut() {
-        object.insert("policy".to_owned(), json!(&harness.permissions));
-        object.insert("harness_backend".to_owned(), json!(harness.backend));
-        object.insert("selected_tools".to_owned(), json!(harness.tools));
-    }
-    explanation
+    let explanation = permission_policy_explanation(&harness.permissions);
+    json!({
+        "contract": explanation.get("contract").cloned().unwrap_or(Value::Null),
+        "decisions": explanation.get("decisions").cloned().unwrap_or(Value::Null)
+    })
 }
 
-pub(crate) fn agent_runtime_event_summary(runtime: &AgentRuntimePolicy) -> Value {
-    let budget = context_budget_for_runtime(runtime);
+pub(crate) fn agent_runtime_event_summary(
+    model: &ModelSpec,
+    runtime: &AgentRuntimePolicy,
+) -> Value {
+    let resolved = resolve_agent_runtime_policy(model, runtime);
+    let budget = context_budget_for_runtime(&resolved);
     json!({
-        "output_cap": runtime.max_output_tokens,
-        "max_turns": runtime.max_turns,
-        "context_window": runtime.context_window_tokens,
-        "compact_reserve": runtime.compact_output_reserve_tokens,
-        "autocompact_buffer": runtime.autocompact_buffer_tokens,
+        "configured_output_cap": runtime.max_output_tokens,
+        "output_cap": resolved.max_output_tokens,
+        "configured_max_turns": runtime.max_turns,
+        "max_turns": resolved.max_turns,
+        "context_window": resolved.context_window_tokens,
+        "effective_context_window": resolved.effective_context_window_tokens,
+        "configured_compact_reserve": runtime.compact_output_reserve_tokens,
+        "compact_reserve": resolved.compact_output_reserve_tokens,
+        "auto_compact_token_limit": resolved.auto_compact_token_limit,
+        "supports_streaming": resolved.supports_streaming,
+        "supports_tool_calls": resolved.supports_tool_calls,
+        "supports_parallel_tool_calls": resolved.supports_parallel_tool_calls,
         "output_recovery_attempts": runtime.max_output_recovery_attempts,
         "compaction_failure_limit": runtime.max_consecutive_compaction_failures,
-        "stream_idle_timeout_ms": runtime.stream_idle_timeout_ms,
         "context_budget": {
             "configured_context_window": budget.configured_context_window_tokens,
-            "context_window_override": budget.context_window_override_tokens,
-            "effective_context_window": budget.effective_context_window_tokens,
-            "configured_autocompact_buffer": budget.configured_autocompact_buffer_tokens,
-            "effective_autocompact_buffer": budget.effective_autocompact_buffer_tokens,
+            "configured_auto_compact_token_limit": budget.configured_auto_compact_token_limit,
             "autocompact_threshold": budget.autocompact_threshold_tokens,
-            "autocompact_threshold_overridden": budget.autocompact_threshold_overridden,
-            "warning_threshold": budget.warning_threshold_tokens,
-            "error_threshold": budget.error_threshold_tokens,
             "blocking_limit": budget.blocking_limit_tokens,
-            "blocking_limit_overridden": budget.blocking_limit_overridden,
             "estimated_max_turn_growth": budget.estimated_max_turn_growth_tokens
         }
     })

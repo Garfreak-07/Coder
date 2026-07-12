@@ -17,16 +17,17 @@ use crate::planner_provider_runtime::{
     planner_provider_trace,
 };
 use crate::provider_runtime::{
-    harness_model_spec, model_name_for_settings, model_provider_base_url,
+    harness_agent_runtime, harness_model_spec, model_name_for_settings, model_provider_base_url,
     model_provider_for_settings, provider_api_key, provider_chat_completions_endpoint,
-    provider_http_client_builder, provider_proxy_url_for_url, redact_provider_error,
+    provider_http_client_builder, provider_proxy_url_for_url, provider_request_max_retries,
+    provider_stream_idle_timeout_ms, redact_provider_error, send_provider_request_with_retry,
 };
 use crate::run_token_budget::{
     check_run_token_budget, record_run_token_usage, RunTokenBudgetSnapshot, RunTokenUsage,
 };
 use crate::ApiState;
 
-const WORKFLOW_PLANNER_MAX_OUTPUT_TOKENS: u32 = 900;
+const WORKFLOW_PLANNER_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 900;
 const WORKFLOW_PLANNER_MAX_IMPROVEMENTS: usize = 3;
 const INTERRUPTED_EXECUTOR_MARKER: &str =
     "native_model_tool_loop: stopped_after_turn_limit_with_file_writes";
@@ -62,18 +63,13 @@ impl WorkflowPlannerBackend {
             base_url.as_str(),
             proxy_url.as_deref().unwrap_or(""),
         ];
-        let stream_idle_timeout = workflow_planner_stream_idle_timeout(request);
-        let client = provider_http_client_builder(&url, proxy_url.as_deref())
+        let stream_idle_timeout =
+            Duration::from_millis(provider_stream_idle_timeout_ms(&settings, &provider));
+        let client = provider_http_client_builder(&settings, &provider, &url)
             .map_err(|error| redact_provider_error(&error, &redaction_values))?
-            .timeout(stream_idle_timeout)
             .build()
             .map_err(|error| redact_provider_error(&error.to_string(), &redaction_values))?;
-        let max_output_tokens = request
-            .backend_context
-            .pointer("/coder/agent/runtime/max_output_tokens")
-            .and_then(Value::as_u64)
-            .map(|value| value.clamp(256, u64::from(WORKFLOW_PLANNER_MAX_OUTPUT_TOKENS)) as u32)
-            .unwrap_or(WORKFLOW_PLANNER_MAX_OUTPUT_TOKENS);
+        let max_output_tokens = workflow_planner_max_output_tokens(request);
         let effort = request
             .backend_context
             .pointer("/coder/agent/runtime/effort")
@@ -86,18 +82,20 @@ impl WorkflowPlannerBackend {
             effort,
         );
         let estimated_input_tokens = u64::from(crate::estimate_text_tokens(&body.to_string()));
-        let response = client
-            .post(&url)
-            .bearer_auth(&api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|error| {
-                redact_provider_error(
-                    &format!("workflow Planner request failed: {error}"),
-                    &redaction_values,
-                )
-            })?;
+        let response_outcome = send_provider_request_with_retry(
+            || client.post(&url).bearer_auth(&api_key).json(&body),
+            Some(stream_idle_timeout),
+            provider_request_max_retries(&settings, &provider),
+        )
+        .await
+        .map_err(|error| {
+            redact_provider_error(
+                &format!("workflow Planner request failed: {error}"),
+                &redaction_values,
+            )
+        })?;
+        let response_attempts = response_outcome.attempts;
+        let response = response_outcome.response;
         if !response.status().is_success() {
             let status = response.status();
             let error = read_planner_provider_error_body(response, &redaction_values).await?;
@@ -107,6 +105,7 @@ impl WorkflowPlannerBackend {
             ));
         }
         let mut trace = planner_provider_trace(false, "unknown", false, None);
+        trace.provider_turns = response_attempts;
         trace.estimated_input_tokens = estimated_input_tokens;
         let message = parse_live_planner_response_with_idle_timeout(
             response,
@@ -275,17 +274,13 @@ fn workflow_planner_messages(request: &HarnessRunRequest) -> Vec<Value> {
         .backend_context
         .pointer("/coder/plan_context/plan_draft");
     let input = json!({
-        "original_user_request": request.backend_context
-            .pointer("/coder/plan_context/original_user_request")
-            .cloned()
-            .unwrap_or_else(|| Value::String(request.task.clone())),
+        "task": request.task,
         "plan": {
-            "goal": plan.and_then(|value| value.get("goal")).cloned().unwrap_or(Value::Null),
             "scope": plan.and_then(|value| value.get("scope")).cloned().unwrap_or(Value::Null),
             "acceptance_criteria": plan.and_then(|value| value.get("acceptance_criteria")).cloned().unwrap_or(Value::Null),
             "risks": plan.and_then(|value| value.get("risks")).cloned().unwrap_or(Value::Null)
         },
-        "verifier_feedback": request.backend_context
+        "execution_feedback": request.backend_context
             .pointer("/coder/plan_context/workflow_feedback")
             .cloned()
             .unwrap_or(Value::Null),
@@ -298,7 +293,7 @@ fn workflow_planner_messages(request: &HarnessRunRequest) -> Vec<Value> {
         json!({
             "role": "system",
             "content": format!(
-                "{system}\n\nJudge whether the verified result already satisfies the user's explicit and qualitative goals. You own the finish-or-improve decision but never edit files. Map each completion claim to direct evidence; a criterion copied from the plan is not evidence. A smoke-test PASS proves basic correctness, not responsiveness, a representative user flow, or an explicit qualitative target such as fun, polished, or production-ready. If qualitative evidence contains no task-specific review or playtest, request one focused review/refinement with observable evidence; never repeat that direction. Treat continuation as a budgeted investment: continue only when the expected quality gain clearly exceeds the cost of another execution and verification round. Once the acceptance criteria are met, finish even when optional enhancements remain. Continue only for 1-3 concrete, observable improvements with medium or high expected gain. Do not continue for generic polish, speculative work, repeated advice, or low marginal gain. Respect round and progress budgets. A verifier failure may continue only when the repair is actionable; blocked means unmet work needs external input or the bounded loop cannot make progress. Return JSON only with exactly these fields: decision (finish|continue|blocked), summary, improvements (array, at most 3), expected_gain (high|medium|low|none), blockers (array). Do not reveal chain-of-thought."
+                "{system}\n\nJudge whether the verified result already satisfies the user's explicit and qualitative goals. You own the finish-or-improve decision but never edit files. Map each completion claim to direct evidence; a criterion copied from the plan is not evidence. A smoke-test PASS proves basic correctness, not responsiveness, a representative user flow, or an explicit qualitative target such as fun, polished, or production-ready. If qualitative evidence contains no task-specific review or playtest, request one focused review/refinement with observable evidence; never repeat that direction. Treat continuation as a budgeted investment: continue only when the expected quality gain clearly exceeds the cost of another execution and verification round. Once the acceptance criteria are met, finish even when optional enhancements remain. Continue only for 1-3 concrete, observable improvements with medium or high expected gain. Do not continue for generic polish, speculative work, repeated advice, or low marginal gain. Respect round and progress budgets. A verification failure may continue only when the repair is actionable; blocked means unmet work needs external input or the bounded loop cannot make progress. Return JSON only with exactly these fields: decision (finish|continue|blocked), summary, improvements (array, at most 3), expected_gain (high|medium|low|none), blockers (array). Do not reveal chain-of-thought."
             )
         }),
         json!({
@@ -349,13 +344,15 @@ fn enforce_bounded_decision(
     );
     let source_signal =
         workflow_context_str(request, "/coder/plan_context/workflow_feedback/signal");
-    let verifier_completed = source_node == "verifier" && source_signal == "completed";
-    let verified_completion = verifier_completed && !qualitative_executor_was_interrupted(request);
-    if source_node != "verifier" {
+    let executor_completed = source_node == "executor" && source_signal == "completed";
+    let verified_completion = executor_completed
+        && executor_completion_evidence_present(request)
+        && !qualitative_executor_was_interrupted(request);
+    if source_node != "executor" {
         return apply_stop_gate(
             decision,
             verified_completion,
-            "the decision did not follow verifier evidence",
+            "the decision did not follow executor evidence",
         );
     }
     if !matches!(
@@ -369,7 +366,7 @@ fn enforce_bounded_decision(
         );
     }
     if decision.decision == "finish"
-        && verifier_completed
+        && executor_completed
         && qualitative_executor_was_interrupted(request)
     {
         return interrupted_executor_decision(request, decision);
@@ -378,7 +375,7 @@ fn enforce_bounded_decision(
         return apply_stop_gate(
             decision,
             false,
-            "finish requires completed verifier evidence",
+            "finish requires completed executor evidence",
         );
     }
     if decision.decision == "blocked" {
@@ -453,10 +450,19 @@ fn completion_is_claimable(request: &HarnessRunRequest) -> bool {
     workflow_context_str(
         request,
         "/coder/plan_context/workflow_feedback/source_node_id",
-    ) == "verifier"
+    ) == "executor"
         && workflow_context_str(request, "/coder/plan_context/workflow_feedback/signal")
             == "completed"
+        && executor_completion_evidence_present(request)
         && !qualitative_executor_was_interrupted(request)
+}
+
+fn executor_completion_evidence_present(request: &HarnessRunRequest) -> bool {
+    request
+        .backend_context
+        .pointer("/coder/plan_context/workflow_feedback/evidence_policy/checks_present")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn qualitative_executor_was_interrupted(request: &HarnessRunRequest) -> bool {
@@ -693,69 +699,32 @@ fn workflow_context_u32(request: &HarnessRunRequest, pointer: &str) -> Option<u3
         .and_then(|value| u32::try_from(value).ok())
 }
 
-fn workflow_planner_stream_idle_timeout(request: &HarnessRunRequest) -> Duration {
-    Duration::from_millis(
-        request
-            .backend_context
-            .pointer("/coder/agent/runtime/stream_idle_timeout_ms")
-            .and_then(Value::as_u64)
-            .unwrap_or(90_000)
-            .clamp(10_000, 600_000),
-    )
+fn workflow_planner_max_output_tokens(request: &HarnessRunRequest) -> u32 {
+    let runtime = harness_agent_runtime(request);
+    if request
+        .backend_context
+        .pointer("/coder/agent/runtime/max_output_tokens")
+        .is_some()
+    {
+        runtime.max_output_tokens
+    } else {
+        runtime
+            .max_output_tokens
+            .min(WORKFLOW_PLANNER_DEFAULT_MAX_OUTPUT_TOKENS)
+    }
 }
 
 fn qualitative_review_requested(request: &HarnessRunRequest) -> bool {
-    let original_request =
-        workflow_context_str(request, "/coder/plan_context/original_user_request");
-    let goal = workflow_context_str(request, "/coder/plan_context/plan_draft/goal");
-    let acceptance = request
+    request
         .backend_context
-        .pointer("/coder/plan_context/plan_draft/acceptance_criteria")
+        .pointer("/coder/plan_context/plan_draft/review_mode")
         .or_else(|| {
             request
                 .backend_context
-                .pointer("/coder/plan_context/acceptance_criteria")
+                .pointer("/coder/plan_context/review_mode")
         })
-        .map(Value::to_string)
-        .unwrap_or_default();
-    let text = format!("{original_request}\n{goal}\n{acceptance}").to_lowercase();
-    let words = text
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .collect::<BTreeSet<_>>();
-    let word_match = [
-        "fun",
-        "game",
-        "polish",
-        "polished",
-        "engaging",
-        "delightful",
-        "beautiful",
-        "refine",
-        "improve",
-        "better",
-    ]
-    .iter()
-    .any(|marker| words.contains(marker));
-    let phrase_match = [
-        "production-ready",
-        "production ready",
-        "high quality",
-        "higher quality",
-        "best possible",
-        "\u{6e38}\u{620f}",
-        "\u{597d}\u{73a9}",
-        "\u{7cbe}\u{81f4}",
-        "\u{9ad8}\u{8d28}\u{91cf}",
-        "\u{751f}\u{4ea7}\u{7ea7}",
-        "\u{66f4}\u{597d}",
-        "\u{4f18}\u{5316}",
-        "\u{5b8c}\u{5584}",
-        "\u{7f8e}\u{89c2}",
-    ]
-    .iter()
-    .any(|marker| text.contains(marker));
-    word_match || phrase_match
+        .and_then(Value::as_str)
+        == Some("qualitative")
 }
 
 #[cfg(test)]
@@ -776,8 +745,9 @@ mod tests {
             backend_context: json!({
                 "coder": {
                     "plan_context": {"workflow_feedback": {
-                        "source_node_id": "verifier",
-                        "signal": signal
+                        "source_node_id": "executor",
+                        "signal": signal,
+                        "evidence_policy": {"checks_present": true}
                     }},
                     "workflow_loop": {
                         "round": round,
@@ -802,6 +772,11 @@ mod tests {
             expected_gain: gain.to_owned(),
             blockers: Vec::new(),
         }
+    }
+
+    fn require_qualitative_review(request: &mut HarnessRunRequest) {
+        request.backend_context["coder"]["plan_context"]["plan_draft"]["review_mode"] =
+            json!("qualitative");
     }
 
     #[test]
@@ -831,8 +806,7 @@ mod tests {
     #[test]
     fn qualitative_interrupted_executor_forces_one_completion_round() {
         let mut request = request("completed", 1, 3, true);
-        request.backend_context["coder"]["plan_context"]["original_user_request"] =
-            json!("Build a polished game.");
+        require_qualitative_review(&mut request);
         request.backend_context["coder"]["workflow_loop"]["executor_evidence_summary"] =
             json!(format!("check: {INTERRUPTED_EXECUTOR_MARKER}"));
 
@@ -846,8 +820,7 @@ mod tests {
     #[test]
     fn repeated_qualitative_executor_interruption_is_reported_as_blocked() {
         let mut request = request("completed", 2, 3, true);
-        request.backend_context["coder"]["plan_context"]["original_user_request"] =
-            json!("Build a polished game.");
+        require_qualitative_review(&mut request);
         request.backend_context["coder"]["workflow_loop"]["executor_evidence_summary"] =
             json!(format!("check: {INTERRUPTED_EXECUTOR_MARKER}"));
         request.backend_context["coder"]["workflow_loop"]["previous_improvements"] =
@@ -862,8 +835,7 @@ mod tests {
     #[test]
     fn closed_task_can_accept_verified_writes_after_executor_turn_limit() {
         let mut request = request("completed", 1, 3, true);
-        request.backend_context["coder"]["plan_context"]["original_user_request"] =
-            json!("Create README.md with the supplied text.");
+        request.task = "Create README.md with the supplied text.".to_owned();
         request.backend_context["coder"]["workflow_loop"]["executor_evidence_summary"] =
             json!(format!("check: {INTERRUPTED_EXECUTOR_MARKER}"));
 
@@ -886,19 +858,18 @@ mod tests {
     }
 
     #[test]
-    fn workflow_planner_honors_validated_stream_idle_timeout_range() {
+    fn workflow_planner_clamps_agent_output_override_to_model_capability() {
         let mut request = request("completed", 1, 3, true);
         assert_eq!(
-            workflow_planner_stream_idle_timeout(&request),
-            Duration::from_millis(90_000)
+            workflow_planner_max_output_tokens(&request),
+            WORKFLOW_PLANNER_DEFAULT_MAX_OUTPUT_TOKENS
         );
 
-        request.backend_context["coder"]["agent"]["runtime"]["stream_idle_timeout_ms"] =
-            json!(600_000);
-        assert_eq!(
-            workflow_planner_stream_idle_timeout(&request),
-            Duration::from_millis(600_000)
-        );
+        request.backend_context["coder"]["agent"]["runtime"]["max_output_tokens"] = json!(1_200);
+        assert_eq!(workflow_planner_max_output_tokens(&request), 1_200);
+
+        request.backend_context["coder"]["agent"]["runtime"]["max_output_tokens"] = json!(90_000);
+        assert_eq!(workflow_planner_max_output_tokens(&request), 8_000);
     }
 
     #[test]
@@ -960,8 +931,7 @@ mod tests {
     #[test]
     fn provider_failure_does_not_turn_unreviewed_quality_into_success() {
         let mut request = request("completed", 1, 3, true);
-        request.backend_context["coder"]["plan_context"]["original_user_request"] =
-            json!("Build a more fun strategy game.");
+        request.task = "Build a more fun strategy game.".to_owned();
 
         let decision = bounded_stop_decision("provider decision unavailable: HTTP 402".to_owned());
 
@@ -971,47 +941,14 @@ mod tests {
     }
 
     #[test]
-    fn quality_router_skips_closed_tasks_and_selects_open_ended_goals() {
-        let mut closed = request("completed", 1, 3, true);
-        closed.backend_context["coder"]["plan_context"]["original_user_request"] =
-            json!("Create math functions and README.md with the supplied text.");
-        assert!(!qualitative_review_requested(&closed));
+    fn review_router_uses_typed_plan_mode_only() {
+        let mut request = request("completed", 1, 3, true);
+        request.task = "Build a polished production-ready game.".to_owned();
+        assert!(!qualitative_review_requested(&request));
 
-        closed.backend_context["coder"]["plan_context"]["original_user_request"] =
-            json!("Build a more fun strategy game.");
-        assert!(qualitative_review_requested(&closed));
-    }
-
-    #[test]
-    fn quality_router_handles_multilingual_goals_without_routing_plain_closed_tasks() {
-        for (task, expected) in [
-            ("Create README.md with the supplied text.", false),
-            (
-                "\u{521b}\u{5efa} README.md\u{ff0c}\u{5185}\u{5bb9}\u{4f7f}\u{7528}\u{5df2}\u{63d0}\u{4f9b}\u{7684}\u{6587}\u{672c}\u{3002}",
-                false,
-            ),
-            ("Build a production-ready service.", true),
-            (
-                "\u{505a}\u{4e00}\u{4e2a}\u{6bd4}\u{4e0a}\u{6b21}\u{66f4}\u{597d}\u{73a9}\u{7684}\u{690d}\u{7269}\u{5927}\u{6218}\u{50f5}\u{5c38}\u{6e38}\u{620f}\u{3002}",
-                true,
-            ),
-        ] {
-            let mut request = request("completed", 1, 3, true);
-            request.backend_context["coder"]["plan_context"]["original_user_request"] =
-                json!(task);
-            assert_eq!(qualitative_review_requested(&request), expected, "{task}");
-        }
-
-        let mut criteria = request("completed", 1, 3, true);
-        criteria.backend_context["coder"]["plan_context"]["original_user_request"] =
-            json!("Build the requested interface.");
-        criteria.backend_context["coder"]["plan_context"]["plan_draft"] = json!({
-            "goal": "Build the requested interface.",
-            "acceptance_criteria": [
-                "\u{754c}\u{9762}\u{7cbe}\u{81f4}\u{ff0c}\u{4e14}\u{4e3b}\u{6d41}\u{79fb}\u{52a8}\u{7aef}\u{65e0}\u{5e03}\u{5c40}\u{6ea2}\u{51fa}\u{3002}"
-            ]
-        });
-        assert!(qualitative_review_requested(&criteria));
+        require_qualitative_review(&mut request);
+        request.task = "Create README.md with supplied text.".to_owned();
+        assert!(qualitative_review_requested(&request));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use std::{
     collections::VecDeque,
-    env, fs,
-    path::{Path, PathBuf},
+    fs,
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
@@ -16,13 +16,6 @@ use coder_harness::{
 use coder_store::RepoEvidenceKind;
 use serde_json::{json, Value};
 
-use super::browser_verifier::{
-    browser_verifier_default_store_root, browser_verifier_selected_checks, BrowserVerifierCheck,
-};
-use super::browser_verifier_dynamic::{
-    browser_dynamic_script_path, playwright_node_modules_candidates, BrowserDynamicRunInput,
-    BrowserDynamicRunOutput, BrowserDynamicRunner, BROWSER_DYNAMIC_PLAYWRIGHT_SCRIPT,
-};
 use super::workflow_control::{
     repair_task_from_feedback, workflow_feedback_value, workflow_planner_result, WorkflowSignal,
 };
@@ -131,9 +124,9 @@ fn mock_runner_blocks_when_requested_rounds_exceed_max_rounds() {
 #[test]
 fn workflow_feedback_value_includes_loop_contract() {
     let source_node = WorkflowNodeSpec {
-        id: "verifier".to_owned(),
-        agent: "verifier".to_owned(),
-        harness: "browser-verification".to_owned(),
+        id: "executor".to_owned(),
+        agent: "executor".to_owned(),
+        harness: "native-code-edit".to_owned(),
     };
     let checks = vec!["browser opened".to_owned()];
     let blockers = vec!["game did not progress".to_owned()];
@@ -141,14 +134,14 @@ fn workflow_feedback_value_includes_loop_contract() {
     let feedback =
         workflow_feedback_value(&source_node, WorkflowSignal::Failed, &checks, &blockers);
 
-    assert_eq!(feedback["source_node_id"], "verifier");
+    assert_eq!(feedback["source_node_id"], "executor");
     assert_eq!(feedback["signal"], "failed");
     assert_eq!(
         feedback["loop_contract"]["required_decision"],
         "continue_or_blocked"
     );
     assert_eq!(
-        feedback["loop_contract"]["finish_requires_verifier_evidence"],
+        feedback["loop_contract"]["finish_requires_executor_evidence"],
         true
     );
     assert_eq!(
@@ -163,7 +156,7 @@ fn workflow_feedback_value_includes_loop_contract() {
 #[test]
 fn workflow_planner_blocks_malformed_feedback() {
     let result = workflow_planner_result(workflow_planner_request_with_feedback(Some(json!({
-        "source_node_id": "verifier",
+        "source_node_id": "executor",
         "signal": "not-a-workflow-signal"
     }))));
 
@@ -184,10 +177,11 @@ fn workflow_planner_blocks_malformed_feedback() {
 }
 
 #[test]
-fn workflow_planner_finishes_only_from_verifier_completion() {
+fn workflow_planner_finishes_from_executor_completion() {
     let result = workflow_planner_result(workflow_planner_request_with_feedback(Some(json!({
-        "source_node_id": "verifier",
-        "signal": "completed"
+        "source_node_id": "executor",
+        "signal": "completed",
+        "evidence_policy": {"checks_present": true}
     }))));
 
     assert_eq!(result.status, "finish");
@@ -202,12 +196,12 @@ fn workflow_planner_finishes_only_from_verifier_completion() {
 }
 
 #[test]
-fn workflow_planner_blocks_external_verifier_dependencies_without_repair_loop() {
+fn workflow_planner_blocks_external_executor_dependencies_without_repair_loop() {
     let result = workflow_planner_result(workflow_planner_request_with_feedback(Some(json!({
-        "source_node_id": "verifier",
+        "source_node_id": "executor",
         "signal": "blocked",
-        "checks": ["browser static checks passed"],
-        "blockers": ["Playwright was not configured for Coder browser verification"]
+        "checks": ["repository checks passed"],
+        "blockers": ["required external runtime was not configured"]
     }))));
 
     assert_eq!(result.status, "blocked");
@@ -216,7 +210,7 @@ fn workflow_planner_blocks_external_verifier_dependencies_without_repair_loop() 
     assert!(report
         .blockers
         .iter()
-        .any(|blocker| blocker.contains("Playwright was not configured")));
+        .any(|blocker| blocker.contains("required external runtime was not configured")));
     let decision = result
         .events
         .iter()
@@ -246,7 +240,7 @@ fn repair_round_is_scoped_to_planner_feedback() {
 
     assert!(task.contains("listed feedback is the scope of this round"));
     assert!(task.contains("Do not restart broad planning or review"));
-    assert!(task.contains("Stop as soon as the implementation is verifier-ready"));
+    assert!(task.contains("Stop as soon as the implementation is complete and verified"));
     assert!(task.contains("repair the restart control"));
 }
 
@@ -262,7 +256,7 @@ async fn workflow_runner_native_rust_read_only_review_writes_evidence() {
     )
     .unwrap();
     make_single_node_terminal_workflow(&mut config);
-    config.harnesses.get_mut("review-only").unwrap().tools = vec![
+    config.harnesses.get_mut("native-code-edit").unwrap().tools = vec![
         "repo_find_files".to_owned(),
         "repo_read_file_range".to_owned(),
         "git_diff".to_owned(),
@@ -343,7 +337,7 @@ async fn workflow_runner_native_rust_agent_subagent_records_sidechain_and_filter
     fs::create_dir_all(&repo).unwrap();
     fs::write(repo.join("README.md"), "# Native subagent\n").unwrap();
     make_single_node_terminal_workflow(&mut config);
-    config.harnesses.get_mut("review-only").unwrap().tools =
+    config.harnesses.get_mut("native-code-edit").unwrap().tools =
         vec!["agent_subagent".to_owned(), "repo_find_files".to_owned()];
     let runner = WorkflowRunner::new(config, store.clone());
     let mut options = WorkflowRunOptions::new("planner-led", "delegate repository scan");
@@ -371,7 +365,7 @@ async fn workflow_runner_native_rust_agent_subagent_records_sidechain_and_filter
         .unwrap();
     assert_eq!(metadata.status.as_deref(), Some("completed"));
     assert_eq!(metadata.parent_agent_id, "executor");
-    assert_eq!(metadata.parent_harness_id, "review-only");
+    assert_eq!(metadata.parent_harness_id, "native-code-edit");
 
     let records = store
         .read_subagent_transcript_records(&output.run_id, agent_id)
@@ -406,16 +400,23 @@ async fn workflow_runner_records_context_compaction_circuit_success() {
     let (mut config, root, store) = fixture();
     make_workflow_native_only(&mut config);
     make_single_node_terminal_workflow(&mut config);
-    let executor = config.agents.get_mut("executor").unwrap();
-    executor.runtime.context_window_tokens = 32_000;
-    executor.runtime.compact_output_reserve_tokens = 1_000;
-    executor.runtime.autocompact_buffer_tokens = 1_000;
-    executor.runtime.max_output_tokens = Some(8_000);
+    let model_id = {
+        let executor = config.agents.get_mut("executor").unwrap();
+        executor.runtime.compact_output_reserve_tokens = Some(1_000);
+        executor.runtime.max_output_tokens = Some(8_000);
+        executor.model.clone()
+    };
+    let capabilities = &mut config.models.get_mut(&model_id).unwrap().capabilities;
+    capabilities.context_window_tokens = Some(32_000);
+    capabilities.max_output_tokens = Some(8_000);
+    capabilities.auto_compact_token_limit = Some(30_000);
     let runner = WorkflowRunner::new(config, store.clone());
     let mut options = WorkflowRunOptions::new("planner-led", "compact large plan context");
     options.plan_context = Some(json!({
-        "original_user_request": "make a better browser game\n".repeat(10_000),
-        "acceptance_criteria": (0..100).map(|index| format!("criterion-{index}")).collect::<Vec<_>>()
+        "plan_draft": {
+            "steps": ["inspect and refine\n".repeat(10_000)],
+            "acceptance_criteria": (0..100).map(|index| format!("criterion-{index}")).collect::<Vec<_>>()
+        }
     }));
 
     let output = runner.run(options).await.unwrap();
@@ -459,7 +460,7 @@ async fn native_react_lifecycle_records_reason_act_observe_steps() {
     )
     .unwrap();
     make_single_node_terminal_workflow(&mut config);
-    config.harnesses.get_mut("review-only").unwrap().tools = vec![
+    config.harnesses.get_mut("native-code-edit").unwrap().tools = vec![
         "repo_find_files".to_owned(),
         "repo_read_file_range".to_owned(),
         "git_diff".to_owned(),
@@ -524,7 +525,7 @@ async fn native_react_lifecycle_records_reason_act_observe_steps() {
         assert_eq!(event.payload["workflow_id"], "planner-led");
         assert_eq!(event.payload["node_id"], "review");
         assert_eq!(event.payload["agent_id"], "executor");
-        assert_eq!(event.payload["harness_id"], "review-only");
+        assert_eq!(event.payload["harness_id"], "native-code-edit");
         assert_eq!(event.payload["backend"], "native-rust");
         assert!(event.payload["step"].as_u64().is_some());
     }
@@ -556,7 +557,7 @@ diff --git a/tracked.txt b/tracked.txt
     )
     .unwrap();
     make_single_node_terminal_workflow(&mut config);
-    config.harnesses.get_mut("review-only").unwrap().tools = vec!["patch_preview".to_owned()];
+    config.harnesses.get_mut("native-code-edit").unwrap().tools = vec!["patch_preview".to_owned()];
     let runner = WorkflowRunner::new(config, store.clone());
     let mut options = WorkflowRunOptions::new("planner-led", "preview change.patch");
     options.repo_root = repo.clone();
@@ -604,6 +605,7 @@ async fn workflow_runner_native_rust_edit_task_blocks_without_side_effects() {
     options.repo_root = repo.clone();
     options.plan_context = Some(json!({
         "start_work_authorized": true,
+        "execution_mode": "must_write",
         "affected_paths": ["README.md"],
         "acceptance_criteria": ["README.md exists"]
     }));
@@ -631,7 +633,9 @@ async fn workflow_report_uses_patch_event_files_when_backend_report_omits_them()
     let repo = temp_root();
     fs::create_dir_all(&repo).unwrap();
     make_single_node_terminal_workflow(&mut config);
-    config.harnesses.get_mut("review-only").unwrap().backend = "native-rust".to_owned();
+    let harness = config.harnesses.get_mut("native-code-edit").unwrap();
+    harness.backend = "native-rust".to_owned();
+    harness.verification.require_evidence = false;
     let registry =
         BackendRegistry::native_only().with_native_backend(Arc::new(PatchEventOnlyBackend));
     let runner = WorkflowRunner::with_registry(config, store.clone(), registry);
@@ -672,7 +676,7 @@ diff --git a/tracked.txt b/tracked.txt
     )
     .unwrap();
     make_single_node_terminal_workflow(&mut config);
-    let harness = config.harnesses.get_mut("review-only").unwrap();
+    let harness = config.harnesses.get_mut("native-code-edit").unwrap();
     harness.tools = vec!["patch_apply".to_owned()];
     harness.permissions.write_files = PermissionDecision::Ask;
     let runner = WorkflowRunner::new(config, store.clone());
@@ -718,7 +722,7 @@ async fn workflow_runner_native_rust_command_run_requires_approval() {
     let repo = temp_root();
     fs::create_dir_all(&repo).unwrap();
     make_single_node_terminal_workflow(&mut config);
-    let harness = config.harnesses.get_mut("review-only").unwrap();
+    let harness = config.harnesses.get_mut("native-code-edit").unwrap();
     harness.tools = vec!["command_run".to_owned()];
     harness.permissions.run_commands = PermissionDecision::Ask;
     let runner = WorkflowRunner::new(config, store.clone());
@@ -815,18 +819,11 @@ async fn workflow_runner_routes_verified_success_to_workflow_planner() {
     assert_eq!(output.report.status, ReportStatus::Completed);
     assert_eq!(
         transitions,
-        vec![
-            (
-                "executor".to_owned(),
-                "verifier".to_owned(),
-                "completed".to_owned()
-            ),
-            (
-                "verifier".to_owned(),
-                "workflow-planner".to_owned(),
-                "completed".to_owned()
-            )
-        ]
+        vec![(
+            "executor".to_owned(),
+            "workflow-planner".to_owned(),
+            "completed".to_owned()
+        )]
     );
     assert_eq!(
         events
@@ -839,7 +836,7 @@ async fn workflow_runner_routes_verified_success_to_workflow_planner() {
 }
 
 #[tokio::test]
-async fn workflow_runner_verifies_blocked_executor_when_evidence_exists() {
+async fn workflow_runner_routes_blocked_executor_evidence_to_planner() {
     let (mut config, root, store) = fixture();
     make_workflow_native_only(&mut config);
     let registry =
@@ -862,7 +859,7 @@ async fn workflow_runner_verifies_blocked_executor_when_evidence_exists() {
     assert!(events.iter().any(|event| {
         event.kind == "workflow.transition.selected"
             && event.payload["from"].as_str() == Some("executor")
-            && event.payload["to"].as_str() == Some("verifier")
+            && event.payload["to"].as_str() == Some("workflow-planner")
             && event.payload["on"].as_str() == Some("blocked")
     }));
     assert!(output
@@ -874,11 +871,10 @@ async fn workflow_runner_verifies_blocked_executor_when_evidence_exists() {
 }
 
 #[tokio::test]
-async fn workflow_runner_repairs_after_verifier_failure() {
+async fn workflow_runner_repairs_after_executor_failure() {
     let (mut config, root, store) = fixture();
     make_workflow_native_only(&mut config);
     let scripted = Arc::new(ScriptedBackend::new([
-        "completed",
         "failed",
         "continue",
         "completed",
@@ -911,11 +907,6 @@ async fn workflow_runner_repairs_after_verifier_failure() {
         vec![
             (
                 "executor".to_owned(),
-                "verifier".to_owned(),
-                "completed".to_owned()
-            ),
-            (
-                "verifier".to_owned(),
                 "workflow-planner".to_owned(),
                 "failed".to_owned()
             ),
@@ -926,11 +917,6 @@ async fn workflow_runner_repairs_after_verifier_failure() {
             ),
             (
                 "executor".to_owned(),
-                "verifier".to_owned(),
-                "completed".to_owned()
-            ),
-            (
-                "verifier".to_owned(),
                 "workflow-planner".to_owned(),
                 "completed".to_owned()
             )
@@ -944,7 +930,7 @@ async fn workflow_runner_repairs_after_verifier_failure() {
         2
     );
     assert!(
-        tasks.get(3).is_some_and(
+        tasks.get(2).is_some_and(
             |task| task.contains("Previous feedback") && task.contains("scripted failed")
         )
     );
@@ -962,10 +948,8 @@ async fn workflow_runner_hands_planner_bounded_round_local_executor_evidence() {
         .token_budget = Some(100_000);
     let scripted = Arc::new(ScriptedBackend::new([
         "completed_with_review",
-        "completed",
         "continue",
         "completed_with_review",
-        "completed",
         "finish",
     ]));
     let registry = BackendRegistry::native_only().with_native_backend(scripted.clone());
@@ -995,6 +979,17 @@ async fn workflow_runner_hands_planner_bounded_round_local_executor_evidence() {
     assert_eq!(output.report.status, ReportStatus::Completed);
     assert_eq!(executor_contexts.len(), 2);
     assert_eq!(planner_contexts.len(), 2);
+    assert!(contexts.iter().all(|context| {
+        let coder = &context["coder"];
+        coder.get("memory").is_none()
+            && coder["agent"].get("model").is_none()
+            && coder["harness"].get("backend").is_none()
+            && coder["model"].get("profile_ref").is_none()
+            && coder["permissions"].get("policy").is_none()
+            && coder["permissions"].get("summary").is_none()
+            && coder["permissions"].get("selected_tools").is_none()
+            && context.to_string().matches("\"selected_tools\"").count() == 1
+    }));
     assert!(contexts.iter().all(|context| {
         context
             .pointer("/coder/workflow_loop/token_budget")
@@ -1043,11 +1038,7 @@ async fn workflow_runner_shares_executor_review_without_claiming_change_evidence
         .unwrap()
         .verification
         .require_evidence = false;
-    let scripted = Arc::new(ScriptedBackend::new([
-        "completed_review_only",
-        "completed",
-        "finish",
-    ]));
+    let scripted = Arc::new(ScriptedBackend::new(["completed_review_only", "finish"]));
     let registry = BackendRegistry::native_only().with_native_backend(scripted.clone());
     let runner = WorkflowRunner::with_registry(config, store, registry);
 
@@ -1077,94 +1068,6 @@ async fn workflow_runner_shares_executor_review_without_claiming_change_evidence
         .pointer("/coder/workflow_loop/executor_evidence_summary")
         .and_then(Value::as_str)
         .is_some_and(|summary| summary.contains("task-specific review round 1")));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn workflow_runner_repairs_browser_game_after_verifier_static_failure() {
-    let (mut config, root, store) = fixture();
-    let repo = temp_root();
-    fs::create_dir_all(&repo).unwrap();
-    let verifier_store = RunStore::new(root.join("browser-verifier-store"));
-    let repairing_backend = Arc::new(RepairingBrowserGameBackend::default());
-    let registry = BackendRegistry::native_only()
-        .with_native_backend(repairing_backend.clone())
-        .with_browser_verifier_backend(Arc::new(BrowserVerifierBackend::new(verifier_store)));
-    let browser_harness = config.harnesses.get_mut("browser-verification").unwrap();
-    browser_harness.verification.allowed_checks = vec![
-        "browser_static".to_owned(),
-        "gameplay_static".to_owned(),
-        "snake_gameplay_static".to_owned(),
-    ];
-    browser_harness.tools = vec![
-        "browser_static".to_owned(),
-        "gameplay_static".to_owned(),
-        "snake_gameplay_static".to_owned(),
-    ];
-    let runner = WorkflowRunner::with_registry(config, store.clone(), registry);
-    let mut options = WorkflowRunOptions::new(
-        "planner-led",
-        "Build a snake browser game with keyboard input, score, restart, and test state.",
-    );
-    options.repo_root = repo.clone();
-
-    let output = runner.run(options).await.unwrap();
-    let events = store.read_events(&output.run_id).unwrap();
-    let transitions = events
-        .iter()
-        .filter(|event| event.kind == "workflow.transition.selected")
-        .map(|event| {
-            (
-                event.payload["from"].as_str().unwrap().to_owned(),
-                event.payload["to"].as_str().unwrap().to_owned(),
-                event.payload["on"].as_str().unwrap().to_owned(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let tasks = repairing_backend.tasks();
-
-    assert_eq!(output.report.status, ReportStatus::Completed);
-    assert!(transitions.iter().any(|transition| {
-        transition
-            == &(
-                "verifier".to_owned(),
-                "workflow-planner".to_owned(),
-                "failed".to_owned(),
-            )
-    }));
-    assert!(transitions.iter().any(|transition| {
-        transition
-            == &(
-                "workflow-planner".to_owned(),
-                "executor".to_owned(),
-                "continue".to_owned(),
-            )
-    }));
-    assert!(events.iter().any(|event| {
-        event.kind == "verification.failed"
-            && event.payload["reason"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("gameplay_static.input")
-    }));
-    assert!(events.iter().any(|event| {
-        event.kind == "verification.completed"
-            && event.payload["summary"].as_str() == Some("browser verification passed")
-    }));
-    assert_eq!(tasks.len(), 2);
-    assert!(tasks[1].contains("Previous feedback"));
-    assert!(tasks[1].contains("gameplay_static.input"));
-    assert!(tasks[1].contains("snake_gameplay_static.test_state"));
-    let repaired_script = fs::read_to_string(repo.join("main.js")).unwrap();
-    assert!(repaired_script.contains("addEventListener('keydown'"));
-    assert!(repaired_script.contains("setInterval"));
-    assert!(repaired_script.contains("__snakeTestState"));
-    assert!(output
-        .report
-        .checks
-        .iter()
-        .any(|check| check.contains("browser-verifier: gameplay_static.input passed")));
-    let _ = fs::remove_dir_all(repo);
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1408,7 +1311,7 @@ async fn workflow_runner_blocks_when_max_rounds_override_exceeds_spec() {
         WorkflowNodeSpec {
             id: "executor".to_owned(),
             agent: "executor".to_owned(),
-            harness: "review-only".to_owned(),
+            harness: "native-code-edit".to_owned(),
         },
     ];
     workflow.edges = vec![
@@ -1459,469 +1362,26 @@ async fn workflow_runner_event_sequence_is_monotonic() {
         .iter()
         .find(|event| event.kind == "node.started")
         .unwrap();
-    assert_eq!(first_node.payload["runtime"]["context_window"], 200_000);
+    assert_eq!(first_node.payload["runtime"]["context_window"], 128_000);
+    assert_eq!(
+        first_node.payload["runtime"]["effective_context_window"],
+        121_600
+    );
     assert_eq!(first_node.payload["runtime"]["compaction_failure_limit"], 3);
     assert_eq!(
         first_node.payload["runtime"]["context_budget"]["autocompact_threshold"],
-        167_000
+        115_200
     );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn workflow_runner_runs_browser_verifier_after_executor_for_browser_tasks() {
-    let (mut config, root, store) = fixture();
-    write_valid_snake_project(&root);
-    let executor = config.harnesses.get_mut("native-code-edit").unwrap();
-    executor.backend = "native-rust".to_owned();
-    executor.tools = vec!["repo_find_files".to_owned()];
-    let verifier = config.harnesses.get_mut("browser-verification").unwrap();
-    verifier.verification.allowed_checks = vec![
-        "browser_static".to_owned(),
-        "gameplay_static".to_owned(),
-        "snake_gameplay_static".to_owned(),
-    ];
-    verifier.tools = vec![
-        "browser_static".to_owned(),
-        "gameplay_static".to_owned(),
-        "snake_gameplay_static".to_owned(),
-    ];
-    let runner = WorkflowRunner::new(config, store.clone());
-    let mut options = WorkflowRunOptions::new("planner-led", "Create a Snake browser game.");
-    options.repo_root = root.clone();
-
-    let output = runner.run(options).await.unwrap();
-    let events = store.read_events(&output.run_id).unwrap();
-
-    assert_eq!(output.report.status, ReportStatus::Completed);
-    assert!(events.iter().any(|event| {
-        event.kind == "backend.selected"
-            && event.payload["backend"].as_str() == Some("browser-verifier")
-    }));
-    assert!(events.iter().any(|event| {
-        event.kind == "verification.completed"
-            && event.payload["source"].as_str() == Some("browser-verifier")
-    }));
-    assert!(output
-        .report
-        .checks
+    let started = events
         .iter()
-        .any(|check| check.contains("snake_gameplay_static.test_state passed")));
-    assert!(output
-        .report
-        .evidence_refs
-        .iter()
-        .any(|reference| reference.kind == "browser_verification"));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn browser_verifier_backend_passes_valid_snake_static_project() {
-    let root = temp_root();
-    fs::create_dir_all(&root).unwrap();
-    write_valid_snake_project(&root);
-    let store_root = temp_root();
-    let store = RunStore::new(&store_root);
-    let backend = BrowserVerifierBackend::new(store);
-    let request = browser_verifier_test_request(
-        &root,
-        "Build a Snake browser game.",
-        vec!["browser_static", "gameplay_static", "snake_gameplay_static"],
-    );
-
-    let result = backend.run(request).await.unwrap();
-
-    assert_eq!(result.status, "completed");
-    let report = result.report.unwrap();
-    assert!(report
-        .checks
-        .iter()
-        .any(|check| check.contains("browser_static.entry passed")));
-    assert!(report
-        .checks
-        .iter()
-        .any(|check| check.contains("snake_gameplay_static.test_state passed")));
-    assert!(report
-        .evidence_refs
-        .iter()
-        .any(|reference| reference.kind == "browser_verification"));
-    assert!(result.events.iter().any(|event| {
-        event.kind == "verification.completed"
-            && event
-                .refs
-                .iter()
-                .any(|reference| reference.label == "browser_verification")
-    }));
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(store_root);
-}
-
-#[tokio::test]
-async fn browser_verifier_backend_reads_inline_single_file_game_script() {
-    let root = temp_root();
-    fs::create_dir_all(&root).unwrap();
-    fs::write(
-        root.join("index.html"),
-        r#"<!doctype html>
-<html>
-  <head><style>canvas { border: 1px solid #111; }</style></head>
-  <body>
-    <canvas id="game"></canvas><button id="restart">Restart</button>
-    <script>
-      const canvas = document.getElementById('game');
-      const ctx = canvas.getContext('2d');
-      document.addEventListener('click', () => { score += 1; });
-      let score = 0;
-      function update() { ctx.fillRect(score, 0, 10, 10); requestAnimationFrame(update); }
-      update();
-    </script>
-  </body>
-</html>"#,
-    )
-    .unwrap();
-    let store_root = temp_root();
-    let backend = BrowserVerifierBackend::new(RunStore::new(&store_root));
-    let request = browser_verifier_test_request(
-        &root,
-        "Build a browser game in one HTML file.",
-        vec!["browser_static", "gameplay_static"],
-    );
-
-    let result = backend.run(request).await.unwrap();
-
-    assert_eq!(result.status, "completed");
-    let report = result.report.unwrap();
-    assert!(report
-        .checks
-        .iter()
-        .any(|check| check.contains("gameplay_static.loop passed")));
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(store_root);
-}
-
-#[tokio::test]
-async fn browser_verifier_backend_fails_missing_snake_test_hook() {
-    let root = temp_root();
-    fs::create_dir_all(&root).unwrap();
-    fs::write(
-            root.join("index.html"),
-            r#"<canvas id="game"></canvas><button id="restart-btn">Restart</button><script src="main.js"></script>"#,
-        )
+        .find(|event| event.kind == "run.started")
         .unwrap();
-    fs::write(
-            root.join("main.js"),
-            "document.addEventListener('keydown', () => {}); setInterval(() => {}, 100); const gameOver = false; const score = 0; document.getElementById('game');",
-        )
-        .unwrap();
-    let store_root = temp_root();
-    let store = RunStore::new(&store_root);
-    let backend = BrowserVerifierBackend::new(store);
-    let request = browser_verifier_test_request(
-        &root,
-        "Build a Snake browser game.",
-        vec!["browser_static", "gameplay_static", "snake_gameplay_static"],
-    );
-
-    let result = backend.run(request).await.unwrap();
-
-    assert_eq!(result.status, "failed");
-    let report = result.report.unwrap();
-    assert!(report
-        .blockers
-        .iter()
-        .any(|blocker| blocker.contains("snake_gameplay_static.test_state")));
-    assert!(result.events.iter().any(|event| {
-        event.kind == "verification.failed"
-            && event.payload["reason"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("snake_gameplay_static.test_state")
-    }));
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(store_root);
-}
-
-#[test]
-fn browser_verifier_auto_selects_dynamic_checks_for_snake_games() {
-    let root = temp_root();
-    let request = browser_verifier_test_request(&root, "Build a Snake browser game.", vec!["auto"]);
-
-    let selected = browser_verifier_selected_checks(&request);
-
-    assert!(selected.contains("browser_static"));
-    assert!(selected.contains("gameplay_static"));
-    assert!(selected.contains("snake_gameplay_static"));
-    assert!(selected.contains("browser_dynamic"));
-    assert!(selected.contains("gameplay_browser"));
-    assert!(selected.contains("snake_gameplay_browser"));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn browser_verifier_does_not_treat_node_javascript_as_a_browser_task() {
-    let root = temp_root();
-    let request = browser_verifier_test_request(
-        &root,
-        "Create a JavaScript math.js utility for Node.js, document it in README.md, and do not add package.json.",
-        vec!["auto"],
-    );
-
-    let selected = browser_verifier_selected_checks(&request);
-
-    assert!(selected.is_empty());
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn browser_verifier_playwright_discovery_prefers_coder_runtime_over_fallback_project_deps() {
-    let repo = temp_root();
-    let runtime_root = temp_root()
-        .join("store")
-        .join("tmp")
-        .join("runtime-cache")
-        .join("browser-verifier");
-
-    let candidates = playwright_node_modules_candidates(repo.to_str().unwrap(), &runtime_root);
-    let runtime_node_modules = runtime_root.join("node_modules");
-    let runtime_smoke_node_modules = runtime_root.join("playwright-smoke").join("node_modules");
-    let runtime_vendor_node_modules = runtime_root
-        .join("vendor")
-        .join("playwright")
-        .join("node_modules");
-    let repo_node_modules = repo.join("node_modules");
-
-    let runtime_index = candidates
-        .iter()
-        .position(|path| path == &runtime_node_modules)
-        .expect("runtime node_modules candidate missing");
-    let repo_index = candidates
-        .iter()
-        .position(|path| path == &repo_node_modules)
-        .expect("repo node_modules candidate missing");
-
-    assert!(runtime_index < repo_index);
-    assert!(candidates.contains(&runtime_smoke_node_modules));
-    assert!(candidates.contains(&runtime_vendor_node_modules));
-    let _ = fs::remove_dir_all(repo);
-}
-
-#[test]
-fn browser_verifier_dynamic_script_path_uses_coder_runtime_root() {
-    let runtime_root = PathBuf::from("owned-store")
-        .join("store")
-        .join("tmp")
-        .join("runtime-cache")
-        .join("browser-verifier");
-
-    let script_path = browser_dynamic_script_path("run:with/unsafe\\chars", &runtime_root);
-
-    assert!(script_path.starts_with(&runtime_root));
-    assert!(script_path
-        .parent()
-        .unwrap()
-        .ends_with("browser-verifier-scripts"));
-    let file_name = script_path.file_name().unwrap().to_string_lossy();
-    assert!(file_name.starts_with("coder-browser-verifier-"));
-    assert!(file_name.ends_with("run_with_unsafe_chars.mjs"));
-    assert!(!script_path.to_string_lossy().contains("Temp"));
-}
-
-#[test]
-fn browser_verifier_default_store_root_avoids_system_temp() {
-    let previous_cache_dir = env::var_os("CODER_CACHE_DIR");
-    env::remove_var("CODER_CACHE_DIR");
-
-    let default_root = browser_verifier_default_store_root();
-
-    assert!(default_root.ends_with(
-        PathBuf::from(".coder")
-            .join("tmp")
-            .join("browser-verifier-default-store")
-    ));
-
-    let cache_root = PathBuf::from("owned-cache-root");
-    env::set_var("CODER_CACHE_DIR", &cache_root);
+    assert_eq!(started.payload["token_budget"], 432_000);
     assert_eq!(
-        browser_verifier_default_store_root(),
-        cache_root.join("browser-verifier-store")
+        started.payload["cost_policy"]["budget_source"],
+        "model_capability_default"
     );
-
-    restore_env_var("CODER_CACHE_DIR", previous_cache_dir);
-}
-
-#[test]
-fn browser_verifier_runtime_status_reports_resolved_coder_playwright() {
-    let repo = temp_root();
-    let store_root = temp_root().join("store");
-    let runtime_root = store_root
-        .clone()
-        .join("tmp")
-        .join("runtime-cache")
-        .join("browser-verifier");
-    let runtime_node_modules = runtime_root.join("node_modules");
-    fs::create_dir_all(runtime_node_modules.join("playwright")).unwrap();
-    fs::write(
-        runtime_node_modules.join("playwright").join("package.json"),
-        "{}",
-    )
-    .unwrap();
-
-    let status = browser_verifier_runtime_status(repo.to_str().unwrap(), &runtime_root);
-
-    assert_eq!(status.runtime_root, runtime_root);
-    assert_eq!(status.resolved_node_modules, Some(runtime_node_modules));
-    assert!(status
-        .candidates
-        .iter()
-        .any(|candidate| candidate.has_playwright_package
-            && candidate.source.contains("store:runtime_root")));
-    let _ = fs::remove_dir_all(repo);
-    let _ = fs::remove_dir_all(store_root);
-}
-
-#[tokio::test]
-async fn browser_verifier_backend_records_successful_dynamic_browser_checks() {
-    let root = temp_root();
-    fs::create_dir_all(&root).unwrap();
-    write_valid_snake_project(&root);
-    let store_root = temp_root();
-    let store = RunStore::new(&store_root);
-    let backend = BrowserVerifierBackend::with_dynamic_runner(
-        store,
-        Arc::new(FakeBrowserDynamicRunner {
-            output: BrowserDynamicRunOutput {
-                checks: vec![BrowserVerifierCheck::pass(
-                    "snake_gameplay_browser.restart_score",
-                    "restart reset visible score",
-                )],
-                evidence: json!({"status": "ok", "runner": "fake-playwright"}),
-            },
-        }),
-    );
-    let request = browser_verifier_test_request(
-        &root,
-        "Build a Snake browser game.",
-        vec![
-            "browser_static",
-            "gameplay_static",
-            "snake_gameplay_static",
-            "snake_gameplay_browser",
-        ],
-    );
-
-    let result = backend.run(request).await.unwrap();
-
-    assert_eq!(result.status, "completed");
-    let report = result.report.unwrap();
-    assert!(report
-        .checks
-        .iter()
-        .any(|check| check.contains("snake_gameplay_browser.restart_score passed")));
-    assert!(result.events.iter().any(|event| {
-        event.kind == "verification.completed"
-            && event.payload["summary"].as_str() == Some("browser verification passed")
-    }));
     let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(store_root);
-}
-
-#[tokio::test]
-async fn browser_verifier_backend_blocks_when_dynamic_environment_is_missing() {
-    let root = temp_root();
-    fs::create_dir_all(&root).unwrap();
-    write_valid_snake_project(&root);
-    let store_root = temp_root();
-    let store = RunStore::new(&store_root);
-    let backend = BrowserVerifierBackend::with_dynamic_runner(
-        store,
-        Arc::new(FakeBrowserDynamicRunner {
-            output: BrowserDynamicRunOutput {
-                checks: vec![BrowserVerifierCheck::blocked(
-                    "browser_dynamic.playwright",
-                    "Playwright was not found",
-                )],
-                evidence: json!({"status": "blocked", "runner": "fake-playwright"}),
-            },
-        }),
-    );
-    let request =
-        browser_verifier_test_request(&root, "Build a browser game.", vec!["browser_dynamic"]);
-
-    let result = backend.run(request).await.unwrap();
-
-    assert_eq!(result.status, "blocked");
-    let report = result.report.unwrap();
-    assert_eq!(report.status, ReportStatus::Blocked);
-    assert!(report
-        .blockers
-        .iter()
-        .any(|blocker| blocker.contains("Playwright was not found")));
-    assert!(result.events.iter().any(|event| {
-        event.kind == "verification.failed"
-            && event.payload["status"].as_str() == Some("blocked")
-            && event.payload["reason"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("browser_dynamic.playwright")
-    }));
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(store_root);
-}
-
-#[tokio::test]
-async fn browser_verifier_backend_fails_when_dynamic_browser_check_fails() {
-    let root = temp_root();
-    fs::create_dir_all(&root).unwrap();
-    write_valid_snake_project(&root);
-    let store_root = temp_root();
-    let store = RunStore::new(&store_root);
-    let backend = BrowserVerifierBackend::with_dynamic_runner(
-        store,
-        Arc::new(FakeBrowserDynamicRunner {
-            output: BrowserDynamicRunOutput {
-                checks: vec![BrowserVerifierCheck::fail(
-                    "gameplay_browser.progress",
-                    "game did not change after input",
-                )],
-                evidence: json!({"status": "failed", "runner": "fake-playwright"}),
-            },
-        }),
-    );
-    let request = browser_verifier_test_request(
-        &root,
-        "Build a browser game.",
-        vec!["browser_dynamic", "gameplay_browser"],
-    );
-
-    let result = backend.run(request).await.unwrap();
-
-    assert_eq!(result.status, "failed");
-    let report = result.report.unwrap();
-    assert_eq!(report.status, ReportStatus::Failed);
-    assert!(report
-        .blockers
-        .iter()
-        .any(|blocker| blocker.contains("gameplay_browser.progress")));
-    assert!(result.events.iter().any(|event| {
-        event.kind == "verification.failed"
-            && event.payload["status"].as_str() == Some("failed")
-            && event.payload["reason"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("gameplay_browser.progress")
-    }));
-    let _ = fs::remove_dir_all(root);
-    let _ = fs::remove_dir_all(store_root);
-}
-
-#[test]
-fn browser_dynamic_progress_failure_message_is_actionable() {
-    assert!(BROWSER_DYNAMIC_PLAYWRIGHT_SCRIPT.contains("but no progress was observed"));
-    assert!(BROWSER_DYNAMIC_PLAYWRIGHT_SCRIPT.contains("#startOverlay, #start-overlay"));
-    assert!(BROWSER_DYNAMIC_PLAYWRIGHT_SCRIPT.contains("appendConsoleHealthCheck"));
-    assert!(BROWSER_DYNAMIC_PLAYWRIGHT_SCRIPT.contains("browser errors:"));
-    assert!(BROWSER_DYNAMIC_PLAYWRIGHT_SCRIPT.contains("[data-plant], .plant-card"));
-    assert!(BROWSER_DYNAMIC_PLAYWRIGHT_SCRIPT.contains("waitForTimeout(1800)"));
 }
 
 #[tokio::test]
@@ -2047,7 +1507,7 @@ fn subagent_inheritance_filters_main_thread_sensitive_tools() {
 async fn subagent_runtime_runs_backend_and_records_sidechain() {
     let (config, root, store) = fixture();
     let run_id = RunId::from_string("run-subagent-runtime");
-    let harness = config.harnesses.get("review-only").unwrap();
+    let harness = config.harnesses.get("native-code-edit").unwrap();
     let backend: Arc<dyn HarnessBackend> = Arc::new(ScriptedBackend::new(["completed"]));
     let runtime = SubagentRuntime::new(store.clone());
     let backend_context = json!({"parent": "context"});
@@ -2059,7 +1519,7 @@ async fn subagent_runtime_runs_backend_and_records_sidechain() {
             workflow_id: "planner-led",
             node_id: "executor",
             parent_agent_id: "executor",
-            parent_harness_id: "review-only",
+            parent_harness_id: "native-code-edit",
             harness,
             repo_root: ".",
             task: "review helper task",
@@ -2089,7 +1549,7 @@ async fn subagent_runtime_runs_backend_and_records_sidechain() {
         .unwrap()
         .unwrap();
     assert_eq!(metadata.parent_agent_id, "executor");
-    assert_eq!(metadata.parent_harness_id, "review-only");
+    assert_eq!(metadata.parent_harness_id, "native-code-edit");
     assert_eq!(metadata.invocation_kind, "spawn");
     assert_eq!(metadata.status.as_deref(), Some("completed"));
     assert_eq!(
@@ -2143,7 +1603,7 @@ async fn subagent_runtime_records_failed_sidechain_when_backend_errors() {
 
     let (config, root, store) = fixture();
     let run_id = RunId::from_string("run-subagent-runtime-error");
-    let harness = config.harnesses.get("review-only").unwrap();
+    let harness = config.harnesses.get("native-code-edit").unwrap();
     let runtime = SubagentRuntime::new(store.clone());
     let backend_context = json!({});
 
@@ -2154,7 +1614,7 @@ async fn subagent_runtime_records_failed_sidechain_when_backend_errors() {
             workflow_id: "planner-led",
             node_id: "executor",
             parent_agent_id: "executor",
-            parent_harness_id: "review-only",
+            parent_harness_id: "native-code-edit",
             harness,
             repo_root: ".",
             task: "review helper task",
@@ -2426,110 +1886,6 @@ impl HarnessBackend for EvidencePolicyBackend {
     }
 }
 
-#[derive(Default)]
-struct RepairingBrowserGameBackend {
-    tasks: Mutex<Vec<String>>,
-}
-
-impl RepairingBrowserGameBackend {
-    fn tasks(&self) -> Vec<String> {
-        self.tasks.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl HarnessBackend for RepairingBrowserGameBackend {
-    async fn run(&self, request: HarnessRunRequest) -> Result<HarnessRunResult, HarnessError> {
-        let mut tasks = self.tasks.lock().unwrap();
-        tasks.push(request.task.clone());
-        let attempt = tasks.len();
-        drop(tasks);
-        fs::create_dir_all(&request.repo_root)
-            .map_err(|error| HarnessError::Failed(error.to_string()))?;
-        fs::write(
-            PathBuf::from(&request.repo_root).join("index.html"),
-            r#"<!doctype html>
-<html>
-  <head><link rel="stylesheet" href="style.css"><title>Snake Repair</title></head>
-  <body>
-    <canvas id="game"></canvas>
-    <button id="restart-btn">Restart</button>
-    <script src="main.js"></script>
-  </body>
-</html>
-"#,
-        )
-        .map_err(|error| HarnessError::Failed(error.to_string()))?;
-        fs::write(
-            PathBuf::from(&request.repo_root).join("style.css"),
-            "body { font-family: sans-serif; } canvas { width: 320px; height: 320px; }\n",
-        )
-        .map_err(|error| HarnessError::Failed(error.to_string()))?;
-        let repaired = request.task.contains("Previous feedback");
-        let script = if repaired {
-            r#"const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
-let score = 0;
-let gameOver = false;
-let head = { x: 5, y: 5 };
-let direction = 'right';
-let tick = 0;
-function draw() {
-  ctx.fillRect(head.x, head.y, 10, 10);
-}
-function step() {
-  tick += 1;
-  score += 1;
-  draw();
-}
-document.addEventListener('keydown', (event) => {
-  direction = event.key;
-});
-document.getElementById('restart-btn').addEventListener('click', () => {
-  score = 0;
-  gameOver = false;
-});
-setInterval(step, 120);
-window.__snakeTestState = () => ({ gameOver, score, head, direction, tick });
-"#
-        } else {
-            "const canvas = document.getElementById('game');\nconst ctx = canvas.getContext('2d');\nctx.fillRect(0, 0, 10, 10);\n"
-        };
-        fs::write(PathBuf::from(&request.repo_root).join("main.js"), script)
-            .map_err(|error| HarnessError::Failed(error.to_string()))?;
-        let mut report = FinalReport::completed(if repaired {
-            "Executor repaired browser game after verifier feedback."
-        } else {
-            "Executor produced first browser game draft."
-        });
-        report.changed_files = vec![
-            "index.html".to_owned(),
-            "style.css".to_owned(),
-            "main.js".to_owned(),
-        ];
-        report = report.with_evidence(
-            "repo_write",
-            format!("repairing-browser-game://attempt/{attempt}"),
-        );
-        Ok(HarnessRunResult {
-            status: "completed".to_owned(),
-            report: Some(report),
-            events: vec![HarnessRunEvent::new(
-                "backend.repairing_browser_game.completed",
-                json!({
-                    "attempt": attempt,
-                    "repaired": repaired,
-                    "changed_files": ["index.html", "style.css", "main.js"]
-                }),
-            )
-            .with_ref(
-                "repo_write",
-                format!("repairing-browser-game://attempt/{attempt}"),
-            )],
-        })
-    }
-}
-
 fn fixture() -> (ProjectConfig, PathBuf, RunStore) {
     let config: ProjectConfig =
         serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
@@ -2548,97 +1904,6 @@ fn test_tmp_root() -> PathBuf {
     std::env::var_os("CODER_TEST_TMPDIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
-}
-
-fn write_valid_snake_project(root: &PathBuf) {
-    fs::create_dir_all(root).unwrap();
-    fs::write(
-        root.join("index.html"),
-        r#"<!doctype html>
-<html>
-  <head><link rel="stylesheet" href="style.css"><title>Snake</title></head>
-  <body>
-    <canvas id="game"></canvas>
-    <button id="restart-btn">Restart</button>
-    <script src="main.js"></script>
-  </body>
-</html>
-"#,
-    )
-    .unwrap();
-    fs::write(root.join("style.css"), "canvas { border: 1px solid #111; }").unwrap();
-    fs::write(
-        root.join("main.js"),
-        r#"
-const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
-let gameOver = false;
-let score = 0;
-let direction = { x: 1, y: 0 };
-let head = { x: 5, y: 5 };
-let tick = 0;
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'ArrowDown') direction = { x: 0, y: 1 };
-});
-document.getElementById('restart-btn').addEventListener('click', () => {
-  gameOver = false;
-  score = 0;
-});
-function update() {
-  tick += 1;
-  ctx.fillRect(head.x, head.y, 10, 10);
-}
-setInterval(update, 100);
-window.__snakeTestState = () => ({ gameOver, score, head, direction, tick });
-"#,
-    )
-    .unwrap();
-    fs::write(root.join("README.md"), "Snake test project").unwrap();
-}
-
-struct FakeBrowserDynamicRunner {
-    output: BrowserDynamicRunOutput,
-}
-
-#[async_trait]
-impl BrowserDynamicRunner for FakeBrowserDynamicRunner {
-    async fn run(&self, _input: BrowserDynamicRunInput) -> BrowserDynamicRunOutput {
-        self.output.clone()
-    }
-}
-
-fn browser_verifier_test_request(
-    repo_root: &Path,
-    task: &str,
-    allowed_checks: Vec<&str>,
-) -> HarnessRunRequest {
-    HarnessRunRequest {
-        run_id: RunId::from_string("browser-verifier-test"),
-        workflow_id: "planner-led".to_owned(),
-        node_id: "verifier".to_owned(),
-        agent_id: "verifier".to_owned(),
-        harness_id: "browser-verification".to_owned(),
-        repo_root: repo_root.display().to_string(),
-        task: task.to_owned(),
-        backend_context: json!({
-            "coder": {
-                "agent": {"role": "verifier"},
-                "harness": {
-                    "selected_tools": [
-                        "browser_static",
-                        "gameplay_static",
-                        "snake_gameplay_static",
-                        "browser_dynamic",
-                        "gameplay_browser",
-                        "snake_gameplay_browser"
-                    ],
-                    "verification": {
-                        "allowed_checks": allowed_checks
-                    }
-                }
-            }
-        }),
-    }
 }
 
 fn workflow_planner_request_with_feedback(feedback: Option<Value>) -> HarnessRunRequest {
@@ -2666,6 +1931,7 @@ fn workflow_planner_request_with_feedback(feedback: Option<Value>) -> HarnessRun
 }
 
 fn make_workflow_native_only(config: &mut ProjectConfig) {
+    config.surface_bindings.planner_chat = None;
     for harness in config.harnesses.values_mut() {
         harness.backend = "native-rust".to_owned();
         harness.tools.clear();
@@ -2679,7 +1945,7 @@ fn make_single_node_terminal_workflow(config: &mut ProjectConfig) {
     workflow.nodes = vec![WorkflowNodeSpec {
         id: "review".to_owned(),
         agent: "executor".to_owned(),
-        harness: "review-only".to_owned(),
+        harness: "native-code-edit".to_owned(),
     }];
     workflow.edges.clear();
 }
@@ -2696,12 +1962,4 @@ fn make_required_evidence_executor_workflow(config: &mut ProjectConfig) {
     harness.backend = "native-rust".to_owned();
     harness.tools.clear();
     harness.verification.require_evidence = true;
-}
-
-fn restore_env_var(name: &str, value: Option<std::ffi::OsString>) {
-    if let Some(value) = value {
-        env::set_var(name, value);
-    } else {
-        env::remove_var(name);
-    }
 }

@@ -26,7 +26,7 @@ pub(crate) fn resolve_planner_runtime(
         .workflows
         .get(workflow_id)
         .ok_or_else(|| ApiError::bad_request(format!("workflow '{workflow_id}' was not found")))?;
-    let binding = resolve_planner_binding(config, workflow, workflow_id, planner_agent_id)?;
+    let binding = resolve_planner_binding(config, workflow_id, planner_agent_id)?;
     let agent = config.agents.get(&binding.agent_id).ok_or_else(|| {
         ApiError::bad_request(format!(
             "planner binding '{}' references missing agent '{}'",
@@ -78,105 +78,33 @@ struct PlannerRuntimeBinding {
 
 fn resolve_planner_binding(
     config: &ProjectConfig,
-    workflow: &coder_config::WorkflowSpec,
     workflow_id: &str,
     planner_agent_id: Option<&str>,
 ) -> Result<PlannerRuntimeBinding, ApiError> {
-    if let Some(planner_agent_id) = planner_agent_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        if config.agents.contains_key(planner_agent_id) {
-            return Ok(PlannerRuntimeBinding {
-                node_id: planner_agent_id.to_owned(),
-                agent_id: planner_agent_id.to_owned(),
-                harness_id: resolve_planner_harness_id(config)?,
-            });
-        }
-        if let Some(node) = workflow
-            .nodes
-            .iter()
-            .find(|node| node.agent == planner_agent_id || node.id == planner_agent_id)
-        {
-            return Ok(PlannerRuntimeBinding {
-                node_id: node.id.clone(),
-                agent_id: node.agent.clone(),
-                harness_id: node.harness.clone(),
-            });
-        }
-        return Err(ApiError::bad_request(format!(
-            "workflow '{workflow_id}' has no planner node or planner agent for '{planner_agent_id}'"
-        )));
-    }
-
-    if config
-        .agents
-        .get("planner")
-        .filter(|agent| agent.role == "planner" && agent.output_contract == "planner_conversation")
-        .is_some()
-    {
-        return Ok(PlannerRuntimeBinding {
-            node_id: "planner".to_owned(),
-            agent_id: "planner".to_owned(),
-            harness_id: resolve_planner_harness_id(config)?,
-        });
-    }
-
-    if let Some(node) = workflow.nodes.iter().find(|node| {
-        config
-            .agents
-            .get(&node.agent)
-            .map(|agent| agent.role == "planner" && agent.output_contract == "planner_conversation")
-            .unwrap_or(false)
-    }) {
-        return Ok(PlannerRuntimeBinding {
-            node_id: node.id.clone(),
-            agent_id: node.agent.clone(),
-            harness_id: node.harness.clone(),
-        });
-    }
-
-    let agent_id = config
-        .agents
-        .get("planner")
-        .filter(|agent| agent.role == "planner" && agent.output_contract == "planner_conversation")
-        .map(|_| "planner".to_owned())
-        .or_else(|| {
-            config
-                .agents
-                .iter()
-                .find(|(_, agent)| {
-                    agent.role == "planner" && agent.output_contract == "planner_conversation"
-                })
-                .map(|(agent_id, _)| agent_id.clone())
-        })
+    let binding = config
+        .surface_bindings
+        .planner_chat
+        .as_ref()
         .ok_or_else(|| {
             ApiError::bad_request(format!(
-                "workflow '{workflow_id}' has no planner node and config has no planner agent"
+                "workflow '{workflow_id}' requires an explicit surface_bindings.planner_chat agent and harness"
             ))
         })?;
-
-    Ok(PlannerRuntimeBinding {
-        node_id: agent_id.clone(),
-        agent_id,
-        harness_id: resolve_planner_harness_id(config)?,
-    })
-}
-
-fn resolve_planner_harness_id(config: &ProjectConfig) -> Result<String, ApiError> {
-    if config.harnesses.contains_key("planner-conversation") {
-        return Ok("planner-conversation".to_owned());
-    }
-    if let Some((harness_id, _)) = config
-        .harnesses
-        .iter()
-        .find(|(_, harness)| harness.backend == "planner-model")
+    if let Some(requested_agent_id) = planner_agent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter(|value| *value != binding.agent)
     {
-        return Ok(harness_id.clone());
+        return Err(ApiError::bad_request(format!(
+            "Planner Chat requested agent '{requested_agent_id}', but surface_bindings.planner_chat selects '{}'",
+            binding.agent
+        )));
     }
-    Err(ApiError::bad_request(
-        "Planner Chat requires a planner-model harness such as 'planner-conversation'",
-    ))
+    Ok(PlannerRuntimeBinding {
+        node_id: binding.agent.clone(),
+        agent_id: binding.agent.clone(),
+        harness_id: binding.harness.clone(),
+    })
 }
 
 fn ensure_planner_conversation_harness(

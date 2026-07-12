@@ -1,6 +1,6 @@
 use coder_config::{HookCommandSpec, HookEvent, ModelSpec};
 use coder_core::RunId;
-use coder_workflow::ModelToolHostContext;
+use coder_workflow::TurnContext;
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
@@ -18,7 +18,7 @@ use crate::model_tool_result_storage::maybe_persist_large_model_tool_result;
 use crate::provider_runtime::{
     model_provider_base_url, model_provider_for_settings, provider_api_key,
     provider_chat_completions_endpoint, provider_http_client_builder, provider_proxy_url_for_url,
-    redact_provider_error,
+    provider_request_max_retries, redact_provider_error, send_provider_request_with_retry,
 };
 use crate::run_token_budget::{
     check_existing_run_token_budget, provider_token_usage, record_existing_run_token_usage,
@@ -47,7 +47,7 @@ pub(crate) async fn execute_agent_model_tool_hook(
     event: HookEvent,
     requested_tool_name: &str,
     hook_input: &Value,
-    host_context: &ModelToolHostContext,
+    host_context: &TurnContext,
     context: &ModelToolHookContext,
 ) -> ModelToolHookExecution {
     let HookCommandSpec::Agent {
@@ -133,30 +133,31 @@ pub(crate) async fn execute_agent_model_tool_hook(
 
     let url = provider_chat_completions_endpoint(&base_url);
     let proxy_url = provider_proxy_url_for_url(&provider_settings, &provider, Some(&url));
-    let client =
-        match provider_http_client_builder(&url, proxy_url.as_deref()).and_then(|builder| {
+    let client = match provider_http_client_builder(&provider_settings, &provider, &url).and_then(
+        |builder| {
             builder
                 .timeout(Duration::from_secs(timeout_seconds))
                 .build()
                 .map_err(|error| error.to_string())
-        }) {
-            Ok(client) => client,
-            Err(error) => {
-                let error = redact_provider_error(
-                    &error,
-                    &[&api_key, &base_url, proxy_url.as_deref().unwrap_or("")],
-                );
-                return agent_hook_non_blocking_error(
-                    &report_context,
-                    "client_build_error",
-                    &error,
-                    None,
-                    0,
-                    0,
-                )
-                .with_processed_prompt_preview(prompt_preview, prompt_truncated);
-            }
-        };
+        },
+    ) {
+        Ok(client) => client,
+        Err(error) => {
+            let error = redact_provider_error(
+                &error,
+                &[&api_key, &base_url, proxy_url.as_deref().unwrap_or("")],
+            );
+            return agent_hook_non_blocking_error(
+                &report_context,
+                "client_build_error",
+                &error,
+                None,
+                0,
+                0,
+            )
+            .with_processed_prompt_preview(prompt_preview, prompt_truncated);
+        }
+    };
 
     let mut messages = vec![
         json!({
@@ -203,37 +204,40 @@ pub(crate) async fn execute_agent_model_tool_hook(
             .with_processed_prompt_preview(prompt_preview, prompt_truncated);
         };
         let request_body = agent_hook_completion_body(&provider, &model_name, &messages);
-        let response = match client
-            .post(&url)
-            .bearer_auth(&api_key)
-            .timeout(remaining_timeout)
-            .json(&request_body)
-            .send()
-            .await
+        let response = match tokio::time::timeout(
+            remaining_timeout,
+            send_provider_request_with_retry(
+                || client.post(&url).bearer_auth(&api_key).json(&request_body),
+                None,
+                provider_request_max_retries(&provider_settings, &provider),
+            ),
+        )
+        .await
         {
-            Ok(response) => response,
-            Err(error) => {
-                let is_timeout = error.is_timeout();
-                let error_kind = if is_timeout {
-                    "request_timeout"
-                } else {
-                    "request_error"
-                };
-                let raw_error = if is_timeout {
-                    format!(
-                        "agent hook model request timed out after {timeout_seconds} second(s): {error}"
-                    )
-                } else {
-                    format!("agent hook model request failed: {error}")
-                };
+            Ok(Ok(outcome)) => outcome.response,
+            Ok(Err(error)) => {
+                let raw_error = format!("agent hook model request failed: {error}");
                 let error = redact_provider_error(
                     &raw_error,
                     &[&api_key, &base_url, proxy_url.as_deref().unwrap_or("")],
                 );
                 return agent_hook_non_blocking_error(
                     &report_context,
-                    error_kind,
+                    "request_error",
                     &error,
+                    None,
+                    assistant_turns,
+                    tool_call_count,
+                )
+                .with_processed_prompt_preview(prompt_preview, prompt_truncated);
+            }
+            Err(_) => {
+                return agent_hook_non_blocking_error(
+                    &report_context,
+                    "request_timeout",
+                    &format!(
+                        "Agent hook model request timed out after {timeout_seconds} second(s)."
+                    ),
                     None,
                     assistant_turns,
                     tool_call_count,
@@ -709,7 +713,7 @@ fn agent_hook_assistant_message_for_history(message: &Value) -> Value {
 async fn execute_agent_hook_model_tool_call(
     state: &ApiState,
     tool_call: &Value,
-    host_context: &ModelToolHostContext,
+    host_context: &TurnContext,
 ) -> Value {
     let tool_call_id = agent_hook_tool_call_id(tool_call);
     let tool_name = agent_hook_tool_call_name(tool_call).unwrap_or_else(|| "unknown".to_owned());
@@ -815,8 +819,7 @@ fn agent_hook_structured_result(
             "hook_json_output": output.raw,
             "blocking_error": blocking_error.clone(),
             "runtime_contract": agent_hook_runtime_contract(),
-            "available_tools_policy": agent_hook_available_tools_policy(),
-            "claude_sources": agent_hook_claude_sources()
+            "available_tools_policy": agent_hook_available_tools_policy()
         }),
         blocking_error,
         effects: ModelToolHookEffects::default(),
@@ -851,8 +854,7 @@ fn agent_hook_non_blocking_error(
         "hook_json_output": Value::Null,
         "hook_output_validation_error": error,
         "runtime_contract": agent_hook_runtime_contract(),
-        "available_tools_policy": agent_hook_available_tools_policy(),
-        "claude_sources": agent_hook_claude_sources()
+        "available_tools_policy": agent_hook_available_tools_policy()
     });
     if let Some(status_code) = status_code {
         if let Value::Object(payload) = &mut payload {
@@ -894,8 +896,7 @@ fn agent_hook_cancelled(
             "hook_agent_id": context.hook_agent_id,
             "structured_output_tool": CLAUDE_SYNTHETIC_OUTPUT_TOOL_NAME,
             "runtime_contract": agent_hook_runtime_contract(),
-            "available_tools_policy": agent_hook_available_tools_policy(),
-            "claude_sources": agent_hook_claude_sources()
+            "available_tools_policy": agent_hook_available_tools_policy()
         }),
         blocking_error: None,
         effects: ModelToolHookEffects::default(),
@@ -934,17 +935,6 @@ fn agent_hook_available_tools_policy() -> Value {
             "patch_preview",
             "patch_apply",
             "cancel_background"
-        ],
-        "claude_filter_reference": "ALL_AGENT_DISALLOWED_TOOLS"
+        ]
     })
-}
-
-fn agent_hook_claude_sources() -> Vec<&'static str> {
-    vec![
-        "src/utils/hooks/execAgentHook.ts",
-        "src/utils/hooks/hookHelpers.ts createStructuredOutputTool",
-        "src/utils/hooks/hookHelpers.ts registerStructuredOutputEnforcement",
-        "src/constants/tools.ts ALL_AGENT_DISALLOWED_TOOLS",
-        "src/utils/agentToolFilter.ts filterParentToolsForFork",
-    ]
 }

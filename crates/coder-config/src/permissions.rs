@@ -16,14 +16,6 @@ pub const PERMISSION_FIELDS: &[&str] = &[
     "deploy",
 ];
 
-pub const CLAUDE_PERMISSION_CONTRACT_SOURCES: &[&str] = &[
-    "types/permissions.ts",
-    "utils/permissions/PermissionMode.ts",
-    "utils/permissions/PermissionRule.ts",
-    "utils/permissions/PermissionUpdateSchema.ts",
-    "utils/permissions/permissions.ts",
-];
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PermissionMode {
     #[default]
@@ -231,8 +223,6 @@ pub struct PermissionSettingsRecord {
     pub updated_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_update_source: Option<String>,
-    #[serde(default)]
-    pub claude_sources: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -295,18 +285,6 @@ impl PermissionSettingsRecord {
             updates_applied: 0,
             updated_at: None,
             last_update_source: None,
-            claude_sources: CLAUDE_PERMISSION_CONTRACT_SOURCES
-                .iter()
-                .map(|source| (*source).to_owned())
-                .chain(
-                    [
-                        "utils/permissions/PermissionUpdate.ts supportsPersistence",
-                        "utils/permissions/PermissionUpdate.ts persistPermissionUpdate",
-                    ]
-                    .iter()
-                    .map(|source| (*source).to_owned()),
-                )
-                .collect(),
         }
     }
 }
@@ -768,7 +746,6 @@ pub fn permission_policy_explanation(policy: &PermissionPolicy) -> Value {
         .collect::<Vec<_>>();
     json!({
         "contract": "coder.permission_policy.v1",
-        "claude_sources": CLAUDE_PERMISSION_CONTRACT_SOURCES,
         "mode": policy.mode,
         "mode_semantics": {
             "source": "config.permissions.mode",

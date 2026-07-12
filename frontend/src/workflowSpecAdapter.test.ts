@@ -64,12 +64,11 @@ test("exports planner/executor canvas to Rust workflow config", () => {
   const workflow = config.workflows["default-planner-led"];
 
   assert.equal(config.version, 1);
-  assert.equal(workflow.nodes.length, 3);
+  assert.equal(workflow.nodes.length, 2);
   assert.equal(workflow.nodes[0].id, "executor");
-  assert.equal(workflow.nodes[1].id, "verifier");
-  assert.equal(workflow.nodes[2].id, "workflow-planner");
+  assert.equal(workflow.nodes[1].id, "workflow-planner");
   assert.equal(workflow.max_rounds, defaultPlannerLedAgentWorkflow.loop_policy.max_auto_rounds);
-  assert.equal(workflow.stop.final_report_agent, "verifier");
+  assert.equal(workflow.stop.final_report_agent, "workflow-planner");
 });
 
 test("roundtrips Rust workflow export back to an equivalent canvas", () => {
@@ -118,7 +117,7 @@ test("maps native read-only harness profiles to native Rust backend", () => {
     harness_bindings: {
       planning_chat: { profile_id: "review-only-chat", provider_id: "native-rust" },
       workflow_supervisor: { profile_id: "review-only-supervisor", provider_id: "native-rust" },
-      task_execution: { profile_id: "review-only-task", provider_id: "native-rust" },
+      task_execution: { profile_id: "browser-review-task", provider_id: "native-rust" },
       agent_overrides: {}
     }
   };
@@ -126,9 +125,9 @@ test("maps native read-only harness profiles to native Rust backend", () => {
 
   assert.equal(config.harnesses["review-only-chat"].backend, "planner-model");
   assert.equal(config.harnesses["review-only-supervisor"].backend, "planner-model");
-  assert.equal(config.harnesses["review-only-task"].backend, "native-rust");
-  assert.deepEqual(config.harnesses["review-only-task"].memory.read, ["workflow", "run"]);
-  assert.equal(config.workflows["default-planner-led"].nodes[0].harness, "review-only-task");
+  assert.equal(config.harnesses["browser-review-task"].backend, "native-rust");
+  assert.deepEqual(config.harnesses["browser-review-task"].memory.read, ["workflow", "run"]);
+  assert.equal(config.workflows["default-planner-led"].nodes[0].harness, "browser-review-task");
 });
 
 test("validates invalid Rust specs with user-facing errors", () => {
@@ -190,7 +189,7 @@ test("maps Rust default workflow response into the canvas model", () => {
 
   assert.equal(imported.id, "default-planner-led");
   assert.equal(imported.name, defaultPlannerLedAgentWorkflow.name);
-  assert.equal(imported.agents.length, 4);
+  assert.equal(imported.agents.length, 3);
   assert.equal(imported.edges.at(-1)?.loop, true);
 });
 
@@ -395,7 +394,8 @@ test("desktop skeleton keeps API fallback and desktop scripts opt-in", () => {
   assert.ok(tauriConfig.includes("\"devUrl\": \"http://127.0.0.1:5173\""));
   assert.ok(tauriConfig.includes("\"frontendDist\": \"../frontend/dist\""));
   assert.ok(rootCargo.includes("exclude = [\"src-tauri\"]"));
-  assert.ok(serverSource.includes("CorsLayer::permissive()"));
+  assert.ok(serverSource.includes("local_api_transport::cors_layer()"));
+  assert.ok(!serverSource.includes("CorsLayer::permissive()"));
   assert.ok(docs.includes("npm run desktop:dev"));
   assert.ok(docs.includes("npm run desktop:build"));
 });
@@ -936,7 +936,7 @@ test("Review and Undo docs cover binary and untracked file handling", () => {
   assert.ok(docs.includes("git reset --hard"));
 });
 
-test("Rust v3 smoke exercises Planner to Review end-to-end path", () => {
+test("Rust v3 smoke uses the product Executor to Workflow Planner topology", () => {
   const smokeScript = readFileSync("../scripts/smoke-rust-v3.ps1", "utf8");
 
   for (const needle of [
@@ -948,6 +948,9 @@ test("Rust v3 smoke exercises Planner to Review end-to-end path", () => {
     "Send-PlannerTurn",
     "should_start_workflow",
     "/start-work",
+    'harness = "native-code-edit"',
+    'agent = "workflow-planner"',
+    'final_report_agent = "workflow-planner"',
     "timeline_url",
     "/report/preview",
     "/changes",
@@ -962,6 +965,11 @@ test("Rust v3 smoke exercises Planner to Review end-to-end path", () => {
       throw new Error(`smoke-rust-v3.ps1 missing ${needle}`);
     }
   }
+  assert.ok(!smokeScript.includes('harness = "review-only"'));
+  assert.ok(
+    smokeScript.indexOf('@{ id = "executor"') <
+      smokeScript.indexOf('@{ id = "workflow-planner"')
+  );
 });
 
 test("Provider Settings exposes DeepSeek preset and exact test result UI", () => {
@@ -1005,7 +1013,10 @@ test("Provider Settings exposes DeepSeek preset and exact test result UI", () =>
   assert.ok(appSource.includes("showMockMode={debugUiEnabled}"));
   assert.ok(liveSmokeScript.includes("CODER_LIVE_LLM_SMOKE"));
   assert.ok(liveSmokeScript.includes("should_start_workflow"));
-  assert.ok(liveSmokeScript.includes("Start Work returned neither a run_id nor a Planner clarification."));
+  assert.ok(liveSmokeScript.includes("execution_mode=read_only"));
+  assert.ok(liveSmokeScript.includes("native-model-tool-loop"));
+  assert.ok(liveSmokeScript.includes("provider-backed-bounded-planner"));
+  assert.ok(liveSmokeScript.includes("exposed the provider API key"));
   assert.ok(providerDocs.includes("$env:CODER_LIVE_LLM_SMOKE=\"1\""));
   assert.ok(providerDocs.includes("does not write plaintext"));
   assert.ok(providerDocs.includes("or print them"));
@@ -1027,15 +1038,17 @@ test("Planner Chat shows provider setup before chat when credentials are missing
 
 test("live selftest covers generic runtime boundary probes", () => {
   const liveSelftestScript = readFileSync("../scripts/live-coder-selftest-suite.ps1", "utf8");
+  const liveSelftestProbes = readFileSync("../scripts/lib/live-selftest-probes.ps1", "utf8");
 
-  assert.ok(liveSelftestScript.includes("Invoke-RuntimeBoundaryProbe"));
-  assert.ok(liveSelftestScript.includes("pre_tool_use_hooks"));
-  assert.ok(liveSelftestScript.includes("command_run"));
-  assert.ok(liveSelftestScript.includes("BashOutputTool"));
-  assert.ok(liveSelftestScript.includes("TaskStop"));
-  assert.ok(liveSelftestScript.includes("agent_subagent"));
-  assert.ok(liveSelftestScript.includes("TaskOutput"));
-  assert.ok(liveSelftestScript.includes("ToolName \"TaskStop\""));
+  assert.ok(liveSelftestScript.includes("live-selftest-probes.ps1"));
+  assert.ok(liveSelftestProbes.includes("Invoke-RuntimeBoundaryProbe"));
+  assert.ok(liveSelftestProbes.includes("pre_tool_use_hooks"));
+  assert.ok(liveSelftestProbes.includes("command_run"));
+  assert.ok(liveSelftestProbes.includes("read_command_output"));
+  assert.ok(liveSelftestProbes.includes("cancel_command_background"));
+  assert.ok(liveSelftestProbes.includes("agent_subagent"));
+  assert.ok(liveSelftestProbes.includes("read_subagent_status"));
+  assert.ok(liveSelftestProbes.includes("cancel_subagent_background"));
 });
 
 function renderPlannerChat(

@@ -1,8 +1,4 @@
 use std::{
-    fs,
-    io::Read,
-    path::PathBuf,
-    process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -13,7 +9,10 @@ use axum::{
 };
 use coder_core::RunId;
 use coder_store::{CommandBackgroundTaskRecord, RepoEvidenceKind, RepoEvidenceRef, RunStore};
-use coder_tools::{preview_command, CommandPolicyDecision, CommandRunEvidence};
+use coder_tools::{
+    preview_command, start_command_process, CommandPolicyDecision, CommandProcessHandle,
+    CommandProcessOutputState, CommandProcessRequest, CommandRunEvidence,
+};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -21,61 +20,16 @@ use super::{
     ensure_tool_boundary, record_command_events, write_tool_evidence, ApiError, ApiState,
     CommandBackgroundCancelResponse, CommandBackgroundOutputResponse,
     CommandBackgroundStartRequest, CommandBackgroundStartResponse, CommandBackgroundStatusResponse,
+    CommandWriteStdinRequest, CommandWriteStdinResponse,
 };
 
 #[derive(Debug)]
-struct BackgroundOutputTail {
-    bytes: Vec<u8>,
-    max_bytes: usize,
+struct BackgroundOutputSnapshot {
+    output: String,
     truncated: bool,
-}
-
-impl BackgroundOutputTail {
-    fn new(max_bytes: usize) -> Self {
-        Self {
-            bytes: Vec::new(),
-            max_bytes: max_bytes.clamp(1, coder_tools::DEFAULT_MAX_COMMAND_OUTPUT_BYTES),
-            truncated: false,
-        }
-    }
-
-    fn append(&mut self, chunk: &[u8]) {
-        if chunk.is_empty() {
-            return;
-        }
-        if chunk.len() >= self.max_bytes {
-            self.bytes.clear();
-            self.bytes
-                .extend_from_slice(&chunk[chunk.len() - self.max_bytes..]);
-            self.truncated = true;
-            return;
-        }
-        let overflow = self
-            .bytes
-            .len()
-            .saturating_add(chunk.len())
-            .saturating_sub(self.max_bytes);
-        if overflow > 0 {
-            self.bytes.drain(0..overflow);
-            self.truncated = true;
-        }
-        self.bytes.extend_from_slice(chunk);
-    }
-
-    fn snapshot(&self) -> (String, bool) {
-        (
-            String::from_utf8_lossy(&self.bytes).to_string(),
-            self.truncated,
-        )
-    }
-
-    fn snapshot_bytes(&self) -> Vec<u8> {
-        self.bytes.clone()
-    }
-
-    fn byte_len(&self) -> u64 {
-        self.bytes.len() as u64
-    }
+    cursor: u64,
+    next_cursor: u64,
+    gap: bool,
 }
 
 #[derive(Debug)]
@@ -91,18 +45,37 @@ pub(super) struct BackgroundCommandTask {
     status: String,
     created_at_ms: u64,
     updated_at_ms: u64,
-    output: BackgroundOutputTail,
     output_ref: String,
     max_output_bytes: usize,
-    child: Option<Child>,
-    cancel_requested: bool,
+    process: Option<CommandProcessHandle>,
     result: Option<CommandRunEvidence>,
     evidence_ref: Option<RepoEvidenceRef>,
     error: Option<String>,
 }
 
 impl BackgroundCommandTask {
+    fn retained_output(&self) -> CommandProcessOutputState {
+        if let Some(process) = &self.process {
+            return process.retained_output();
+        }
+        let bytes = self
+            .result
+            .as_ref()
+            .map(|result| result.output.as_bytes().to_vec())
+            .unwrap_or_default();
+        CommandProcessOutputState {
+            total_bytes: bytes.len() as u64,
+            bytes,
+            start_offset: 0,
+            truncated: self
+                .result
+                .as_ref()
+                .is_some_and(|result| result.output_truncated),
+        }
+    }
+
     fn to_record(&self) -> CommandBackgroundTaskRecord {
+        let output = self.retained_output();
         CommandBackgroundTaskRecord {
             task_id: self.task_id.clone(),
             run_id: self.run_id.clone(),
@@ -116,8 +89,10 @@ impl BackgroundCommandTask {
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
             output_ref: self.output_ref.clone(),
-            output_bytes: self.output.byte_len(),
-            output_truncated: self.output.truncated,
+            output_bytes: output.bytes.len() as u64,
+            output_start_offset: output.start_offset,
+            output_total_bytes: output.total_bytes,
+            output_truncated: output.truncated,
             max_output_bytes: self.max_output_bytes,
             result: self
                 .result
@@ -128,16 +103,37 @@ impl BackgroundCommandTask {
         }
     }
 
-    fn status_response(&self) -> CommandBackgroundStatusResponse {
-        let (output_preview, output_truncated) = self.output.snapshot();
+    fn status_response_since(&self, cursor: Option<u64>) -> CommandBackgroundStatusResponse {
+        let output = if let Some(process) = &self.process {
+            let snapshot = process.snapshot(cursor);
+            BackgroundOutputSnapshot {
+                output: snapshot.output,
+                truncated: snapshot.output_truncated,
+                cursor: snapshot.output_cursor,
+                next_cursor: snapshot.next_output_cursor,
+                gap: snapshot.output_gap,
+            }
+        } else {
+            let output = self.retained_output();
+            BackgroundOutputSnapshot {
+                output: String::from_utf8_lossy(&output.bytes).to_string(),
+                truncated: output.truncated,
+                cursor: output.start_offset,
+                next_cursor: output.total_bytes,
+                gap: false,
+            }
+        };
         CommandBackgroundStatusResponse {
             task_id: self.task_id.clone(),
             status: self.status.clone(),
             command: self.command.clone(),
             created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms,
-            output_preview,
-            output_truncated,
+            output_preview: output.output,
+            output_truncated: output.truncated,
+            output_cursor: output.cursor,
+            next_output_cursor: output.next_cursor,
+            output_gap: output.gap,
             evidence_ref: self.evidence_ref.clone(),
             result: self.result.clone(),
             error: self.error.clone(),
@@ -145,12 +141,15 @@ impl BackgroundCommandTask {
     }
 
     fn output_response(&self) -> CommandBackgroundOutputResponse {
-        let (output, output_truncated) = self.output.snapshot();
+        let status = self.status_response_since(None);
         CommandBackgroundOutputResponse {
             task_id: self.task_id.clone(),
             status: self.status.clone(),
-            output,
-            output_truncated,
+            output: status.output_preview,
+            output_truncated: status.output_truncated,
+            output_cursor: status.output_cursor,
+            next_output_cursor: status.next_output_cursor,
+            output_gap: status.output_gap,
         }
     }
 }
@@ -173,6 +172,7 @@ pub(super) fn start_background_command_task(
         argv,
         timeout_seconds,
         max_output_bytes,
+        interactive,
         source,
         sandbox,
         approved,
@@ -184,12 +184,13 @@ pub(super) fn start_background_command_task(
     let approved = approved.unwrap_or(false);
     let timeout_seconds = effective_background_command_timeout(timeout_seconds);
     let max_output_bytes = effective_background_command_output_limit(max_output_bytes);
+    let interactive = interactive.unwrap_or(false);
     let preview = preview_command(&repo_root, &cwd, argv.clone(), &source, sandbox)?;
-    let task_id = Uuid::new_v4().to_string();
-    let output_ref = command_background_output_ref(&task_id);
     let now = unix_time_millis();
 
     if preview.requires_approval && !approved {
+        let task_id = format!("blocked-{}", Uuid::new_v4());
+        let output_ref = command_background_output_ref(&task_id);
         let output = format!(
             "Check command requires explicit approval: {}",
             preview.command
@@ -218,7 +219,7 @@ pub(super) fn start_background_command_task(
             &evidence,
         )?;
         let response_evidence_ref = evidence_ref.clone();
-        let mut task = BackgroundCommandTask {
+        let task = BackgroundCommandTask {
             task_id: task_id.clone(),
             run_id: run_id.clone(),
             repo_root: preview.repo_root,
@@ -230,16 +231,13 @@ pub(super) fn start_background_command_task(
             status: "blocked".to_owned(),
             created_at_ms: now,
             updated_at_ms: now,
-            output: BackgroundOutputTail::new(max_output_bytes),
             output_ref,
             max_output_bytes,
-            child: None,
-            cancel_requested: false,
+            process: None,
             result: Some(evidence.clone()),
             evidence_ref,
             error: None,
         };
-        task.output.append(evidence.output.as_bytes());
         persist_background_command_task(&state.store, &task)?;
         return Ok(background_start_response(
             &task_id,
@@ -249,24 +247,23 @@ pub(super) fn start_background_command_task(
         ));
     }
 
-    let (repo_root_path, workdir, cwd_display) = resolve_background_command_dir(&repo_root, &cwd)?;
-    let mut child = Command::new(&preview.argv[0])
-        .args(&preview.argv[1..])
-        .current_dir(&workdir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            ApiError::internal(format!("failed to spawn background command: {error}"))
-        })?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
+    let process = start_command_process(
+        preview.clone(),
+        CommandProcessRequest {
+            timeout_seconds,
+            max_output_bytes,
+            source,
+            interactive,
+            initial_stdin: None,
+        },
+    )?;
+    let task_id = process.process_id().to_owned();
+    let output_ref = command_background_output_ref(&task_id);
     let task = Arc::new(Mutex::new(BackgroundCommandTask {
         task_id: task_id.clone(),
         run_id: run_id.clone(),
-        repo_root: repo_root_path.display().to_string(),
-        cwd: cwd_display,
+        repo_root: preview.repo_root.clone(),
+        cwd: preview.cwd.clone(),
         argv: preview.argv.clone(),
         command: preview.command.clone(),
         approval_key: preview.approval_key.clone(),
@@ -274,19 +271,15 @@ pub(super) fn start_background_command_task(
         status: "running".to_owned(),
         created_at_ms: now,
         updated_at_ms: now,
-        output: BackgroundOutputTail::new(max_output_bytes),
         output_ref,
         max_output_bytes,
-        child: Some(child),
-        cancel_requested: false,
+        process: Some(process.clone()),
         result: None,
         evidence_ref: None,
         error: None,
     }));
     if let Err(error) = persist_background_command_task(&state.store, &task.lock().unwrap()) {
-        if let Some(child) = task.lock().unwrap().child.as_mut() {
-            let _ = child.kill();
-        }
+        let _ = process.cancel();
         return Err(error);
     }
     state
@@ -294,22 +287,12 @@ pub(super) fn start_background_command_task(
         .lock()
         .unwrap()
         .insert(task_id.clone(), task.clone());
-    let mut output_readers = Vec::new();
-    if let Some(reader) = spawn_background_output_reader(state.store.clone(), task.clone(), stdout)
-    {
-        output_readers.push(reader);
-    }
-    if let Some(reader) = spawn_background_output_reader(state.store.clone(), task.clone(), stderr)
-    {
-        output_readers.push(reader);
-    }
-    spawn_background_command_worker(
+    spawn_background_command_projection(
         task.clone(),
         state.clone(),
         task_id.clone(),
         run_id,
-        timeout_seconds,
-        output_readers,
+        process,
     );
 
     Ok(background_start_response(
@@ -344,11 +327,19 @@ pub(super) fn background_command_status(
     state: &ApiState,
     task_id: &str,
 ) -> Result<CommandBackgroundStatusResponse, ApiError> {
+    background_command_status_since(state, task_id, None)
+}
+
+pub(super) fn background_command_status_since(
+    state: &ApiState,
+    task_id: &str,
+    cursor: Option<u64>,
+) -> Result<CommandBackgroundStatusResponse, ApiError> {
     if let Some(task) = find_background_command_task(state, task_id) {
-        let response = task.lock().unwrap().status_response();
+        let response = task.lock().unwrap().status_response_since(cursor);
         return Ok(response);
     }
-    recovered_background_command_status(state, task_id)
+    recovered_background_command_status(state, task_id, cursor)
 }
 
 pub(super) async fn cancel_background_command_endpoint(
@@ -362,34 +353,66 @@ pub(super) async fn cancel_background_command_endpoint(
         )?));
     };
     let mut task = task.lock().unwrap();
-    let mut cancelled = false;
-    match task.status.as_str() {
-        "running" => {
-            task.cancel_requested = true;
-            task.status = "cancelled".to_owned();
-            task.updated_at_ms = unix_time_millis();
-            if let Some(child) = task.child.as_mut() {
-                let _ = child.kill();
-            }
-            persist_background_command_task(&state.store, &task)?;
-            cancelled = true;
-        }
-        "cancelled" => {
-            cancelled = true;
-        }
-        _ => {}
-    }
-    let status = task.status.clone();
-    let terminal = status != "running";
-    drop(task);
-    if terminal {
-        state.background_commands.lock().unwrap().remove(&task_id);
-    }
+    let cancelled = if let Some(process) = &task.process {
+        process.cancel()?
+    } else {
+        task.status == "cancelled"
+    };
+    task.updated_at_ms = unix_time_millis();
+    persist_background_command_task(&state.store, &task)?;
+    let status = if cancelled {
+        "cancelled".to_owned()
+    } else {
+        task.status.clone()
+    };
     Ok(Json(CommandBackgroundCancelResponse {
         task_id,
         cancelled,
         status,
     }))
+}
+
+pub(super) async fn write_background_command_stdin_endpoint(
+    State(state): State<ApiState>,
+    Path(task_id): Path<String>,
+    Json(request): Json<CommandWriteStdinRequest>,
+) -> Result<Json<CommandWriteStdinResponse>, ApiError> {
+    ensure_tool_boundary("write_stdin")?;
+    Ok(Json(write_background_command_stdin(
+        &state,
+        &task_id,
+        &request.input,
+        request.close_stdin,
+    )?))
+}
+
+pub(super) fn write_background_command_stdin(
+    state: &ApiState,
+    task_id: &str,
+    input: &str,
+    close_stdin: bool,
+) -> Result<CommandWriteStdinResponse, ApiError> {
+    let task = find_background_command_task(state, task_id)
+        .ok_or_else(|| ApiError::not_found(format!("live command process not found: {task_id}")))?;
+    let mut task = task.lock().unwrap();
+    if task.status != "running" {
+        return Err(ApiError::bad_request(format!(
+            "command process {task_id} is not running"
+        )));
+    }
+    let process = task
+        .process
+        .as_ref()
+        .ok_or_else(|| ApiError::bad_request(format!("command process {task_id} has exited")))?;
+    let bytes_written = process.write_stdin(input, close_stdin)?;
+    task.updated_at_ms = unix_time_millis();
+    persist_background_command_task(&state.store, &task)?;
+    Ok(CommandWriteStdinResponse {
+        task_id: task_id.to_owned(),
+        status: task.status.clone(),
+        bytes_written,
+        stdin_closed: close_stdin,
+    })
 }
 
 fn find_background_command_task(
@@ -404,128 +427,41 @@ fn find_background_command_task(
         .cloned()
 }
 
-fn spawn_background_output_reader(
-    store: RunStore,
-    task: Arc<Mutex<BackgroundCommandTask>>,
-    stream: Option<impl Read + Send + 'static>,
-) -> Option<std::thread::JoinHandle<()>> {
-    let mut stream = stream?;
-    Some(std::thread::spawn(move || {
-        let mut buffer = [0_u8; 8192];
-        loop {
-            match stream.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(read) => {
-                    let mut task = task.lock().unwrap();
-                    task.output.append(&buffer[..read]);
-                    task.updated_at_ms = unix_time_millis();
-                    if let Err(error) = persist_background_command_task(&store, &task) {
-                        task.error = Some(format!(
-                            "failed to persist background command output: {}",
-                            error.message
-                        ));
-                    }
-                }
-                Err(error) => {
-                    let mut task = task.lock().unwrap();
-                    task.error = Some(format!("failed to read background command output: {error}"));
-                    task.updated_at_ms = unix_time_millis();
-                    let _ = persist_background_command_task(&store, &task);
-                    break;
-                }
-            }
-        }
-    }))
-}
-
-fn spawn_background_command_worker(
+fn spawn_background_command_projection(
     task: Arc<Mutex<BackgroundCommandTask>>,
     state: ApiState,
     task_id: String,
     run_id: Option<String>,
-    timeout_seconds: Option<u64>,
-    output_readers: Vec<std::thread::JoinHandle<()>>,
+    process: CommandProcessHandle,
 ) {
     std::thread::spawn(move || {
-        let started = std::time::Instant::now();
-        let mut timed_out = false;
-        let mut returncode = None;
-        let mut passed = false;
         loop {
+            let snapshot = process.wait(Some(Duration::from_millis(100)));
             let mut task_guard = task.lock().unwrap();
-            let cancel_requested = task_guard.cancel_requested;
-            if let Some(child) = task_guard.child.as_mut() {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        returncode = status.code();
-                        passed = !timed_out && !cancel_requested && status.success();
-                        task_guard.child = None;
-                        break;
-                    }
-                    Ok(None) => {
-                        if let Some(timeout_seconds) = timeout_seconds {
-                            if !cancel_requested
-                                && !timed_out
-                                && started.elapsed() >= Duration::from_secs(timeout_seconds)
-                            {
-                                timed_out = true;
-                                let _ = child.kill();
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        task_guard.error =
-                            Some(format!("failed to poll background command status: {error}"));
-                        task_guard.child = None;
-                        break;
-                    }
-                }
-            } else {
+            task_guard.updated_at_ms = unix_time_millis();
+            if let Err(error) = persist_background_command_task(&state.store, &task_guard) {
+                task_guard.error = Some(format!(
+                    "failed to persist command process output: {}",
+                    error.message
+                ));
+            }
+            if snapshot.status != "running" {
                 break;
             }
-            drop(task_guard);
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        for reader in output_readers {
-            let _ = reader.join();
         }
 
-        let (status, repo_root, evidence, output_repo_root) = {
+        let Some(evidence) = process.evidence() else {
+            let mut task_guard = task.lock().unwrap();
+            task_guard.status = "failed".to_owned();
+            task_guard.error = Some("command process completed without evidence".to_owned());
+            task_guard.updated_at_ms = unix_time_millis();
+            let _ = persist_background_command_task(&state.store, &task_guard);
+            state.background_commands.lock().unwrap().remove(&task_id);
+            return;
+        };
+        let (status, repo_root) = {
             let task_guard = task.lock().unwrap();
-            let cancelled = task_guard.cancel_requested;
-            let status = if cancelled {
-                "cancelled"
-            } else if timed_out {
-                "timeout"
-            } else if passed {
-                "completed"
-            } else {
-                "failed"
-            };
-            let (output, output_truncated) = task_guard.output.snapshot();
-            let evidence = CommandRunEvidence {
-                repo_root: task_guard.repo_root.clone(),
-                cwd: task_guard.cwd.clone(),
-                argv: task_guard.argv.clone(),
-                command: task_guard.command.clone(),
-                status: status.to_owned(),
-                passed,
-                blocked: false,
-                requires_approval: false,
-                approval_key: task_guard.approval_key.clone(),
-                returncode,
-                output,
-                output_truncated,
-                timed_out,
-                policy: task_guard.policy.clone(),
-                evidence_kind: "command_evidence".to_owned(),
-            };
-            (
-                status.to_owned(),
-                task_guard.repo_root.clone(),
-                evidence,
-                task_guard.repo_root.clone(),
-            )
+            (evidence.status.clone(), task_guard.repo_root.clone())
         };
 
         match persist_background_command_evidence(
@@ -548,7 +484,7 @@ fn spawn_background_command_worker(
                 task_guard.result = Some(evidence);
                 task_guard.error = Some(format!(
                     "background command completed, but evidence write failed for {}: {}",
-                    output_repo_root, error.message
+                    repo_root, error.message
                 ));
                 task_guard.updated_at_ms = unix_time_millis();
                 let _ = persist_background_command_task(&state.store, &task_guard);
@@ -562,8 +498,9 @@ fn persist_background_command_task(
     store: &RunStore,
     task: &BackgroundCommandTask,
 ) -> Result<(), ApiError> {
+    let output = task.retained_output();
     store
-        .write_command_background_output_tail(&task.task_id, &task.output.snapshot_bytes())
+        .write_command_background_output_tail(&task.task_id, &output.bytes)
         .map_err(|error| ApiError::internal(error.to_string()))?;
     store
         .write_command_background_task_record(&task.to_record())
@@ -574,6 +511,7 @@ fn persist_background_command_task(
 fn recovered_background_command_status(
     state: &ApiState,
     task_id: &str,
+    cursor: Option<u64>,
 ) -> Result<CommandBackgroundStatusResponse, ApiError> {
     let mut record = read_command_background_task_record(state, task_id)?;
     if record.status == "running" {
@@ -592,7 +530,9 @@ fn recovered_background_command_status(
         .store
         .read_command_background_output_tail(&record.task_id, record.max_output_bytes)
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    let store_truncated = output.truncated;
     let result = command_result_from_record(&record);
+    let output = recovered_output_snapshot(&record, output.output.as_bytes(), cursor);
     Ok(CommandBackgroundStatusResponse {
         task_id: record.task_id,
         status: record.status,
@@ -600,7 +540,10 @@ fn recovered_background_command_status(
         created_at_ms: record.created_at_ms,
         updated_at_ms: record.updated_at_ms,
         output_preview: output.output,
-        output_truncated: record.output_truncated || output.truncated,
+        output_truncated: record.output_truncated || store_truncated,
+        output_cursor: output.cursor,
+        next_output_cursor: output.next_cursor,
+        output_gap: output.gap,
         evidence_ref: record.evidence_ref,
         result,
         error: record.error,
@@ -628,12 +571,45 @@ fn recovered_background_command_output(
         .store
         .read_command_background_output_tail(&record.task_id, record.max_output_bytes)
         .map_err(|error| ApiError::internal(error.to_string()))?;
+    let store_truncated = output.truncated;
+    let output = recovered_output_snapshot(&record, output.output.as_bytes(), None);
     Ok(CommandBackgroundOutputResponse {
         task_id: record.task_id,
         status: record.status,
         output: output.output,
-        output_truncated: record.output_truncated || output.truncated,
+        output_truncated: record.output_truncated || store_truncated,
+        output_cursor: output.cursor,
+        next_output_cursor: output.next_cursor,
+        output_gap: output.gap,
     })
+}
+
+fn recovered_output_snapshot(
+    record: &CommandBackgroundTaskRecord,
+    bytes: &[u8],
+    requested_cursor: Option<u64>,
+) -> BackgroundOutputSnapshot {
+    let total_bytes = record.output_total_bytes.max(
+        record
+            .output_start_offset
+            .saturating_add(bytes.len() as u64),
+    );
+    let start_offset = if record.output_total_bytes == 0 {
+        total_bytes.saturating_sub(bytes.len() as u64)
+    } else {
+        record.output_start_offset
+    };
+    let requested_cursor = requested_cursor.unwrap_or(start_offset);
+    let gap = requested_cursor < start_offset;
+    let cursor = requested_cursor.clamp(start_offset, total_bytes);
+    let relative = cursor.saturating_sub(start_offset) as usize;
+    BackgroundOutputSnapshot {
+        output: String::from_utf8_lossy(&bytes[relative.min(bytes.len())..]).to_string(),
+        truncated: record.output_truncated,
+        cursor,
+        next_cursor: total_bytes,
+        gap,
+    }
 }
 
 fn cancel_durable_background_command_task(
@@ -743,46 +719,6 @@ fn effective_background_command_output_limit(requested: Option<usize>) -> usize 
     requested
         .unwrap_or(coder_tools::DEFAULT_MAX_COMMAND_OUTPUT_BYTES)
         .clamp(1, coder_tools::DEFAULT_MAX_COMMAND_OUTPUT_BYTES)
-}
-
-fn resolve_background_command_dir(
-    repo_root: &str,
-    cwd: &str,
-) -> Result<(PathBuf, PathBuf, String), ApiError> {
-    let root = fs::canonicalize(repo_root)
-        .map_err(|error| ApiError::bad_request(format!("invalid repo root: {error}")))?;
-    if !root.is_dir() {
-        return Err(ApiError::bad_request(format!(
-            "repo root is not a directory: {}",
-            root.display()
-        )));
-    }
-    let workdir = fs::canonicalize(root.join(cwd))
-        .map_err(|error| ApiError::bad_request(format!("invalid command cwd: {error}")))?;
-    if !workdir.starts_with(&root) {
-        return Err(ApiError::bad_request(format!(
-            "command cwd is outside repo: {}",
-            workdir.display()
-        )));
-    }
-    if !workdir.is_dir() {
-        return Err(ApiError::bad_request(format!(
-            "command cwd is not a directory: {}",
-            workdir.display()
-        )));
-    }
-    let cwd_display = workdir
-        .strip_prefix(&root)
-        .ok()
-        .and_then(|path| {
-            if path.as_os_str().is_empty() {
-                None
-            } else {
-                Some(path.to_string_lossy().replace('\\', "/"))
-            }
-        })
-        .unwrap_or_else(|| ".".to_owned());
-    Ok((root, workdir, cwd_display))
 }
 
 fn unix_time_millis() -> u64 {

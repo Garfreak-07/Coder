@@ -11,7 +11,10 @@ use crate::provider_runtime::{
     normalize_provider, provider_api_key, provider_api_key_from_env, provider_base_url,
     provider_chat_completions_endpoint, provider_chat_completions_endpoint_for_display,
     provider_env_keys, provider_http_client_builder, provider_proxy_mode,
-    provider_proxy_url_for_url, redact_provider_error, sanitize_provider_endpoint,
+    provider_proxy_url_for_url, provider_request_max_retries, provider_stream_idle_timeout_ms,
+    provider_stream_max_retries, provider_supports_websockets,
+    provider_websocket_connect_timeout_ms, redact_provider_error, sanitize_provider_endpoint,
+    send_provider_request_with_retry,
 };
 use crate::{
     ApiState, ProviderKeyState, ProviderSettings, ProviderSettingsPatch, ProviderSettingsResponse,
@@ -103,6 +106,15 @@ pub(crate) fn apply_provider_settings_patch(
     if let Some(proxy_modes) = patch.proxy_modes {
         settings.proxy_modes = clean_provider_proxy_mode_map(proxy_modes);
     }
+    if let Some(network) = patch.network {
+        settings.network = network
+            .into_iter()
+            .filter_map(|(provider, network)| {
+                let provider = normalize_provider(&provider);
+                (!provider.is_empty()).then_some((provider, network))
+            })
+            .collect();
+    }
     if let Some(api_keys) = patch.api_keys {
         for (provider, value) in api_keys {
             let provider = normalize_provider(&provider);
@@ -165,6 +177,7 @@ pub(crate) fn provider_status(
         names.extend(settings.api_keys.keys().cloned());
         names.extend(settings.proxy_urls.keys().cloned());
         names.extend(settings.proxy_modes.keys().cloned());
+        names.extend(settings.network.keys().cloned());
         names.into_iter().collect()
     });
     let providers = selected
@@ -205,6 +218,11 @@ fn provider_status_item(settings: &ProviderSettings, provider: &str) -> Provider
         base_url,
         proxy_url,
         proxy_mode,
+        request_max_retries: provider_request_max_retries(settings, provider),
+        stream_max_retries: provider_stream_max_retries(settings, provider),
+        stream_idle_timeout_ms: provider_stream_idle_timeout_ms(settings, provider),
+        websocket_connect_timeout_ms: provider_websocket_connect_timeout_ms(settings, provider),
+        supports_websockets: provider_supports_websockets(settings, provider),
         mode: if settings.mock_mode && !credential_configured && provider != "ollama" {
             "mock"
         } else {
@@ -266,7 +284,7 @@ async fn test_provider_chat_completion(
     let url = provider_chat_completions_endpoint(&base_url);
     let endpoint = provider_chat_completions_endpoint_for_display(&base_url);
     let proxy_url = provider_proxy_url_for_url(settings, &provider, Some(&url));
-    let client = provider_http_client_builder(&url, proxy_url.as_deref())
+    let client = provider_http_client_builder(settings, &provider, &url)
         .map_err(|error| {
             redact_provider_error(
                 &error,
@@ -282,18 +300,19 @@ async fn test_provider_chat_completion(
             )
         })?;
     let request_body = provider_test_chat_completion_body(&provider, &settings.default_model);
-    let response = client
-        .post(&url)
-        .bearer_auth(&api_key)
-        .json(&request_body)
-        .send()
-        .await
-        .map_err(|error| {
-            redact_provider_error(
-                &format!("Provider test request failed: {}", error),
-                &[&api_key, &base_url, proxy_url.as_deref().unwrap_or("")],
-            )
-        })?;
+    let response = send_provider_request_with_retry(
+        || client.post(&url).bearer_auth(&api_key).json(&request_body),
+        None,
+        provider_request_max_retries(settings, &provider),
+    )
+    .await
+    .map_err(|error| {
+        redact_provider_error(
+            &format!("Provider test request failed: {}", error),
+            &[&api_key, &base_url, proxy_url.as_deref().unwrap_or("")],
+        )
+    })?
+    .response;
     if !response.status().is_success() {
         return Ok(ProviderTestResult {
             provider,

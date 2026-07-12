@@ -8,14 +8,14 @@ use coder_core::RunId;
 #[cfg(test)]
 use coder_core::{RunState, RunStatus, WorkflowId};
 use coder_events::CoderEvent;
-use coder_server::{serve, ApiState};
+use coder_server::{run_embedded_workflow, serve, ApiState};
 use coder_store::{RepoEvidenceKind, RepoEvidenceRef, RunStore};
 use coder_tools::{
     apply_patch_file, find_files, git_diff, git_status, preview_patch_file, read_file,
     read_file_range, run_command, search_text, CommandRunEvidence, CommandRunRequest,
     PatchApplyEvidence, PatchApplyRequest, PatchPreviewEvidence, RepoToolConfig,
 };
-use coder_workflow::{MockWorkflowRunner, WorkflowRunOptions, WorkflowRunner};
+use coder_workflow::{MockWorkflowRunner, WorkflowRunOptions};
 use serde_json::json;
 
 const DEFAULT_STORE: &str = ".coder";
@@ -619,10 +619,10 @@ async fn main() -> anyhow::Result<()> {
                 println!("summary={}", output.report.summary);
             } else {
                 ensure_valid_config(&config)?;
-                let runner = WorkflowRunner::new(config, RunStore::new(store));
+                let store = RunStore::new(store);
                 let mut options = WorkflowRunOptions::new(workflow_id, task);
                 options.repo_root = repo;
-                let output = runner.run(options).await?;
+                let output = run_embedded_workflow(config, store, options).await?;
                 println!("run_id={}", output.run_id);
                 println!("report_ref={}", output.report_ref);
                 println!("summary={}", output.report.summary);

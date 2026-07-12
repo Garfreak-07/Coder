@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use coder_config::ModelSpec as ConfigModelSpec;
+use coder_config::{resolve_agent_runtime_policy, ModelSpec as ConfigModelSpec};
 use reqwest::Client;
 use serde_json::{json, Value};
 
@@ -11,8 +11,9 @@ use crate::api_types::{
 };
 use crate::planner_conversation::{
     deterministic_planner_response, live_message_was_length_truncated,
-    planner_provider_setup_required_response, planner_provider_unavailable_response,
-    planner_system_prompt, DeterministicPlannerConversationEngine,
+    message_is_pure_plan_confirmation, planner_provider_setup_required_response,
+    planner_provider_unavailable_response, planner_system_prompt,
+    DeterministicPlannerConversationEngine,
 };
 use crate::planner_history::{compact_planner_history, CompactedPlannerHistory};
 use crate::planner_provider_recovery::{
@@ -22,18 +23,26 @@ use crate::planner_provider_recovery::{
 };
 use crate::planner_provider_runtime::{
     merge_planner_provider_trace, parse_live_planner_response_with_idle_timeout,
-    planner_chat_completion_body, planner_chat_completion_streaming_body, planner_provider_trace,
-    planner_runtime_effort, planner_streaming_fallback_status, LivePlannerMessage,
+    planner_chat_completion_body_with_tools, planner_chat_completion_streaming_body_with_tools,
+    planner_provider_trace, planner_runtime_effort, planner_streaming_fallback_status,
+    LivePlannerMessage,
+};
+use crate::planner_tool_runtime::{
+    execute_planner_tool_turn, planner_model_tools_schema, planner_tool_budget_exhausted,
+    planner_tool_error_result, planner_tool_result_messages, PLANNER_MAX_TOOL_CALLS,
+    PLANNER_MAX_TOOL_TURNS, PLANNER_TOOL_RESULTS_TOTAL_MAX_BYTES,
 };
 use crate::provider_runtime::{
     model_provider_base_url, model_provider_for_settings, provider_api_key,
     provider_chat_completions_endpoint, provider_http_client_builder, provider_proxy_url_for_url,
-    redact_provider_error,
+    provider_request_max_retries, provider_stream_idle_timeout_ms, redact_provider_error,
+    send_provider_request_with_retry, ProviderSendOutcome,
 };
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct ModelPlannerConversationEngine {
     fallback: DeterministicPlannerConversationEngine,
+    state: crate::ApiState,
 }
 
 #[derive(Debug, Clone)]
@@ -54,14 +63,20 @@ struct LivePlannerProviderContext<'a> {
     adapter: &'a NativePlannerContextAdapter,
     request: &'a PlannerConversationRequest,
     max_output_tokens: u32,
+    supports_streaming: bool,
+    supports_parallel_tool_calls: bool,
     effort: Option<&'a str>,
     stream_idle_timeout: Duration,
+    request_max_retries: u64,
     redaction_values: &'a [&'a str],
 }
 
 impl ModelPlannerConversationEngine {
-    pub(crate) fn new() -> Self {
-        Self::default()
+    pub(crate) fn new(state: crate::ApiState) -> Self {
+        Self {
+            fallback: DeterministicPlannerConversationEngine,
+            state,
+        }
     }
 
     pub(crate) async fn live_assistant_message(
@@ -86,7 +101,7 @@ impl ModelPlannerConversationEngine {
         let proxy_url =
             provider_proxy_url_for_url(&request.provider_settings, &provider, Some(&url));
         let adapter = NativePlannerContextAdapter::new();
-        let client = provider_http_client_builder(&url, proxy_url.as_deref())
+        let client = provider_http_client_builder(&request.provider_settings, &provider, &url)
             .map_err(|error| {
                 redact_provider_error(
                     &error,
@@ -101,12 +116,17 @@ impl ModelPlannerConversationEngine {
                     &[&api_key, &base_url, proxy_url.as_deref().unwrap_or("")],
                 )
             })?;
-        let max_output_tokens = request
-            .runtime
-            .agent
-            .runtime
-            .max_output_tokens
-            .unwrap_or(crate::PLANNER_CHAT_MAX_OUTPUT_TOKENS_DEFAULT);
+        let mut resolved_model = model.clone();
+        resolved_model.provider = provider.clone();
+        resolved_model.model = model_name.clone();
+        let runtime = resolve_agent_runtime_policy(&resolved_model, &request.runtime.agent.runtime);
+        let max_output_tokens = if request.runtime.agent.runtime.max_output_tokens.is_some() {
+            runtime.max_output_tokens
+        } else {
+            runtime
+                .max_output_tokens
+                .min(crate::PLANNER_CHAT_MAX_OUTPUT_TOKENS_DEFAULT)
+        };
         let redaction_values = [
             api_key.as_str(),
             base_url.as_str(),
@@ -123,9 +143,16 @@ impl ModelPlannerConversationEngine {
             adapter: &adapter,
             request,
             max_output_tokens,
+            supports_streaming: runtime.supports_streaming,
+            supports_parallel_tool_calls: runtime.supports_parallel_tool_calls,
             effort: effort.as_deref(),
-            stream_idle_timeout: Duration::from_millis(
-                request.runtime.agent.runtime.stream_idle_timeout_ms,
+            stream_idle_timeout: Duration::from_millis(provider_stream_idle_timeout_ms(
+                &request.provider_settings,
+                &provider,
+            )),
+            request_max_retries: provider_request_max_retries(
+                &request.provider_settings,
+                &provider,
             ),
             redaction_values: &redaction_values,
         };
@@ -133,11 +160,35 @@ impl ModelPlannerConversationEngine {
         let mut accumulated_provider_trace: Option<PlannerProviderTrace> = None;
         let mut request_mode = PlannerProviderRequestMode::Normal;
         let mut prompt_overflow_recovery_attempts = 0u8;
+        let mut tool_history = Vec::new();
+        let mut tool_turns = 0usize;
+        let mut tool_calls = 0usize;
+        let mut remaining_tool_result_bytes = PLANNER_TOOL_RESULTS_TOTAL_MAX_BYTES;
+        let tool_turn_limit = usize::try_from(runtime.max_turns)
+            .unwrap_or(PLANNER_MAX_TOOL_TURNS)
+            .clamp(1, PLANNER_MAX_TOOL_TURNS);
+        let confirmation_only =
+            request.current_plan.is_some() && message_is_pure_plan_confirmation(&request.message);
+        let tool_schema =
+            if runtime.supports_tool_calls && request.repo_root.is_some() && !confirmation_only {
+                planner_model_tools_schema(&request.runtime)
+            } else {
+                json!([])
+            };
+        let mut tools_enabled = tool_schema
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty());
 
         loop {
             let outcome = send_live_planner_provider_message(
                 &provider_context,
                 &recovered_assistant_messages,
+                &tool_history,
+                if tools_enabled {
+                    tool_schema.clone()
+                } else {
+                    json!([])
+                },
                 request_mode,
             )
             .await?;
@@ -171,6 +222,51 @@ impl ModelPlannerConversationEngine {
                 message.provider_trace = accumulated;
             }
 
+            if !message.tool_uses.is_empty() {
+                if !tools_enabled {
+                    return Err(
+                        "planner model emitted a tool call after repository tools were disabled"
+                            .to_owned(),
+                    );
+                }
+                let mut requested_tools = message.tool_uses.clone();
+                let remaining_calls = PLANNER_MAX_TOOL_CALLS.saturating_sub(tool_calls);
+                let rejected_tools = if requested_tools.len() > remaining_calls {
+                    requested_tools.split_off(remaining_calls)
+                } else {
+                    Vec::new()
+                };
+                tool_calls = tool_calls.saturating_add(requested_tools.len());
+                tool_turns = tool_turns.saturating_add(1);
+                accumulate_planner_provider_trace(
+                    &mut accumulated_provider_trace,
+                    message.provider_trace.clone(),
+                );
+                tool_history.push(message.assistant_history);
+                let mut results =
+                    execute_planner_tool_turn(self.state.clone(), request, requested_tools).await;
+                results.extend(rejected_tools.into_iter().map(|tool_use| {
+                    planner_tool_error_result(tool_use, "Planner tool-call budget was exhausted")
+                }));
+                tool_history.extend(planner_tool_result_messages(
+                    results,
+                    &mut remaining_tool_result_bytes,
+                ));
+                if planner_tool_budget_exhausted(
+                    tool_turns,
+                    tool_calls,
+                    remaining_tool_result_bytes,
+                    tool_turn_limit,
+                ) {
+                    tools_enabled = false;
+                    tool_history.push(json!({
+                        "role": "user",
+                        "content": "Repository inspection budget reached. Return the final compact JSON response now using the gathered facts. Do not call more tools."
+                    }));
+                }
+                continue;
+            }
+
             if live_message_was_length_truncated(Some(&message))
                 && (recovered_assistant_messages.len() as u8) < max_recovery_attempts
             {
@@ -180,6 +276,12 @@ impl ModelPlannerConversationEngine {
             }
 
             if recovered_assistant_messages.is_empty() {
+                message.provider_trace.tool_turns = u32::try_from(tool_turns).unwrap_or(u32::MAX);
+                message.provider_trace.tool_calls = u32::try_from(tool_calls).unwrap_or(u32::MAX);
+                message.provider_trace.tool_result_bytes = u64::try_from(
+                    PLANNER_TOOL_RESULTS_TOTAL_MAX_BYTES - remaining_tool_result_bytes,
+                )
+                .unwrap_or(u64::MAX);
                 return Ok(Some(message));
             }
 
@@ -187,8 +289,15 @@ impl ModelPlannerConversationEngine {
             content_parts.push(message.content);
             let mut provider_trace = message.provider_trace;
             provider_trace.finish_reason = message.finish_reason.clone();
+            provider_trace.tool_turns = u32::try_from(tool_turns).unwrap_or(u32::MAX);
+            provider_trace.tool_calls = u32::try_from(tool_calls).unwrap_or(u32::MAX);
+            provider_trace.tool_result_bytes =
+                u64::try_from(PLANNER_TOOL_RESULTS_TOTAL_MAX_BYTES - remaining_tool_result_bytes)
+                    .unwrap_or(u64::MAX);
             return Ok(Some(LivePlannerMessage {
                 content: content_parts.join("\n\n"),
+                tool_uses: Vec::new(),
+                assistant_history: json!({}),
                 finish_reason: message.finish_reason,
                 provider_trace,
             }));
@@ -261,7 +370,7 @@ impl NativePlannerContextAdapter {
         let mut events = vec![planner_message_event(
             "system",
             &format!(
-                "{}\n\nNative Coder planner context follows. It is redacted and tool-disabled; use it for session/context shape only, not execution.\n{}",
+                "{}\n\nNative Coder planner context follows. It is redacted and exposes only the frozen read-only repository tool snapshot; use it for planning, not execution.\n{}",
                 planner_system_prompt(&request.runtime),
                 context_text
             ),
@@ -336,10 +445,12 @@ impl NativePlannerContextAdapter {
             "side_effect_free": true,
             "execution_requires": "Start Work -> native executor"
         });
+        let planner_tool_count =
+            crate::planner_tool_runtime::planner_selected_tools(&request.runtime).len();
         json!({
             "adapter": "native-planner-context",
             "contract": "coder.native_planner_context.v1",
-            "reason": "Planner Chat must not run tools or create executor-side conversations.",
+            "reason": "Planner Chat may inspect the bound repository but cannot execute task side effects.",
             "runtime": {
                 "workflow_id": &request.workflow_id,
                 "workflow_name": &request.runtime.workflow_name,
@@ -352,7 +463,9 @@ impl NativePlannerContextAdapter {
                 }
             },
             "planner_tool_policy": {
-                "tools": [],
+                "tool_count": planner_tool_count,
+                "access": "read_only",
+                "repo_bound": request.repo_root.is_some(),
                 "terminal": false,
                 "file_editor": false,
                 "command_execution": false,
@@ -369,6 +482,8 @@ fn planner_strict_output_contract() -> Value {
         "ready_for_start_work": "boolean",
         "plan_draft": {
             "goal": "string",
+            "execution_mode": "read_only | may_write | must_write; classify the approved task, do not infer this from file paths",
+            "review_mode": "standard | qualitative; use qualitative only when success needs task-specific experiential or subjective review",
             "scope": "string[]",
             "non_goals": "string[]",
             "assumptions": "string[]",
@@ -416,9 +531,11 @@ fn planner_provider_messages_with_output_recovery(
     adapter: &NativePlannerContextAdapter,
     request: &PlannerConversationRequest,
     recovered_assistant_messages: &[String],
+    tool_history: &[Value],
     mode: PlannerProviderRequestMode,
 ) -> Vec<Value> {
     let mut messages = adapter.provider_messages(request, mode);
+    messages.extend_from_slice(tool_history);
     for assistant_message in recovered_assistant_messages {
         messages.push(json!({
             "role": "assistant",
@@ -435,38 +552,60 @@ fn planner_provider_messages_with_output_recovery(
 async fn send_live_planner_provider_message(
     context: &LivePlannerProviderContext<'_>,
     recovered_assistant_messages: &[String],
+    tool_history: &[Value],
+    tools: Value,
     mode: PlannerProviderRequestMode,
 ) -> Result<LivePlannerProviderOutcome, String> {
     let messages = planner_provider_messages_with_output_recovery(
         context.adapter,
         context.request,
         recovered_assistant_messages,
+        tool_history,
         mode,
     );
-    let request_body = planner_chat_completion_streaming_body(
-        context.provider,
-        context.model_name,
-        messages,
-        context.max_output_tokens,
-        context.effort,
-    );
+    let request_body = if context.supports_streaming {
+        planner_chat_completion_streaming_body_with_tools(
+            context.provider,
+            context.model_name,
+            messages,
+            context.max_output_tokens,
+            context.effort,
+            tools.clone(),
+            context.supports_parallel_tool_calls,
+        )
+    } else {
+        planner_chat_completion_body_with_tools(
+            context.provider,
+            context.model_name,
+            messages,
+            context.max_output_tokens,
+            context.effort,
+            tools.clone(),
+            context.supports_parallel_tool_calls,
+        )
+    };
     let streaming_estimated_input_tokens =
         u64::from(crate::estimate_text_tokens(&request_body.to_string()));
-    let response = send_planner_chat_completion_request(
+    let response_outcome = send_planner_chat_completion_request(
         context.client,
         context.url,
         context.api_key,
         request_body,
         context.stream_idle_timeout,
+        context.request_max_retries,
         context.redaction_values,
     )
     .await?;
+    let response_attempts = response_outcome.attempts;
+    let response = response_outcome.response;
     if !response.status().is_success() {
         let status = response.status();
         let error_body =
             read_planner_provider_error_body(response, context.redaction_values).await?;
         if planner_provider_error_is_prompt_too_long(status, &error_body.raw) {
-            let mut provider_trace = planner_provider_trace(true, "error", false, None);
+            let mut provider_trace =
+                planner_provider_trace(context.supports_streaming, "error", false, None);
+            provider_trace.provider_turns = response_attempts;
             provider_trace.estimated_input_tokens = streaming_estimated_input_tokens;
             return Ok(LivePlannerProviderOutcome::PromptTooLong {
                 error: PlannerPromptTooLongError {
@@ -476,31 +615,40 @@ async fn send_live_planner_provider_message(
                 provider_trace,
             });
         }
+        if !context.supports_streaming {
+            return Err(format!("planner model returned HTTP {status}"));
+        }
         if planner_streaming_fallback_status(status.as_u16()) {
             let fallback_messages = planner_provider_messages_with_output_recovery(
                 context.adapter,
                 context.request,
                 recovered_assistant_messages,
+                tool_history,
                 mode,
             );
-            let fallback_body = planner_chat_completion_body(
+            let fallback_body = planner_chat_completion_body_with_tools(
                 context.provider,
                 context.model_name,
                 fallback_messages,
                 context.max_output_tokens,
                 context.effort,
+                tools,
+                context.supports_parallel_tool_calls,
             );
             let fallback_estimated_input_tokens =
                 u64::from(crate::estimate_text_tokens(&fallback_body.to_string()));
-            let fallback_response = send_planner_chat_completion_request(
+            let fallback_outcome = send_planner_chat_completion_request(
                 context.client,
                 context.url,
                 context.api_key,
                 fallback_body,
                 context.stream_idle_timeout,
+                context.request_max_retries,
                 context.redaction_values,
             )
             .await?;
+            let fallback_attempts = fallback_outcome.attempts;
+            let fallback_response = fallback_outcome.response;
             if !fallback_response.status().is_success() {
                 let fallback_status = fallback_response.status();
                 let fallback_error_body =
@@ -512,7 +660,8 @@ async fn send_live_planner_provider_message(
                 ) {
                     let mut provider_trace =
                         planner_provider_trace(true, "error", true, Some(status.as_u16()));
-                    provider_trace.provider_turns = 2;
+                    provider_trace.provider_turns =
+                        response_attempts.saturating_add(fallback_attempts);
                     provider_trace.estimated_input_tokens = streaming_estimated_input_tokens
                         .saturating_add(fallback_estimated_input_tokens);
                     return Ok(LivePlannerProviderOutcome::PromptTooLong {
@@ -529,7 +678,7 @@ async fn send_live_planner_provider_message(
             }
             let mut provider_trace =
                 planner_provider_trace(true, "unknown", true, Some(status.as_u16()));
-            provider_trace.provider_turns = 2;
+            provider_trace.provider_turns = response_attempts.saturating_add(fallback_attempts);
             provider_trace.estimated_input_tokens =
                 streaming_estimated_input_tokens.saturating_add(fallback_estimated_input_tokens);
             return parse_live_planner_response_with_idle_timeout(
@@ -543,7 +692,9 @@ async fn send_live_planner_provider_message(
         }
         return Err(format!("planner model returned HTTP {status}"));
     }
-    let mut provider_trace = planner_provider_trace(true, "unknown", false, None);
+    let mut provider_trace =
+        planner_provider_trace(context.supports_streaming, "unknown", false, None);
+    provider_trace.provider_turns = response_attempts;
     provider_trace.estimated_input_tokens = streaming_estimated_input_tokens;
     parse_live_planner_response_with_idle_timeout(
         response,
@@ -561,23 +712,15 @@ async fn send_planner_chat_completion_request(
     api_key: &str,
     request_body: Value,
     idle_timeout: Duration,
+    request_max_retries: u64,
     redaction_values: &[&str],
-) -> Result<reqwest::Response, String> {
-    tokio::time::timeout(
-        idle_timeout,
-        client
-            .post(url)
-            .bearer_auth(api_key)
-            .json(&request_body)
-            .send(),
+) -> Result<ProviderSendOutcome, String> {
+    send_provider_request_with_retry(
+        || client.post(url).bearer_auth(api_key).json(&request_body),
+        Some(idle_timeout),
+        request_max_retries,
     )
     .await
-    .map_err(|_| {
-        format!(
-            "planner provider returned no response data for {} ms",
-            idle_timeout.as_millis()
-        )
-    })?
     .map_err(|error| {
         redact_provider_error(
             &format!("planner model request failed: {error}"),

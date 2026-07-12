@@ -2,6 +2,7 @@ use std::sync::Mutex;
 
 use coder_core::RunId;
 use coder_events::CoderEvent;
+use coder_harness::HarnessRunEventRef;
 use coder_store::{RunStore, StoreError};
 use serde_json::Value;
 
@@ -48,6 +49,16 @@ pub(crate) fn append_model_tool_event_checked(
     kind: impl Into<String>,
     payload: Value,
 ) -> Result<u64, ModelToolEventWriteError> {
+    append_model_tool_event_with_refs_checked(store, run_id, kind, payload, &[])
+}
+
+pub(crate) fn append_model_tool_event_with_refs_checked(
+    store: &RunStore,
+    run_id: &RunId,
+    kind: impl Into<String>,
+    payload: Value,
+    refs: &[HarnessRunEventRef],
+) -> Result<u64, ModelToolEventWriteError> {
     let _guard = MODEL_TOOL_EVENT_LOCK
         .lock()
         .map_err(|_| ModelToolEventWriteError::LockPoisoned)?;
@@ -55,7 +66,10 @@ pub(crate) fn append_model_tool_event_checked(
         .event_count(run_id)
         .map(|count| count as u64 + 1)
         .map_err(ModelToolEventWriteError::Store)?;
-    let event = CoderEvent::new(run_id.clone(), sequence, kind, payload);
+    let mut event = CoderEvent::new(run_id.clone(), sequence, kind, payload);
+    for reference in refs {
+        event = event.with_ref(reference.label.clone(), reference.uri.clone());
+    }
     store
         .append_event(run_id, &event)
         .map_err(ModelToolEventWriteError::Store)?;

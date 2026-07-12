@@ -9,7 +9,7 @@ provider setup, persistence model, and distribution process.
   and current maintainability notes.
 - `PROVIDER_SETUP.md`: normal provider setup, proxy isolation, and developer
   fallback variables.
-- `AGENT_HARNESS_DESIGN_AUDIT.md`: Claude Code comparison, implemented
+- `AGENT_HARNESS_DESIGN_AUDIT.md`: Codex runtime references, implemented
   alignment, weak evidence, and remaining native gaps.
 
 ## Runtime Policy

@@ -15,7 +15,6 @@ use crate::api_types::{
     PlannerChatTurnResponse, PlannerConversationEngine, PlannerConversationRequest,
     PlannerReadiness, PlannerStartWorkRequest, PlannerStartWorkResponse, ProviderSettings,
 };
-use crate::planner_active_run::{active_run_message_intent, ActiveRunMessageIntent};
 use crate::planner_conversation::{
     concise_plan_summary, message_is_pure_plan_confirmation, normalize_planner_mode,
     planner_provider_setup_required_response,
@@ -35,6 +34,11 @@ use crate::planner_session::{
 use crate::provider_settings::apply_provider_settings_to_project_config;
 use crate::run_control::request_run_cancel;
 use crate::{default_project_config, public_preview, workflow_runner_for_api, ApiError, ApiState};
+
+fn normalized_repo_root(repo: Option<String>) -> Option<String> {
+    repo.map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
 
 fn start_work_provider_config_error(
     config: &ProjectConfig,
@@ -59,17 +63,19 @@ fn start_work_provider_config_error(
     None
 }
 
-fn planner_run_context_from_session(session: &PlannerChatSession, plan: &PlanDraft) -> Value {
-    let original_user_request = session
-        .turns
-        .iter()
-        .find(|turn| turn.role == "user")
-        .map(|turn| turn.content.clone())
-        .unwrap_or_else(|| plan.goal.clone());
-    let executor_plan = start_work_executor_plan(plan);
+fn planner_run_context(plan: &PlanDraft) -> Value {
     json!({
-        "original_user_request": sanitize_start_work_gate(&original_user_request),
-        "plan_draft": executor_plan,
+        "plan_draft": {
+            "execution_mode": &plan.execution_mode,
+            "review_mode": &plan.review_mode,
+            "scope": sanitized_plan_items(&plan.scope),
+            "non_goals": sanitized_plan_items(&plan.non_goals),
+            "assumptions": sanitized_plan_items(&plan.assumptions),
+            "steps": sanitized_plan_items(&plan.steps),
+            "affected_paths": &plan.affected_paths,
+            "acceptance_criteria": sanitized_plan_items(&plan.acceptance_criteria),
+            "risks": sanitized_plan_items(&plan.risks)
+        },
         "start_work_authorized": true
     })
 }
@@ -83,25 +89,12 @@ fn task_from_plan(plan: &PlanDraft) -> String {
     }
 }
 
-fn start_work_executor_plan(plan: &PlanDraft) -> PlanDraft {
-    let mut executor_plan = plan.clone();
-    executor_plan.goal = task_from_plan(plan);
-    executor_plan.steps = plan
-        .steps
+fn sanitized_plan_items(items: &[String]) -> Vec<String> {
+    items
         .iter()
-        .map(|step| sanitize_start_work_gate(step))
-        .collect();
-    executor_plan.assumptions = plan
-        .assumptions
-        .iter()
-        .map(|assumption| sanitize_start_work_gate(assumption))
-        .collect();
-    executor_plan.risks = plan
-        .risks
-        .iter()
-        .map(|risk| sanitize_start_work_gate(risk))
-        .collect();
-    executor_plan
+        .map(|item| sanitize_start_work_gate(item))
+        .filter(|item| !item.trim().is_empty())
+        .collect()
 }
 
 fn sanitize_start_work_gate(text: &str) -> String {
@@ -148,6 +141,7 @@ pub(crate) async fn create_planner_chat_session(
     let session = PlannerChatSession {
         session_id: session_id.clone(),
         workflow_id: workflow_id.clone(),
+        repo_root: normalized_repo_root(request.repo),
         mode: normalize_planner_mode(request.mode.as_deref()),
         runtime: Some(runtime),
         ready: false,
@@ -196,9 +190,11 @@ fn handle_active_run_planner_turn(
     session_id: &str,
     request: &PlannerChatTurnRequest,
 ) -> Result<Option<PlannerChatTurnResponse>, ApiError> {
-    let Some(intent) = active_run_message_intent(&request.message) else {
+    use crate::api_types::PlannerTurnOperation;
+
+    if request.operation == PlannerTurnOperation::Chat {
         return Ok(None);
-    };
+    }
     let session_snapshot = state
         .planner_sessions
         .lock()
@@ -212,16 +208,13 @@ fn handle_active_run_planner_turn(
         .filter(|_| session_snapshot.work_in_progress);
     let run_id = active_run_id.or(session_snapshot.latest_run_id.as_deref());
 
-    if intent == ActiveRunMessageIntent::Supplement && active_run_id.is_none() {
-        return Ok(None);
-    }
-
     let mut guidance_queued = false;
-    let assistant_message = match intent {
-        ActiveRunMessageIntent::Status => {
+    let assistant_message = match request.operation {
+        PlannerTurnOperation::Chat => unreachable!("chat operations return before run control"),
+        PlannerTurnOperation::Status => {
             planner_run_status_message(state, run_id, &request.message)?
         }
-        ActiveRunMessageIntent::Cancel => {
+        PlannerTurnOperation::Interrupt => {
             let Some(active_run_id) = active_run_id else {
                 return Ok(Some(store_local_planner_turn(
                     state,
@@ -243,8 +236,21 @@ fn handle_active_run_planner_turn(
                 "已请求取消。Coder 正在停止当前模型或工具步骤，并会保留已经记录的证据。",
             )
         }
-        ActiveRunMessageIntent::Supplement => {
-            let active_run_id = active_run_id.expect("supplement requires an active run");
+        PlannerTurnOperation::UserInput => {
+            let Some(active_run_id) = active_run_id else {
+                return Ok(Some(store_local_planner_turn(
+                    state,
+                    session_id,
+                    request.message.clone(),
+                    localized_message(
+                        &request.message,
+                        "There is no active workflow to receive this input.",
+                        "当前没有正在运行的工作流可以接收这条补充要求。",
+                    ),
+                    "active_run.guidance.not_applicable",
+                    None,
+                )?));
+            };
             let guidance = public_preview(&request.message, 2_000);
             match crate::model_tool_async_attachments::queue_planner_user_guidance(
                 state,
@@ -270,11 +276,12 @@ fn handle_active_run_planner_turn(
         }
     };
 
-    let event_kind = match intent {
-        ActiveRunMessageIntent::Status => "active_run.status.reported",
-        ActiveRunMessageIntent::Cancel => "active_run.cancel.requested",
-        ActiveRunMessageIntent::Supplement if guidance_queued => "active_run.guidance.queued",
-        ActiveRunMessageIntent::Supplement => "active_run.guidance.not_queued",
+    let event_kind = match request.operation {
+        PlannerTurnOperation::Chat => unreachable!("chat operations return before run control"),
+        PlannerTurnOperation::Status => "active_run.status.reported",
+        PlannerTurnOperation::Interrupt => "active_run.cancel.requested",
+        PlannerTurnOperation::UserInput if guidance_queued => "active_run.guidance.queued",
+        PlannerTurnOperation::UserInput => "active_run.guidance.not_queued",
     };
     Ok(Some(store_local_planner_turn(
         state,
@@ -467,6 +474,9 @@ pub(crate) async fn planner_chat_turn(
             stored.last_accessed = now;
             trim_planner_session_turns(&mut stored.session);
             let session = &mut stored.session;
+            if let Some(repo_root) = normalized_repo_root(request.repo.clone()) {
+                session.repo_root = Some(repo_root);
+            }
             let mode = requested_mode
                 .as_deref()
                 .map(|mode| normalize_planner_mode(Some(mode)))
@@ -494,6 +504,7 @@ pub(crate) async fn planner_chat_turn(
             PlannerConversationRequest {
                 session_id: session.session_id.clone(),
                 workflow_id: session.workflow_id.clone(),
+                repo_root: session.repo_root.clone(),
                 runtime,
                 mode: mode.clone(),
                 message: request.message.clone(),
@@ -508,7 +519,7 @@ pub(crate) async fn planner_chat_turn(
     };
 
     let history_compaction_attempt = planner_history_compaction_attempt(&conversation_request);
-    let engine = ModelPlannerConversationEngine::new();
+    let engine = ModelPlannerConversationEngine::new(state.clone());
     let planner_response = engine
         .respond(conversation_request)
         .await
@@ -764,13 +775,13 @@ pub(crate) async fn start_planner_chat_work(
         .plan_draft
         .clone()
         .ok_or_else(|| ApiError::bad_request("planner session has no plan draft"))?;
-    let repo_root = request.repo.clone().unwrap_or_else(|| ".".to_owned());
-    let plan_context = planner_run_context_from_session(&session, &plan);
+    let repo_root = normalized_repo_root(request.repo.clone())
+        .or_else(|| session.repo_root.clone())
+        .unwrap_or_else(|| ".".to_owned());
+    let plan_context = planner_run_context(&plan);
     let task = task_from_plan(&plan);
-    let token_budget = config
-        .workflows
-        .get(&workflow_id)
-        .and_then(|workflow| workflow.token_budget);
+    let token_budget = coder_config::resolve_workflow_cost_policy(&config, &workflow_id)
+        .map(|policy| policy.token_budget);
     crate::run_token_budget::initialize_run_token_budget(&state, &active_run_id, token_budget);
     let mut options = WorkflowRunOptions::new(&workflow_id, &task);
     options.repo_root = PathBuf::from(&repo_root);
@@ -987,6 +998,8 @@ mod tests {
     fn plan_with_start_work_gate() -> PlanDraft {
         PlanDraft {
             goal: "Create README.md with a short note. Do not execute until Start Work.".to_owned(),
+            execution_mode: crate::api_types::PlanExecutionMode::MustWrite,
+            review_mode: crate::api_types::PlanReviewMode::Standard,
             scope: vec!["README.md".to_owned()],
             non_goals: Vec::new(),
             assumptions: Vec::new(),
@@ -1012,43 +1025,24 @@ mod tests {
     }
 
     #[test]
-    fn start_work_plan_context_marks_execution_authorized() {
-        let mut session = PlannerChatSession {
-            session_id: "pcs_test".to_owned(),
-            workflow_id: "planner-led".to_owned(),
-            mode: "work".to_owned(),
-            runtime: None,
-            ready: true,
-            readiness: PlannerReadiness::Ready,
-            plan_draft: Some(plan_with_start_work_gate()),
-            open_questions: Vec::new(),
-            acceptance_criteria: Vec::new(),
-            risks: Vec::new(),
-            work_in_progress: false,
-            active_run_id: None,
-            latest_run_id: None,
-            turns: Vec::new(),
-        };
-        session.turns.push(planner_chat_user_turn(
-            "Create README.md. Do not execute until Start Work.".to_owned(),
-        ));
-        session.turns.push(planner_chat_assistant_turn(
-            "I'm ready. Click Start Work and I'll execute this through the native executor."
-                .to_owned(),
-            Vec::new(),
-            false,
-        ));
-
-        let context = planner_run_context_from_session(&session, &plan_with_start_work_gate());
+    fn start_work_plan_context_is_compact_and_execution_authorized() {
+        let context = planner_run_context(&plan_with_start_work_gate());
 
         assert_eq!(context["start_work_authorized"], true);
-        let request = context["original_user_request"].as_str().unwrap();
-        assert_eq!(request, "Create README.md.");
-        assert!(!request.contains("Do not execute until Start Work"));
-        let goal = context["plan_draft"]["goal"].as_str().unwrap();
-        assert_eq!(goal, "Create README.md with a short note.");
-        assert!(context.get("acceptance_criteria").is_none());
-        assert!(context.get("affected_paths").is_none());
+        assert!(context.get("original_user_request").is_none());
+        assert!(context["plan_draft"].get("goal").is_none());
+        assert_eq!(
+            context["plan_draft"]["affected_paths"],
+            json!(["README.md"])
+        );
+        assert_eq!(
+            context["plan_draft"]["acceptance_criteria"],
+            json!(["README.md exists"])
+        );
+        assert_eq!(
+            context["plan_draft"]["steps"],
+            json!(["Write README.md after Start Work is clicked."])
+        );
     }
 
     #[test]
@@ -1057,6 +1051,7 @@ mod tests {
         let mut session = PlannerChatSession {
             session_id: "pcs_parallel".to_owned(),
             workflow_id: "planner-led".to_owned(),
+            repo_root: Some("F:/repo".to_owned()),
             mode: "discuss".to_owned(),
             runtime: None,
             ready: true,

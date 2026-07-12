@@ -139,10 +139,8 @@ pub(crate) async fn run_workflow(
     }
     let mut config = request.config;
     apply_provider_settings_to_project_config(&mut config, &provider_settings);
-    let token_budget = config
-        .workflows
-        .get(&request.workflow_id)
-        .and_then(|workflow| workflow.token_budget);
+    let token_budget = coder_config::resolve_workflow_cost_policy(&config, &request.workflow_id)
+        .map(|policy| policy.token_budget);
     crate::run_token_budget::initialize_run_token_budget(&state, &run_id, token_budget);
     let mut options = WorkflowRunOptions::new(&request.workflow_id, &request.task);
     if let Some(repo_root) = &request.repo_root {
@@ -249,8 +247,27 @@ pub(crate) fn workflow_runner_for_api(
     store: RunStore,
     state: ApiState,
 ) -> WorkflowRunner {
-    let registry = BackendRegistry::from_project_config(&config, store.clone())
+    let registry = BackendRegistry::for_host()
         .with_planner_backend(Arc::new(WorkflowPlannerBackend::new(state.clone())))
         .with_native_backend(Arc::new(NativeModelBackend::new(state)));
     WorkflowRunner::with_registry(config, store, registry)
+}
+
+pub async fn run_embedded_workflow(
+    mut config: ProjectConfig,
+    store: RunStore,
+    mut options: WorkflowRunOptions,
+) -> Result<coder_workflow::WorkflowRunOutput, coder_workflow::WorkflowError> {
+    let state = ApiState::new(store.clone());
+    let provider_settings = state.provider_settings.lock().unwrap().clone();
+    apply_provider_settings_to_project_config(&mut config, &provider_settings);
+    let run_id = options.run_id.clone().unwrap_or_default();
+    options.run_id = Some(run_id.clone());
+    let token_budget = coder_config::resolve_workflow_cost_policy(&config, &options.workflow_id)
+        .map(|policy| policy.token_budget);
+    crate::run_token_budget::initialize_run_token_budget(&state, &run_id, token_budget);
+    let runner = workflow_runner_for_api(config, store, state.clone());
+    let result = runner.run(options).await;
+    crate::run_token_budget::clear_run_token_budget_if_inactive(&state, &run_id);
+    result
 }

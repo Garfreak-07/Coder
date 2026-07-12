@@ -6,8 +6,9 @@ This audit records the current design and its evidence. It is not a change log.
 
 1. User conversation and execution are different contexts. Planner Chat owns
    conversation and the approved plan; a workflow run receives a compact plan
-   snapshot, tools, evidence, and verification feedback.
-2. The normal path is `Planner -> Executor -> Verifier -> Workflow Planner`.
+   snapshot, tools, evidence, and execution feedback.
+2. The normal path is `Planner -> Executor -> Workflow Planner`. The Executor
+   owns implementation and checks; review is not a permanent workflow agent.
    Closed objective success finishes locally; failures and explicit qualitative
    goals use a bounded provider-backed finish-or-improve decision.
 3. Status, cancellation, pure confirmation, and requirements attached to an
@@ -19,29 +20,33 @@ This audit records the current design and its evidence. It is not a change log.
 5. Optional integrations stay outside the core until a real workflow requires
    them. Coder owns the ordinary execution runtime.
 
-## Concrete Claude Code References
+## Concrete Codex Runtime References
 
-The local Claude Code 2.8.1 source was inspected rather than inferred from
-product behavior:
+The local Codex Rust source at
+`C:/Users/aixdl/Downloads/codex-main/codex-main` was inspected directly:
 
-| Behavior | Claude Code source/value | Coder policy |
+| Behavior | Codex source/value | Coder policy |
 | --- | --- | --- |
-| Auto-compaction buffer | `src/services/compact/autoCompact.ts`: 13,000 tokens | `autocompact_buffer_tokens: 13000` |
-| Manual compaction buffer | `src/services/compact/autoCompact.ts`: 3,000 tokens | Manual compaction may use a smaller explicit override; it is not reused as the automatic threshold. |
-| Compaction output reserve | `src/utils/context.ts`: 20,000 tokens | `compact_output_reserve_tokens: 20000` |
-| Normal output cap | `src/query.ts`: 8,000 tokens | Executor default `max_output_tokens: 8000` |
-| Escalated output cap | `src/query.ts`: 64,000 tokens | Validation maximum is 64,000; Coder does not select it by default. |
-| Output recovery attempts | `src/query.ts`: 3 | `max_output_recovery_attempts: 3` |
-| Tool-result message bound | `src/constants/toolLimits.ts`: 200,000 characters | Coder uses smaller per-result and aggregate limits, with blob refs for retained large values. |
-| Agent turns | `src/query.ts`: optional `maxTurns`; the loop stops only when it is supplied and exceeded | `runtime.max_turns` remains optional configuration, but the non-interactive native runtime falls back to 24; `finish` stops immediately. |
-| Stream idle watchdog | `src/services/api/claude.ts`: `CLAUDE_STREAM_IDLE_TIMEOUT_MS`, default 90,000 ms, reset after stream activity | Planner Chat applies `stream_idle_timeout_ms` to the initial response and every SSE chunk. Non-streaming Executor and Workflow Planner requests use it as the response deadline. Codex Rust independently uses `tokio::time::timeout(idle_timeout, stream.next())` in `codex-client/src/sse.rs`. |
-| Workflow token budget | `packages/workflow-engine/src/engine/budget.ts`: optional `budgetTotal`; `assertCanSpend()` runs before each agent call and `addOutputTokens()` records completed output | `workflow.token_budget` is optional. One run-scoped counter is shared by Executor, Workflow Planner, subagents, model hooks, and transcript compaction. |
-| Session lookup cache | `src/utils/sessionStorage.ts`: 200 entries | Planner session cache is capped at 200 entries. |
-| Transcript file read | `src/utils/sessionStorage.ts`: 50 MiB | Durable file reads reject values above 50 MiB. |
+| Stream idle watchdog | `model-provider-info/src/lib.rs`: provider-owned 300,000 ms; SSE applies timeout between events | Coder now owns this in provider network settings and resets it for each Planner SSE chunk. Agent runtime no longer owns a duplicate network timeout. Native non-streaming execution has a separate operation deadline. |
+| Request retries | `model-provider-info/src/lib.rs` and `codex-client/src/retry.rs`: 4 request retries, 200 ms exponential backoff, 0.9-1.1 jitter, transport/5xx retry, and no 429 retry; streaming permits 5 reconnects; retry counts are capped at 100 | Coder resolves the same provider defaults and cap, and all model call sites use the provider-specific request count. External webhooks are excluded to avoid repeating side effects. Stream replay remains inactive because Chat Completions lacks Codex's persisted Responses continuation state. |
+| WebSocket connect | `model-provider-info/src/lib.rs`: provider-owned 15,000 ms plus `supports_websockets`; `core/src/client.rs` keeps HTTP fallback state at session scope | Coder records the provider capability and timeout but does not select WebSocket while its live wire protocol is Chat Completions. A configuration flag alone does not create a transport. |
+| Product outbound routes | `http-client/src/outbound_proxy.rs`: one `HttpClientFactory`, route classes, explicit direct/proxy decisions, redacted proxy diagnostics | Coder provider, SSE, and webhook clients share one route-aware factory and one environment/`NO_PROXY` resolver. DeepSeek remains direct by default. |
+| Custom trust roots | `http-client/src/custom_ca.rs`: `CODEX_CA_CERTIFICATE` precedes `SSL_CERT_FILE`; every active HTTP/WebSocket constructor uses the shared policy | Coder applies the same precedence with its product prefix, `CODER_CA_CERTIFICATE`, then `SSL_CERT_FILE`, to every active external client. No WebSocket client exists yet. |
+| Local control transport | `app-server-transport/src/transport/websocket.rs`: loopback by default; unauthenticated non-loopback listeners are rejected; browser Origin upgrades are rejected | Coder's HTTP frontend API now rejects non-loopback binds and allows CORS only for loopback and Tauri local origins. It does not expose an unauthenticated remote listener. |
+| Agent command network | `sandboxing`, `network-proxy`, and `windows-sandbox-rs`: OS sandbox plus managed proxy and credential broker; Windows uses restricted identities, Firewall/WFP, proxy allowlists, and offline environment rewrites | Coder strips provider API keys from model command environments, forces model-supplied `sandbox` false, and keeps approval host-owned. It still has no OS socket isolation or host-bound credential injection. |
+| Auto-compaction | `protocol/src/openai_models.rs`: 95% effective context and `min(config_limit, context_window * 9 / 10)` | Coder puts these values in `ModelCapabilities`; DeepSeek's 128k context has 121,600 effective context and a 115,200 compact threshold. |
+| Tool output | `core/src/unified_exec/mod.rs`: 10,000 model-visible tokens and 1 MiB raw output | Coder limits model-visible tool results more tightly and uses the same 1 MiB raw command cap. |
+| Background terminal wait | `core/src/unified_exec/mod.rs`: 300,000 ms | Coder's command lifecycle differs and must be aligned semantically rather than copying a foreground kill timeout. |
+| Multi-agent concurrency | `core/src/config/mod.rs`: MultiAgentV2 defaults to 4 threads | This does not control same-turn tool concurrency. Coder will not reuse `4` for a different parameter. |
+| Agent wait | `core/src/tools/handlers/multi_agents_spec.rs`: minimum 10s, default 30s, maximum 3600s | Retained as a reference for the subagent wait path; it is not a model request timeout. |
+| Tool routing | `core/src/session/turn.rs::build_prompt` takes `ToolRouter::model_visible_specs()`; `core/src/client.rs::build_responses_request` serializes those specs separately from prompt input. Codex core contains no task-specific browser/game verifier. | Coder exposes general command, Skill, subagent, and MCP tools structurally. It does not maintain a domain verifier backend or repeat tool names in user prose. |
+| MCP runtime | `codex-mcp/src/tools.rs` preserves raw identities while sanitizing, collision-hashing, and limiting model names to 64 bytes; `codex-mcp/src/rmcp_client.rs` and `rmcp-client/src/stdio_server_launcher.rs` keep initialized child-process clients; config defaults are 30 seconds for startup and 300 seconds per tool. | Coder uses `rmcp` 1.8 with persistent stdio children, the same 30/300-second defaults, isolated explicit environment forwarding, frozen Executor tool snapshots, stable `mcp__server__tool` names, and host-owned approval/routing through `ServerModelToolExecutor`. |
+| Turn/tool ownership | `core/src/session/turn_context.rs`, `core/src/tools/router.rs`, and `core/src/tools/parallel.rs`: immutable turn configuration plus one router/runtime for permission, dispatch, concurrency, and results; cancellation remains live task state | Native Executor, model-tool API, and subagents use one `ServerModelToolExecutor`. `TurnContext` freezes identity, tools, permissions, model capability, approval, and budget while workflow control remains live. |
+| Change attribution | `core/src/turn_diff_tracker.rs` tracks exact committed `apply_patch` deltas for the current turn without rereading the workspace; `core/src/tools/events.rs` updates it only from known deltas. | Coder persists evidence from the tool that applied each change. It does not collect the repository's whole pre-existing dirty diff after a read-only or write run. |
+| Secret isolation and errors | `protocol/src/shell_environment.rs` excludes environment variable names matching `*KEY*`, `*SECRET*`, and `*TOKEN*`; `protocol/src/error.rs` retains bounded provider error text. | Coder redacts structured secret keys, explicit credential assignments, and key-shaped values. Ordinary diagnostic words such as `token` and `secret` remain visible so blocked runs explain their cause. |
 
-Coder intentionally does not copy every Claude feature. It copies a behavior
-only when it improves resource bounds, context quality, recovery, permissions,
-or maintainability.
+Coder adopts a value only when the state and timeout boundary match. Similar
+names are not sufficient evidence.
 
 ## Research Decision Matrix
 
@@ -53,20 +58,19 @@ or maintainability.
 | [SWE-agent](https://arxiv.org/abs/2405.15793) | Agent-computer interface design materially changes solve rate. Its current `TemplateConfig` bounds one observation at 100,000 characters. | Improve tool result shape and references before adding reasoning layers. Coder keeps a smaller 24,000-character per-result model bound. |
 | [Aider repo map](https://github.com/Aider-AI/aider/blob/main/aider/website/_posts/2023-10-22-repomap.md) | Tree-sitter symbols are graph-ranked into a repository map with a default 1,000-token budget. | Treat a small symbol map as a future localization experiment, not a default dependency. Existing selective search/read tools remain the baseline. |
 | [RepoCoder](https://arxiv.org/abs/2303.12570) | Iterative retrieval and generation improves repository-level completion over one-shot retrieval. | Executor may inspect incrementally; Planner handoff carries intent and quality criteria, not copied source files. |
-| [ReAct](https://arxiv.org/abs/2210.03629) and [Reflexion](https://arxiv.org/abs/2303.11366) | Interleaved evidence and action help; Reflexion iterates until evaluator success or a maximum trial count. | Preserve tool feedback in the Executor loop; let the Workflow Planner turn verifier evidence into one bounded repair/refinement direction. |
+| [ReAct](https://arxiv.org/abs/2210.03629) and [Reflexion](https://arxiv.org/abs/2303.11366) | Interleaved evidence and action help; Reflexion iterates until evaluator success or a maximum trial count. | Preserve tool and check feedback in the Executor loop; let the Workflow Planner turn that evidence into one bounded repair/refinement direction. |
 | [Self-Refine](https://arxiv.org/abs/2303.17651) | Feedback and refinement alternate until `stop(feedback, t)`; experiments commonly cap the number of steps. | Planner judges marginal gain, while Rust enforces round, repetition, and no-progress stop gates. |
 | [LATS](https://arxiv.org/abs/2310.04406) | Search combines external feedback, value estimates, and reflection until success or computation budget exhaustion, with bounded depth. | Keep only the useful value/budget principle; do not add a search tree. `expected_gain` must be medium/high and `max_rounds` remains the hard depth bound. |
 | [Scaling LLM Test-Time Compute Optimally](https://arxiv.org/abs/2408.03314) | Test-time compute is most useful when allocated adaptively by prompt difficulty; spending the maximum budget uniformly is inefficient. | A workflow budget is permission to continue, not a target. Closed verified work stops locally, while only unresolved criteria or a concrete medium/high-gain direction can spend another round. |
 | Russell and Wefald, *Do the Right Thing: Studies in Limited Rationality* (1991) | Additional computation is rational only while its expected value exceeds its cost. | The Workflow Planner estimates gain, but deterministic Rust gates reject low-gain, repeated, no-progress, and over-budget continuation. This is a control heuristic, not a claim of calibrated utility. |
 | [Semantic Early-Stopping for Iterative LLM Agent Loops](https://arxiv.org/abs/2606.27009) | On its HotpotQA study, a judge-free semantic stopper reduced operational tokens by 38% at parity quality, while a per-round quality judge cost more than it saved. | Do not add another judge or embedding service. Reuse the Workflow Planner only on routed quality work, and give it a bounded current-round evidence summary plus cheap repeated-direction and no-progress gates. |
 | [Adaptive Stopping for Multi-Turn LLM Reasoning](https://arxiv.org/abs/2604.01413) | Conformal error allocation can provide coverage guarantees across adaptive turns, but it requires calibrated task data and prediction sets. | Do not claim statistical stopping guarantees without a representative Coder evaluation set. Keep deterministic safety limits now and treat calibrated adaptive budgets as a later measured experiment. |
-| [CP-Agent](https://arxiv.org/abs/2605.24693) | Feedback-driven solving is modeled as a calibrated stopped process with false-admission risk, evidence against bad programs, and active-state success hazard under a finite controller manifest. | Verifier evidence remains mandatory for finish, controller outcomes stay finite (`finish`, `continue`, `blocked`), and an unavailable quality decision must not admit a smoke-test-only result. |
+| [CP-Agent](https://arxiv.org/abs/2605.24693) | Feedback-driven solving is modeled as a calibrated stopped process with false-admission risk, evidence against bad programs, and active-state success hazard under a finite controller manifest. | Executor check evidence remains mandatory for finish, controller outcomes stay finite (`finish`, `continue`, `blocked`), and an unavailable quality decision must not admit an unsupported result. |
 | [DSPy](https://arxiv.org/abs/2310.03714) | Structured signatures and metric-driven optimization outperform hand-tuned prompt strings. | Keep runtime dependency-free; use a small offline evaluation set to tune Planner instructions and reject changes that do not improve measured outcomes. |
 | [Gemini CLI compression](https://github.com/google-gemini/gemini-cli/blob/main/packages/core/src/context/chatCompressionService.ts) | Current defaults trigger at 50% of the context window, preserve the latest 30%, and reserve 50,000 tokens for recent function responses. | Use these as comparison points for the next Executor-history experiment. Do not copy them until the DeepSeek baseline shows the same pressure pattern. |
 | [Aider history](https://github.com/Aider-AI/aider/blob/5dc9490bb35f9729ef2c95d00a19ccd30c26339c/aider/coders/base_coder.py) | `summarize_start()` summarizes only `done_messages` when `too_big`, runs the summarizer in a background thread, and leaves current-turn messages separate. | Coder Executor runs are task-scoped and currently stay well below their context limit; do not add a background summarizer without a long-run overflow case. |
 | [OpenCode compaction](https://github.com/anomalyco/opencode/blob/4a1982f5c951850a1820e7eb0c9ed4b4613a2912/packages/opencode/src/session/compaction.ts) | Pruning protects 40,000 recent tool-output tokens, requires more than 20,000 tokens of actual savings, protects two recent turns, and replaces old output with at most 2,000 characters. | Coder's measured request peak is about 32,000 total tokens, below OpenCode's protected old-tool budget alone. Keep the 24,000-character per-result cap and defer old-result clearing. |
-| Claude `FileEditTool` local source | `packages/builtin-tools/src/tools/FileEditTool/utils.ts` applies an internal `edits[]` sequentially, while the public Edit contract remains one exact `old_string`/`new_string` replacement and the prompt permits multiple Edit calls in one model message. | Preserve the exact-replacement contract and add an optional same-file `edits[]` shape to the existing tool. Do not import Claude's larger edit stack or add another public tool. |
-| Codex Rust `apply-patch` local source | `codex-rs/apply-patch/src/lib.rs` and its tool tests accept multiple files and hunks in one `apply_patch` call, parse the complete change before mutation, and reject invalid patches. | Keep Coder's patch-file path for user/API patch workflows. Provider repair turns use the smaller exact-edit tool, but batch validation must be atomic before its one file write. |
+| Codex Rust `apply-patch` local source | `codex-rs/apply-patch/src/lib.rs`, `core/src/tools/handlers/apply_patch_spec.rs`, and their tests accept multiple files and hunks in one `apply_patch` call, expose the Lark grammar, parse the complete change before mutation, and reject invalid patches. | Coder exposes the same grammar as the canonical provider-visible write tool through a `{ patch }` function argument for Chat Completions providers. All target contents are prepared before mutation, and commit I/O failure restores every affected path. The separate patch-file API/CLI boundary remains available for user-supplied patch files. |
 
 ## Codex Rust Communication Reference
 
@@ -113,8 +117,9 @@ its thinking switch and generic compatible endpoints receive
 Coder now copies Codex's default accounting semantics without exposing its
 uncalibrated tuning surface: sampling/output tokens and non-cached input tokens
 both have weight `1.0`; cache-read tokens have zero incremental charge. The
-optional workflow limit has no invented default. Custom weights and reminder
-thresholds remain absent until cross-provider evaluations justify them.
+workflow limit is derived from resolved model capacity and rounds unless the
+workflow explicitly overrides it. Custom weights and reminder thresholds remain
+absent until cross-provider evaluations justify them.
 
 ## Current Optimization Pass
 
@@ -144,7 +149,7 @@ thresholds remain absent until cross-provider evaluations justify them.
   default model reference and provider runtime.
 - Provider-backed Workflow Planner decisions use strict JSON output and
   code-enforced stop gates. Successful closed tasks retain a zero-provider
-  fast path; qualitative goals and verifier failures receive model analysis.
+  fast path; qualitative goals and Executor failures receive model analysis.
 - A missing, failed, or malformed live Workflow Planner decision is `blocked`,
   not converted to `finish` by an earlier smoke-test pass. Low gain,
   repetition, no progress, and final-round exhaustion remain ordinary stop
@@ -153,14 +158,17 @@ thresholds remain absent until cross-provider evaluations justify them.
   turn rather than HTTP 500 or a ready deterministic fallback. The current
   user request remains in the session, the provider status is visible, and no
   execution authorization is produced.
-- Browser/game verification now uses word-boundary intent routing, reads inline
-  scripts, starts common button/overlay entry surfaces, and prioritizes console
-  errors over a generic no-progress failure.
-- `edit_text_file` accepts either one replacement or at most
-  32 ordered same-file replacements in `edits[]`. All replacements are applied
-  and validated in memory before one write; a later ambiguous or missing match
-  leaves the file unchanged. This removes repeated provider turns without a new
-  patch parser, tool, agent, or file-write path.
+- Verification is selected by the Executor from general structured tools and
+  repository conventions. Task-specific checks belong in commands, Skills, or
+  MCP integrations rather than fixed Rust classifiers.
+- `apply_patch` is the canonical provider-visible write tool. It supports
+  Add/Delete/Update/Move operations across multiple files, validates all hunks
+  before mutation, records one evidence chain for every affected path, and
+  rolls back partial commit I/O failures. Legacy exact-edit and whole-file
+  responses remain accepted only for compatibility with existing sessions.
+- Registered stdio MCP tools join the normal Executor schema and shared
+  model-tool pipeline. Tool discovery is frozen once per run, typed read-only
+  tasks exclude MCP, and only read-only annotations permit parallel calls.
 - Subagent cleanup records are emitted only for concrete task ownership or
   cancellation actions.
 
@@ -170,8 +178,7 @@ thresholds remain absent until cross-provider evaluations justify them.
 | --- | --- | --- | --- |
 | Planner Chat | Bounded conversation history plus current plan | No execution tools | User conversation, including while work is active |
 | Executor | Compact approved plan, run events, tool results, queued guidance | Harness-scoped native tools | Start Work and repair rounds |
-| Verifier | Task, repo, and evidence snapshot | Read-only verifier checks | After each Executor outcome |
-| Workflow Planner | Goal, plan criteria, verifier evidence, round budget, current progress, and at most three prior directions | No execution tools | Every verifier outcome; provider call only for failure/blocking or open-ended quality intent |
+| Workflow Planner | Goal, plan criteria, Executor action/check evidence, round budget, current progress, and at most three prior directions | No execution tools | Every Executor outcome; provider call only for failure/blocking or open-ended quality intent |
 | Subagent | Filtered child context and allowed tool set | Child-harness tools only | Explicit Executor/skill delegation |
 
 Planner session revisions prevent workflow completion from overwriting newer
@@ -203,11 +210,23 @@ reported in Planner Chat instead of being silently deleted.
 - Full Planner history is not copied into execution; Start Work creates a
   compact plan handoff.
 - Start Work authorization is represented once as
-  `plan_context.start_work_authorized=true`. The task and plan goal retain only
-  the sanitized domain objective.
-- Provider tool turns stop immediately on `finish`. The example Executor sets
-  24 turns explicitly, and the native runtime uses the same fallback if a
-  custom configuration omits the value.
+  `plan_context.start_work_authorized=true`. `request.task` is the single
+  sanitized objective; the plan handoff carries only supplemental execution
+  constraints and does not repeat the original request or goal.
+- Tool availability is transmitted once through provider tool schemas. The
+  user prompt does not serialize `selected_tools`, matching Codex's separate
+  `Prompt.input` and `Prompt.tools` fields.
+- Native execution has one side-effect protocol. Plain assistant text may end a
+  read-only task, but file changes require structured tools and their shared
+  permission/evidence pipeline; the former whole-file JSON plan path was
+  removed.
+- Backend context omits unconsumed memory summaries, model profile aliases, and
+  duplicated permission policy/tool metadata. Raw harness policy remains only
+  where child inheritance needs it; permission events receive a compact
+  contract plus evaluated decisions.
+- Provider tool turns stop immediately on `finish`. Explicit `max_turns` wins;
+  otherwise the model-aware host policy supplies 24 turns for normal-output
+  models or 16 for high-output reasoning models.
 - Native Executor responses ending in `length` or `max_tokens` use the existing
   three-attempt output recovery policy. The retry prompt follows Claude's
   smaller-piece recovery instruction, while provider-specific 64k escalation
@@ -219,7 +238,9 @@ reported in Planner Chat instead of being silently deleted.
   the round boundary and never copies the Executor transcript.
 - `max_rounds` defaults to 3. The final round cannot continue; repeated Planner
   directions and a second refinement without Executor evidence are stopped.
-- `workflow.token_budget` is an optional run-level stop threshold. It is shared
+- `workflow.token_budget` is an optional run-level override. Otherwise
+  `(context_window + 2 * max_output) * max_rounds`, clamped to
+  64,000..2,000,000, supplies the visible default. It is shared
   by the root Executor, Workflow Planner, synchronous/background subagents,
   Prompt/Agent hooks, and transcript compaction. Each successful provider
   response charges `output + max(0, input - cache_read)`; providers without
@@ -240,16 +261,8 @@ reported in Planner Chat instead of being silently deleted.
   deltas. Coder deliberately does not copy that continuation rule: acceptance
   and marginal gain decide continuation, while round/turn/output limits remain
   hard backstops.
-- Retained DeepSeek logs demonstrate why the shared bound is distinct from
-  rounds and turns. The from-zero game run used 110 provider turns and 341,376
-  weighted tokens (`163,414` output + `177,962` non-cached input); its repair
-  run used 40 turns and 108,312 weighted tokens. These are reproducible sums of
-  `model.provider_turn.completed` records across the root and subagent JSONL
-  files. They motivated the budget implementation; they are not default limits.
-- Browser checks are selected from task intent. A Node.js utility is not a
-  browser task merely because it uses JavaScript.
-- Missing verifier runtime, credentials, permission, or network state is an
-  external blocker and is not routed back as a code repair.
+- Missing command runtime, credentials, permission, or network state is an
+  external blocker and is not misreported as a code repair.
 
 ## Implemented Native Capabilities
 
@@ -257,13 +270,13 @@ reported in Planner Chat instead of being silently deleted.
 - Shared permission, hook, evidence, result-bounding, and redaction pipeline.
 - Prompt, isolated agent, command, async rewake, and webhook hooks.
 - Foreground-to-background command handoff, bounded output, polling, and
-  cancellation.
+  explicit `read_command_output` / `cancel_command_background` control.
 - Skills with scoped context modifiers and forked execution.
 - Synchronous/background subagents with filtered tools, sidechain transcripts,
-  durable status, polling, cancellation, and lost-handle recovery.
+  durable status, explicit `read_subagent_status` /
+  `cancel_subagent_background` control, and lost-handle recovery.
 - Deterministic plan compaction, model-backed transcript compaction, bounded
   restoration attachments, and persistent failure circuits.
-- Browser/game static and dynamic checks using a Coder-owned Playwright runtime.
 - Append-only run/session evidence, Review Changes, conservative undo, cache
   accounting, and bounded page/tail reads.
 - Active model/tool cancellation using `tokio::sync::watch`; pause is observed
@@ -275,122 +288,29 @@ reported in Planner Chat instead of being silently deleted.
 | --- | --- | --- |
 | Native lightweight core | Cargo workspace contains 11 native crates and the default execution path stays inside Coder-owned Rust harnesses. | Complete |
 | Maintainable module layout | `coder-server/src/lib.rs` and `coder-workflow/src/lib.rs` are wiring layers; behavior lives in focused modules. | Complete |
-| Parallel Planner and workflow | Deterministic concurrency/cancellation tests pass; the live game session retained a parallel Planner turn after workflow completion. | Complete |
+| Parallel Planner and workflow | Deterministic concurrency/cancellation tests prove Planner Chat remains available while Start Work runs and completion does not overwrite newer turns. | Complete |
 | Local status/supplement/stop control | Targeted server tests prove zero-provider routing and in-flight cancellation. | Complete |
 | Low-token successful path | Pure confirmation is local; closed verified tasks use a zero-provider Planner fast path; open-ended quality review is capped at 900 output tokens. | Complete |
-| Real provider path | DeepSeek `deepseek-v4-flash`, direct proxy mode, SSE Planner transport, native tools, hooks, compaction, subagent, Review Changes, and secret checks executed successfully. | Complete |
-| Autonomous open-ended task | Run `e444d194-5a31-4417-b3f8-c3a3fe8dd30e` created and verified a browser garden-defense game from a short prompt; independent QA records the remaining quality gap below. | Complete |
+| Real provider path | Provider transport, native tools, hooks, compaction, subagent, Review Changes, and secret boundaries have deterministic coverage. A minimal live DeepSeek replay completed through Planner Chat, Start Work, native Executor tools, Workflow Planner, final report, and Review Changes; streaming stayed on the event-stream path and the secret scan passed. | Complete |
 | Documentation | Maintained docs describe the current native path, architecture, provider setup, persistence, and resource policy. | Complete |
-
-## Bounded Planner Live Evidence
-
-The 2026-07-11 DeepSeek evaluation used a sparse open-ended prompt. Coder built
-the game from an empty directory; no game source was edited manually:
-
-- Run `e444d194-5a31-4417-b3f8-c3a3fe8dd30e` completed with 21 Executor
-  provider turns, 355,817 input tokens, 337,792 cache-read tokens, and 10,851
-  output tokens. Its weighted non-cache cost was 28,876 tokens. This is a major
-  reduction from the retained 110-turn, 341,376-weighted-token baseline.
-- The run used exact text edits, a child review agent, browser verification,
-  Review Changes, and one provider-backed Workflow Planner decision. The
-  Workflow Planner finished after one round because all generic browser checks
-  passed.
-- Independent Playwright QA at 1440x900 and 375x667 proved that desktop start,
-  placement, passive sun, lose, win, and restart states work without console
-  errors. It also found evidence the generic verifier missed: the 564px board
-  spans `-94.5..469.5` in a 375px viewport while body overflow is hidden; the
-  start panel spans `-147..869` in a 667px viewport; the fifth-row zombie is
-  about 85px below its row; and Wave 1 displays `Wave 2 incoming`.
-- Quality score: **5.2/10**. The desktop surface is recognizable and playable,
-  with three plant and zombie roles, sun economy, waves, combat, and restart.
-  Mobile is materially unusable, the wave announcement is wrong, and the art
-  and strategic depth remain modest.
-- A normal-user repair request produced run
-  `8c69c147-2a59-4876-b1d3-7271518add64`. It used 24 provider turns, 443,889
-  input tokens, 429,312 cache-read tokens, and 10,039 output tokens, for a
-  weighted cost of 24,616. It made 21 successful exact edits and added zombie
-  count/health feedback, but independent QA showed all four defects unchanged.
-- That repair exposed a control bug: Executor reported
-  `stopped_after_turn_limit_with_file_writes`, while Workflow Planner still
-  claimed the UI was responsive and finished from generic smoke evidence.
-  Coder now forces one bounded completion/self-review round for this exact
-  qualitative interruption, then reports blocked if it repeats or reaches the
-  final round. Closed deterministic tasks keep their zero-provider fast path.
-- Planned acceptance criteria are no longer copied into final-report `checks`
-  as if they were evidence. Chat Planner now makes qualitative criteria
-  falsifiable and deterministically adds a representative primary-flow review;
-  rendered experiences also require one desktop and one mobile viewport with
-  no clipping, overlap, overflow, or unreachable controls.
-- Two real Planner-only probes with `deepseek-v4-flash` confirmed the gap and
-  fix. The first returned only generic functional/desktop criteria. The second
-  retained the model's domain plan and added the bounded flow and desktop/mobile
-  evidence criteria. The second probe used 1,121 input, 256 cache-read, and 508
-  output tokens and did not start a workflow or edit files.
-- A post-fix full Executor replay was requested with explicit user approval,
-  but the host execution policy rejected exporting the target game's source to
-  the external provider. No post-batch DeepSeek turn-count or quality
-  improvement is claimed. Local schema, compatibility, sequential-application,
-  atomic-failure, and provider-loop tests pass.
-
-## Previous Live Baseline
-
-The 2026-07-10 DeepSeek run predates the bounded success-path Workflow Planner.
-It used one workflow round and no Workflow Planner provider call:
-
-- Planner initial turn: 1 provider request; pure confirmation: 0 requests.
-- Parallel Planner conversation remained available during Start Work and was
-  preserved after completion.
-- Executor: 16 provider turns, 281,829 input tokens, 18,296 output tokens,
-  265,728 cache-read tokens, and 300,125 total reported tokens.
-- Only 16,101 Executor input tokens were not cache reads (94.3% of input was
-  cached); the largest single request was 32,002 input tokens. This does not
-  justify aggressive history compaction yet because rewriting the prefix could
-  trade a small context reduction for lower cache reuse.
-- Tools included file writes, commands, repo reads, `agent_subagent`,
-  `read_subagent_status`, and `finish`.
-- Browser verification passed page load, static structure, gameplay input/loop,
-  visible progress, Edge launch, and console checks.
-- The run produced `index.html`, `main.js`, and `style.css`; Review Changes and
-  the final report contained all three.
-- Independent Playwright QA placed a plant, observed resource reduction,
-  started a wave, and observed an enemy. The result scored 7.8/10: fully
-  playable, with modest emoji-driven art and a clipped mobile Wave indicator.
 
 ## Residual Risk
 
 These are release-depth improvements, not missing core architecture:
 
-- Decide whether generic viewport geometry belongs in the optional browser
-  verifier after measuring false positives. Planner criteria now require the
-  evidence, but the current verifier still does not collect it automatically.
 - Measure prompt-cache behavior with providers beyond DeepSeek before adding
   cache-edit complexity.
-- Add live multi-turn skill-modifier pressure when a real skill workflow needs
-  it.
-- Re-run a full qualitative repair after the new interrupted-Executor gate and
-  batch edit contract in an environment whose data-export policy permits the
-  explicitly approved provider request. Unit tests and Planner-only DeepSeek
-  evidence pass, but no second paid Executor repair is claimed for these gates.
-- Measure whether same-file batches reduce the latest repair's 24 turns for 21
-  successful edits and one failed call. The implementation removes the known
-  one-edit-per-turn interface pressure, but only a real replay can establish
-  model adoption, token savings, and earlier `finish` behavior.
-- Add task-specific behavioral evidence without baking game rules into the
-  fixed architecture. The latest mobile and wave defects show that generic
-  browser progress is necessary but not sufficient for qualitative completion.
 - The native provider loop still clones and serializes its accumulated message
   vector on every turn, but this is a transient copy rather than a demonstrated
   leak. The measured request peak was about 32,000 tokens, and DeepSeek reused
   most of the prefix from cache. Claude's ordinary old-result clearing is
   disabled by default, Codex also clones a normalized prompt snapshot, and
   OpenCode protects 40,000 recent tool-output tokens before pruning. Do not
-  trade cache reuse for compaction until a run approaches Coder's 167,000-token
+  trade cache reuse for compaction until a run approaches Coder's 180,000-token
   threshold or memory profiling attributes material retained bytes here.
 - Planner Chat has no repository tools. This is intentional for the current
   side-effect-free boundary; large-repository planning should be evaluated
   before deciding whether a bounded read-only exploration step is justified.
-- Keep browser runtime provisioning Coder-owned and optional; never install it
-  into the user's target repo as a side effect of verification.
 
 ## Maintenance Rule
 

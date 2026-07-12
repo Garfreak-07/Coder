@@ -334,11 +334,9 @@ async fn run_subagent_request(
                 request.parent_harness_id
             ))
         })?;
-    let backend_registry =
-        BackendRegistry::from_project_config(&request.config, state.store.clone())
-            .with_native_backend(Arc::new(
-                crate::native_model_backend::NativeModelBackend::new(state.clone()),
-            ));
+    let backend_registry = BackendRegistry::for_host().with_native_backend(Arc::new(
+        crate::native_model_backend::NativeModelBackend::new(state.clone()),
+    ));
     let backend = backend_registry
         .backend_for(&harness.backend)
         .ok_or_else(|| {
@@ -426,7 +424,6 @@ fn project_subagent_backend_context(
         coder["agent"] = json!({
             "agent_type": agent_id,
             "role": &agent.role,
-            "model": &agent.model,
             "system": &agent.system,
             "output_contract": &agent.output_contract,
             "runtime": &agent.runtime
@@ -438,7 +435,6 @@ fn project_subagent_backend_context(
         coder["harness"]["selected_tools"] = json!(selected_tools);
         if let Some(model) = config.models.get(&agent.model) {
             coder["model"] = json!({
-                "profile_ref": &agent.model,
                 "provider": &model.provider,
                 "model": &model.model,
                 "base_url_env": &model.base_url_env,

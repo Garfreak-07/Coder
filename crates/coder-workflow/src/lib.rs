@@ -3,8 +3,6 @@ use coder_store::{RunStore, StoreError};
 use thiserror::Error;
 
 mod backend_registry;
-mod browser_verifier;
-mod browser_verifier_dynamic;
 mod context_budget;
 mod context_compaction;
 mod mock_runner;
@@ -26,21 +24,15 @@ mod workflow_run_types;
 mod workflow_runner_core;
 mod workflow_verification;
 pub use backend_registry::{BackendRegistry, PlannerModelBackend};
-pub use browser_verifier::BrowserVerifierBackend;
-pub use browser_verifier_dynamic::{
-    browser_verifier_runtime_status, BrowserVerifierPlaywrightCandidate,
-    BrowserVerifierRuntimeStatus,
-};
 pub use context_budget::{context_budget_for_runtime, ContextBudget};
 pub use mock_runner::{MockRunOptions, MockRunOutcome, MockRunOutput, MockWorkflowRunner};
 pub use model_tool_loop::{
     execute_model_tool_turn, model_tool_concurrency, synthesize_missing_model_tool_results,
     ModelToolExecutionError, ModelToolExecutionRequest, ModelToolExecutionResult,
-    ModelToolExecutor, ModelToolHostContext, ModelToolLoopOptions, ModelToolResultBlock,
-    ModelToolTurnOutput, ModelToolUseBlock, MODEL_TOOL_RESULT_CONTRACT,
+    ModelToolExecutor, ModelToolLoopOptions, ModelToolResultBlock, ModelToolTurnOutput,
+    ModelToolUseBlock, TurnContext, MODEL_TOOL_RESULT_CONTRACT,
 };
-pub(crate) use native_backend::{native_selected_tools, truncate_public};
-pub use native_backend::{NativeMockBackend, NativeMockOutcome, NativeRustBackend};
+pub use native_backend::{DeterministicNativeBackend, NativeMockBackend, NativeMockOutcome};
 pub use provider_streaming::{
     OpenAiCompatibleStreamAdapter, ProviderStreamEvent, ProviderStreamEventKind,
     ProviderStreamFinal, ProviderStreamIssue,
@@ -71,8 +63,9 @@ pub struct WorkflowRunner {
 }
 
 impl WorkflowRunner {
-    pub fn new(config: ProjectConfig, store: RunStore) -> Self {
-        let backends = BackendRegistry::from_project_config(&config, store.clone());
+    #[cfg(test)]
+    fn new(config: ProjectConfig, store: RunStore) -> Self {
+        let backends = BackendRegistry::for_deterministic_tests(store.clone());
         Self {
             config,
             store,

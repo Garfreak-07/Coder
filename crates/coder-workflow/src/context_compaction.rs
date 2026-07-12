@@ -1,4 +1,4 @@
-use coder_config::AgentRuntimePolicy;
+use coder_config::ResolvedAgentRuntimePolicy;
 use coder_store::CompactionCircuitState;
 use serde_json::{json, Map, Value};
 use time::format_description::well_known::Rfc3339;
@@ -35,7 +35,7 @@ impl ContextCompactionCircuitOutcome {
 
 pub fn compact_plan_context_with_circuit(
     plan_context: Option<&Value>,
-    runtime: &AgentRuntimePolicy,
+    runtime: &ResolvedAgentRuntimePolicy,
     circuit_state: Option<&CompactionCircuitState>,
 ) -> ContextCompactionOutput {
     let budget = context_budget_for_runtime(runtime);
@@ -150,7 +150,7 @@ struct CompactionCircuitReport {
 }
 
 fn compaction_circuit_report(
-    runtime: &AgentRuntimePolicy,
+    runtime: &ResolvedAgentRuntimePolicy,
     state: Option<&CompactionCircuitState>,
 ) -> CompactionCircuitReport {
     let max_consecutive_failures = runtime.max_consecutive_compaction_failures;
@@ -289,18 +289,44 @@ fn estimate_json_tokens(value: &Value) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coder_config::{
+        resolve_agent_runtime_policy, AgentRuntimePolicy, ModelCapabilities, ModelSpec,
+    };
+
+    fn resolved_runtime(runtime: AgentRuntimePolicy) -> ResolvedAgentRuntimePolicy {
+        resolved_runtime_with_capabilities(runtime, ModelCapabilities::default())
+    }
+
+    fn resolved_runtime_with_capabilities(
+        runtime: AgentRuntimePolicy,
+        capabilities: ModelCapabilities,
+    ) -> ResolvedAgentRuntimePolicy {
+        resolve_agent_runtime_policy(
+            &ModelSpec {
+                provider: "openai-compatible".to_owned(),
+                model: "test".to_owned(),
+                base_url_env: None,
+                api_key_env: None,
+                capabilities,
+            },
+            &runtime,
+        )
+    }
 
     #[test]
     fn small_plan_context_does_not_compact() {
         let context = json!({
             "plan_draft": {
-                "goal": "Update docs",
+                "steps": ["Update docs"],
                 "acceptance_criteria": ["tests pass"]
             }
         });
 
-        let output =
-            compact_plan_context_with_circuit(Some(&context), &AgentRuntimePolicy::default(), None);
+        let output = compact_plan_context_with_circuit(
+            Some(&context),
+            &resolved_runtime(AgentRuntimePolicy::default()),
+            None,
+        );
 
         assert_eq!(output.report["status"], "not_needed");
         assert_eq!(output.report["applied"], false);
@@ -309,17 +335,27 @@ mod tests {
 
     #[test]
     fn large_plan_context_compacts_before_backend_payload() {
-        let runtime = AgentRuntimePolicy {
-            context_window_tokens: 32_000,
-            compact_output_reserve_tokens: 1_000,
-            autocompact_buffer_tokens: 1_000,
-            max_output_tokens: Some(8_000),
-            ..AgentRuntimePolicy::default()
-        };
+        let runtime = resolved_runtime_with_capabilities(
+            AgentRuntimePolicy {
+                compact_output_reserve_tokens: Some(1_000),
+                max_output_tokens: Some(8_000),
+                ..AgentRuntimePolicy::default()
+            },
+            ModelCapabilities {
+                context_window_tokens: Some(32_000),
+                max_output_tokens: Some(8_000),
+                auto_compact_token_limit: Some(30_000),
+                ..ModelCapabilities::default()
+            },
+        );
         let huge = "x".repeat(140_000);
         let context = json!({
-            "original_user_request": huge,
-            "acceptance_criteria": (0..100).map(|index| format!("criterion-{index}")).collect::<Vec<_>>()
+            "plan_draft": {
+                "execution_mode": "must_write",
+                "review_mode": "qualitative",
+                "steps": [huge],
+                "acceptance_criteria": (0..100).map(|index| format!("criterion-{index}")).collect::<Vec<_>>()
+            }
         });
 
         let output = compact_plan_context_with_circuit(Some(&context), &runtime, None);
@@ -335,9 +371,11 @@ mod tests {
             Some("completed" | "completed_aggressive" | "over_blocking_limit")
         ));
         assert!(estimate_json_tokens(&compacted) < estimate_json_tokens(&context));
-        assert!(compacted["original_user_request"]
+        assert!(compacted["plan_draft"]["steps"][0]
             .as_str()
             .unwrap()
             .ends_with("..."));
+        assert_eq!(compacted["plan_draft"]["execution_mode"], "must_write");
+        assert_eq!(compacted["plan_draft"]["review_mode"], "qualitative");
     }
 }

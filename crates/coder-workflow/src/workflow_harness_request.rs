@@ -1,4 +1,7 @@
-use coder_config::{resolve_agent_tools, AgentSpec, HarnessSpec, ModelSpec, WorkflowNodeSpec};
+use coder_config::{
+    resolve_agent_runtime_policy, resolve_agent_tools, AgentSpec, HarnessSpec, ModelSpec,
+    WorkflowNodeSpec,
+};
 use coder_core::RunId;
 use coder_harness::HarnessRunRequest;
 use coder_store::CompactionCircuitState;
@@ -6,7 +9,7 @@ use serde_json::{json, Value};
 
 use crate::{
     context_compaction::compact_plan_context_with_circuit,
-    workflow_context_projection::{memory_scope_summary, model_reference, permission_summary},
+    workflow_context_projection::{model_reference, permission_summary},
 };
 
 pub(crate) struct HarnessRunRequestInput<'a> {
@@ -50,9 +53,10 @@ fn harness_backend_context(
 ) -> Value {
     let agent_tools = resolve_agent_tools(input.agent, input.harness);
     let selected_tools = &agent_tools.selected_tools;
+    let resolved_runtime = resolve_agent_runtime_policy(input.model, &input.agent.runtime);
     let compacted_plan_context = compact_plan_context_with_circuit(
         plan_context,
-        &input.agent.runtime,
+        &resolved_runtime,
         input.compaction_circuit_state,
     );
     let plan_context = compacted_plan_context
@@ -66,20 +70,17 @@ fn harness_backend_context(
         "harness_id": input.node.harness,
         "agent": {
             "role": &input.agent.role,
-            "model": &input.agent.model,
             "system": &input.agent.system,
             "output_contract": &input.agent.output_contract,
             "runtime": serde_json::to_value(&input.agent.runtime).unwrap_or(Value::Null)
         },
         "harness": {
-            "backend": &input.harness.backend,
             "selected_tools": selected_tools,
             "permissions": serde_json::to_value(&input.harness.permissions).unwrap_or(Value::Null),
             "memory": serde_json::to_value(&input.harness.memory).unwrap_or(Value::Null),
             "verification": serde_json::to_value(&input.harness.verification).unwrap_or(Value::Null)
         },
-        "model": model_reference(input.agent, input.model),
-        "memory": memory_scope_summary(input.agent, input.harness),
+        "model": model_reference(input.model),
         "permissions": permission_summary(input.harness),
         "context_compaction": compacted_plan_context.report,
         "plan_context": plan_context,

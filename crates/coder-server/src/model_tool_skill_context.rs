@@ -1,4 +1,4 @@
-use coder_workflow::{ModelToolHostContext, ModelToolResultBlock};
+use coder_workflow::{ModelToolResultBlock, TurnContext};
 use serde_json::{json, Value};
 
 const MODEL_TOOL_TURN_ATTACHMENT_CONTRACT: &str = "coder.model_tool_turn_attachment.v1";
@@ -12,7 +12,7 @@ pub(crate) struct SkillContextModifierPermissionDecision {
 }
 
 pub(crate) fn skill_context_modifier_attachments(
-    host_context: &ModelToolHostContext,
+    host_context: &TurnContext,
     results: &[ModelToolResultBlock],
 ) -> Vec<Value> {
     results
@@ -25,7 +25,7 @@ pub(crate) fn model_tool_skill_context_modifier_permission_decision(
     required_permission: Option<&str>,
     canonical_tool_name: &str,
     input: &Value,
-    host_context: &ModelToolHostContext,
+    host_context: &TurnContext,
     base_policy_decision_status: &str,
 ) -> SkillContextModifierPermissionDecision {
     if host_context.skill_context_modifiers.is_empty() {
@@ -50,12 +50,7 @@ pub(crate) fn model_tool_skill_context_modifier_permission_decision(
         "canonical_tool_name": canonical_tool_name,
         "base_policy_decision_status": base_policy_decision_status,
         "submitted_modifier_count": host_context.skill_context_modifiers.len(),
-        "active_modifier_count": active_modifiers.len(),
-        "claude_sources": [
-            "packages/builtin-tools/src/tools/SkillTool/SkillTool.ts contextModifier",
-            "src/screens/REPL.tsx additionalAllowedTools turn scoping",
-            "src/utils/permissions/PermissionRule.ts"
-        ]
+        "active_modifier_count": active_modifiers.len()
     });
 
     if active_modifiers.is_empty() {
@@ -150,7 +145,7 @@ pub(crate) fn model_tool_skill_context_modifier_permission_decision(
 }
 
 fn skill_context_modifier_attachment(
-    host_context: &ModelToolHostContext,
+    host_context: &TurnContext,
     result: &ModelToolResultBlock,
 ) -> Option<Value> {
     if result.is_error {
@@ -210,13 +205,7 @@ fn skill_context_modifier_attachment(
             "current_model": host_context.current_model.clone(),
             "effort": effort
         },
-        "execution_policy": policy.clone(),
-        "claude_sources": [
-            "packages/builtin-tools/src/tools/SkillTool/SkillTool.ts contextModifier",
-            "src/screens/REPL.tsx additionalAllowedTools turn scoping",
-            "src/screens/REPL.tsx effort turn scoping",
-            "src/utils/model/model.ts resolveSkillModelOverride"
-        ]
+        "execution_policy": policy.clone()
     }))
 }
 

@@ -69,7 +69,11 @@ export function normalizeAgentWorkflow(workflow: AgentWorkflowSpec): AgentWorkfl
 }
 
 export function toAgentFlowNodes(workflow: AgentWorkflowSpec): FlowNode[] {
-  return workflow.agents.map((agent, index) => ({
+  const connectedAgentIds = new Set(workflow.edges.flatMap((edge) => [edge.from, edge.to]));
+  const visibleAgents = connectedAgentIds.size > 0
+    ? workflow.agents.filter((agent) => connectedAgentIds.has(agent.id))
+    : workflow.agents;
+  return visibleAgents.map((agent, index) => ({
     id: agent.id,
     type: "default",
     position: workflow.ui?.layout?.[agent.id] ?? agentPositions[agent.role] ?? { x: 80 + index * 280, y: 120 },

@@ -307,12 +307,7 @@ fn background_command_model_tool_hook(
             "async_rewake": async_rewake,
             "timeout_seconds": timeout_seconds,
             "default_timeout_seconds": CLAUDE_TOOL_HOOK_EXECUTION_TIMEOUT_SECONDS,
-            "stdin_protocol": "claude.hook_input.v1",
-            "claude_sources": [
-                "src/utils/hooks.ts execCommandHook config-based async hook",
-                "src/utils/hooks.ts executeInBackground",
-                "src/utils/hooks/AsyncHookRegistry.ts registerPendingAsyncHook"
-            ]
+            "stdin_protocol": "claude.hook_input.v1"
         }),
     );
     let store_for_task = store.clone();
@@ -369,11 +364,7 @@ fn background_command_model_tool_hook(
                         "output_truncated": output.output_truncated,
                         "rewake_requested": async_rewake,
                         "rewake_notification_recorded": async_rewake && output.returncode == Some(2),
-                        "async_response_recorded": async_response.is_some(),
-                        "claude_sources": [
-                            "src/utils/hooks.ts executeInBackground",
-                            "src/utils/hooks/AsyncHookRegistry.ts checkForAsyncHookResponses"
-                        ]
+                        "async_response_recorded": async_response.is_some()
                     }),
                 );
                 if let Some(async_response) = async_response {
@@ -404,12 +395,7 @@ fn background_command_model_tool_hook(
                             "outcome": outcome,
                             "hook_output_kind": async_response.kind,
                             "output_channel": "coder_tools_merged_output",
-                            "delivery_status": "recorded_not_delivered",
-                            "claude_sources": [
-                                "src/utils/hooks.ts executeInBackground",
-                                "src/utils/hooks/AsyncHookRegistry.ts checkForAsyncHookResponses",
-                                "src/utils/attachments.ts getAsyncHookResponseAttachments"
-                            ]
+                            "delivery_status": "recorded_not_delivered"
                         }),
                     );
                 }
@@ -439,11 +425,7 @@ fn background_command_model_tool_hook(
                                 } else {
                                     output.output.trim()
                                 }
-                            ),
-                            "claude_sources": [
-                                "src/utils/hooks.ts executeInBackground asyncRewake",
-                                "src/utils/messageQueueManager.ts enqueuePendingNotification"
-                            ]
+                            )
                         }),
                     );
                 }
@@ -486,11 +468,7 @@ fn background_command_model_tool_hook(
             "rewake_delivery": if async_rewake { "recorded_on_exit_code_2_pending_model_turn_delivery" } else { "not_requested" },
             "stdin_protocol": "claude.hook_input.v1",
             "timeout_seconds": timeout_seconds,
-            "default_timeout_seconds": CLAUDE_TOOL_HOOK_EXECUTION_TIMEOUT_SECONDS,
-            "claude_sources": [
-                "src/utils/hooks.ts execCommandHook config-based async hook",
-                "src/utils/hooks.ts executeInBackground"
-            ]
+            "default_timeout_seconds": CLAUDE_TOOL_HOOK_EXECUTION_TIMEOUT_SECONDS
         }),
         blocking_error: None,
         effects: ModelToolHookEffects::default(),

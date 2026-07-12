@@ -114,6 +114,17 @@ export interface RustModelSpec {
   model: string;
   base_url_env?: string | null;
   api_key_env?: string | null;
+  capabilities?: RustModelCapabilities;
+}
+
+export interface RustModelCapabilities {
+  context_window_tokens?: number | null;
+  max_output_tokens?: number | null;
+  auto_compact_token_limit?: number | null;
+  effective_context_window_percent?: number | null;
+  supports_streaming?: boolean | null;
+  supports_tool_calls?: boolean | null;
+  supports_parallel_tool_calls?: boolean | null;
 }
 
 export interface RustMemoryAccess {
@@ -168,7 +179,6 @@ export type RustAgentMemoryRole =
   | "task_execution"
   | "planner"
   | "executor"
-  | "verifier"
   | string;
 
 export type RustMemoryAllowedContext =
@@ -250,6 +260,12 @@ export interface RustMcpManifestOperation {
 export interface RustMcpServerManifest {
   server_id: string;
   name: string;
+  command: string;
+  args: string[];
+  cwd?: string | null;
+  env_vars: string[];
+  startup_timeout_sec?: number | null;
+  tool_timeout_sec?: number | null;
   operations: RustMcpManifestOperation[];
   enabled_by_default: boolean;
 }
@@ -277,6 +293,20 @@ export interface RustMcpServerListResponse {
   servers: RustMcpServerSummary[];
 }
 
+export interface RustMcpServerRegistrationRequest {
+  manifest: unknown;
+}
+
+export interface RustMcpServerRegistrationResponse {
+  server: RustMcpServerSummary;
+  tools: RustMcpToolSummary[];
+}
+
+export interface RustMcpServerRemoveResponse {
+  server_id: string;
+  removed: boolean;
+}
+
 export interface RustMcpToolSummary {
   server_id: string;
   name: string;
@@ -285,6 +315,7 @@ export interface RustMcpToolSummary {
   side_effect: RustMcpSideEffectLevel;
   enabled: boolean;
   requires_approval: boolean;
+  input_schema: Record<string, unknown>;
 }
 
 export interface RustMcpToolListResponse {
@@ -305,30 +336,6 @@ export interface RustMcpToolCallResult {
   approval_key: string;
   output: unknown;
   evidence_ref?: string | null;
-}
-
-export interface RustToolCapability {
-  name: string;
-  toolset: string;
-  side_effect: RustMcpSideEffectLevel;
-  risk: RustMcpRiskLevel;
-}
-
-export interface RustToolRegistryEntry {
-  capability: RustToolCapability;
-  description: string;
-  harness_ids: string[];
-  required_permission: string;
-  approval_behavior: string;
-  evidence_emitted: string;
-  timeline_item: string;
-  enabled_by_default: boolean;
-  requires_approval: boolean;
-}
-
-export interface RustToolRegistryResponse {
-  harness_id?: string | null;
-  tools: RustToolRegistryEntry[];
 }
 
 export type RustExtensionType = "plugin" | "harness_runtime";
@@ -450,6 +457,12 @@ export interface RustProjectConfig {
   models: Record<string, RustModelSpec>;
   agents: Record<string, RustAgentSpec>;
   harnesses: Record<string, RustHarnessSpec>;
+  surface_bindings?: {
+    planner_chat?: {
+      agent: string;
+      harness: string;
+    };
+  };
   workflows: Record<string, RustWorkflowSpec>;
 }
 
@@ -836,6 +849,9 @@ export interface PlannerProviderTrace {
   fallback_status?: number | null;
   finish_reason?: string | null;
   provider_turns: number;
+  tool_turns: number;
+  tool_calls: number;
+  tool_result_bytes: number;
   estimated_input_tokens: number;
   estimated_output_tokens: number;
   input_tokens?: number | null;
@@ -1096,8 +1112,17 @@ export interface ProviderSettings {
   base_urls: Record<string, string>;
   proxy_urls: Record<string, string>;
   proxy_modes: Record<string, string>;
+  network: Record<string, ProviderNetworkSettings>;
   api_keys: Record<string, ProviderKeyState>;
   mock_mode: boolean;
+}
+
+export interface ProviderNetworkSettings {
+  request_max_retries?: number | null;
+  stream_max_retries?: number | null;
+  stream_idle_timeout_ms?: number | null;
+  websocket_connect_timeout_ms?: number | null;
+  supports_websockets: boolean;
 }
 
 export interface ProviderStatusItem {
@@ -1108,6 +1133,11 @@ export interface ProviderStatusItem {
   base_url?: string | null;
   proxy_url?: string | null;
   proxy_mode: string;
+  request_max_retries: number;
+  stream_max_retries: number;
+  stream_idle_timeout_ms: number;
+  websocket_connect_timeout_ms: number;
+  supports_websockets: boolean;
   mode: string;
 }
 
@@ -1134,6 +1164,8 @@ export interface ProviderFormState {
   base_url: string;
   proxy_mode: "direct" | "explicit" | "environment" | string;
   proxy_url: string;
+  request_max_retries: number;
+  stream_idle_timeout_ms: number;
   api_key: string;
   mock_mode: boolean;
 }
@@ -1435,29 +1467,9 @@ export interface CacheBucketStatus {
   truncated: boolean;
 }
 
-export interface BrowserVerifierRuntimeCandidateStatus {
-  source: string;
-  path: string;
-  path_exists: boolean;
-  has_playwright_package: boolean;
-}
-
-export interface BrowserVerifierCacheStatus {
-  status: string;
-  runtime_root: string;
-  browsers_path: string;
-  runtime_cache: CacheBucketStatus;
-  node_path?: string | null;
-  resolved_node_modules?: string | null;
-  candidates: BrowserVerifierRuntimeCandidateStatus[];
-  candidate_count: number;
-  message: string;
-}
-
 export interface CacheStatusResponse {
   repo_index: CacheBucketStatus;
   plugin_cache: CacheBucketStatus;
   skill_cache: CacheBucketStatus;
   blob_store: CacheBucketStatus;
-  browser_verifier: BrowserVerifierCacheStatus;
 }

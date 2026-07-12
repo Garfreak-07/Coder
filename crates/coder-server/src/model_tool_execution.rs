@@ -1,6 +1,6 @@
 use axum::{extract::State, Json};
 use coder_workflow::{
-    execute_model_tool_turn, ModelToolHostContext, ModelToolLoopOptions, MODEL_TOOL_RESULT_CONTRACT,
+    execute_model_tool_turn, ModelToolLoopOptions, TurnContext, MODEL_TOOL_RESULT_CONTRACT,
 };
 
 use crate::model_tool_execute_pipeline::execute_model_tool_response;
@@ -40,14 +40,14 @@ pub(crate) async fn execute_model_tool_turn_endpoint(
     let options = max_tool_use_concurrency
         .map(ModelToolLoopOptions::with_max_tool_use_concurrency)
         .unwrap_or_default()
-        .with_host_context(ModelToolHostContext {
+        .with_turn_context(TurnContext {
             run_id,
             harness_id,
             agent_id,
             current_model,
             current_effort,
             skill_context_modifiers,
-            ..ModelToolHostContext::default()
+            ..TurnContext::default()
         });
     let executor = server_model_tool_executor(state);
     let output = execute_model_tool_turn(tool_uses, executor, options).await;
@@ -62,6 +62,5 @@ pub(crate) async fn execute_model_tool_turn_endpoint(
             .map(model_tool_execute_response_from_result_block)
             .collect(),
         attachments: output.attachments,
-        claude_sources: output.claude_sources,
     }))
 }

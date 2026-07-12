@@ -12,9 +12,9 @@ use coder_harness::{
 };
 use coder_store::{RepoEvidenceKind, RepoEvidenceRef, RunStore};
 use coder_tools::{
-    apply_patch_file, find_files, git_diff, git_status, preview_command, preview_patch_file,
-    read_file, read_file_range, run_command, search_text, CommandRunRequest,
-    PatchApplyRequest as ToolPatchApplyRequest, RepoToolConfig,
+    apply_patch_file, builtin_tool, canonical_builtin_tool_name, find_files, git_diff, git_status,
+    preview_command, preview_patch_file, read_file, read_file_range, run_command, search_text,
+    CommandRunRequest, PatchApplyRequest as ToolPatchApplyRequest, RepoToolConfig,
 };
 use serde_json::{json, Value};
 
@@ -29,11 +29,11 @@ static NATIVE_REPO_EVIDENCE_WRITE_LOCK: Mutex<()> = Mutex::new(());
 const NATIVE_SUBAGENT_MAX_DEPTH: u32 = 1;
 
 #[derive(Debug, Clone)]
-pub struct NativeRustBackend {
+pub struct DeterministicNativeBackend {
     store: RunStore,
 }
 
-impl NativeRustBackend {
+impl DeterministicNativeBackend {
     pub fn new(store: RunStore) -> Self {
         Self { store }
     }
@@ -136,7 +136,7 @@ impl<'a> NativeToolExecutionContext<'a> {
 }
 
 #[async_trait]
-impl HarnessBackend for NativeRustBackend {
+impl HarnessBackend for DeterministicNativeBackend {
     async fn run(&self, request: HarnessRunRequest) -> Result<HarnessRunResult, HarnessError> {
         let repo_root = if request.repo_root.trim().is_empty() {
             ".".to_owned()
@@ -466,7 +466,8 @@ async fn execute_native_subagent_tool(
     }
 
     let harness = native_subagent_harness(context.request);
-    let backend: Arc<dyn HarnessBackend> = Arc::new(NativeRustBackend::new(context.store.clone()));
+    let backend: Arc<dyn HarnessBackend> =
+        Arc::new(DeterministicNativeBackend::new(context.store.clone()));
     let runtime = SubagentRuntime::new(context.store.clone());
     let output = runtime
         .run(SubagentRunInput {
@@ -915,9 +916,6 @@ fn execute_native_tool_step_sync(
             }
         }
         "patch_apply" => {
-            if !native_task_requests_patch_apply(&context.request.task) {
-                return Ok(());
-            }
             let Some(path) = context.patch_file().cloned() else {
                 return Ok(());
             };
@@ -1224,7 +1222,7 @@ fn native_executor_required_side_effect_missing(
     state: &NativeToolRunState,
 ) -> bool {
     request_agent_role(request) == Some("executor")
-        && native_task_requests_repository_changes(&request.task)
+        && native_plan_requires_repository_changes(request)
         && native_selected_tools_include_side_effect(tools)
         && state.changed_files.is_empty()
         && state.patch_refs.is_empty()
@@ -1233,15 +1231,8 @@ fn native_executor_required_side_effect_missing(
 fn native_selected_tools_include_side_effect(tools: &BTreeSet<String>) -> bool {
     tools.iter().any(|tool| {
         matches!(
-            tool.as_str(),
-            "patch_apply"
-                | "apply_patch"
-                | "apply_patch_sandbox"
-                | "patch_preview"
-                | "preview_patch"
-                | "command_run"
-                | "run_command"
-                | "run_command_sandbox"
+            canonical_builtin_tool_name(tool),
+            Some("patch_apply" | "patch_preview" | "command_run")
         )
     })
 }
@@ -1253,26 +1244,12 @@ fn native_tool_enabled(tools: &BTreeSet<String>, canonical: &str) -> bool {
             "repo_find_files" | "repo_read_file_range" | "git_status" | "git_diff"
         );
     }
-    native_tool_aliases(canonical)
+    let Some(definition) = builtin_tool(canonical) else {
+        return false;
+    };
+    tools
         .iter()
-        .any(|alias| tools.contains(*alias))
-}
-
-fn native_tool_aliases(canonical: &str) -> &'static [&'static str] {
-    match canonical {
-        "repo_find_files" => &["repo_find_files", "find_files", "repo_files"],
-        "repo_search_text" => &["repo_search_text", "repo_search", "search_text"],
-        "repo_read_file" => &["repo_read_file", "read_file"],
-        "repo_read_file_range" => &["repo_read_file_range", "read_file_range", "read_file"],
-        "git_status" => &["git_status"],
-        "git_diff" => &["git_diff"],
-        "agent_subagent" => &["agent_subagent", "agent", "subagent"],
-        "command_preview" => &["command_preview", "preview_command"],
-        "command_run" => &["command_run", "run_command", "run_command_sandbox"],
-        "patch_preview" => &["patch_preview", "preview_patch", "apply_patch_sandbox"],
-        "patch_apply" => &["patch_apply", "apply_patch", "apply_patch_sandbox"],
-        _ => &[],
-    }
+        .any(|selected| canonical_builtin_tool_name(selected) == Some(definition.name))
 }
 
 fn write_native_repo_evidence(
@@ -1509,32 +1486,17 @@ fn native_command_args(task: &str) -> Option<Vec<String>> {
     }
 }
 
-fn native_task_requests_patch_apply(task: &str) -> bool {
-    let lower = task.to_ascii_lowercase();
-    lower.contains("apply patch") || lower.contains("patch apply")
-}
-
-fn native_task_requests_repository_changes(task: &str) -> bool {
-    let lower = task.to_ascii_lowercase();
-    [
-        "create",
-        "write",
-        "implement",
-        "build",
-        "add",
-        "modify",
-        "update",
-        "edit",
-        "fix",
-        "generate",
-        "scaffold",
-        "make",
-        "apply patch",
-        "start work has been clicked",
-        "execute the approved plan",
-    ]
-    .iter()
-    .any(|token| lower.contains(token))
+fn native_plan_requires_repository_changes(request: &HarnessRunRequest) -> bool {
+    request
+        .backend_context
+        .pointer("/coder/plan_context/plan_draft/execution_mode")
+        .or_else(|| {
+            request
+                .backend_context
+                .pointer("/coder/plan_context/execution_mode")
+        })
+        .and_then(Value::as_str)
+        == Some("must_write")
 }
 
 fn request_agent_role(request: &HarnessRunRequest) -> Option<&str> {

@@ -178,15 +178,6 @@ impl OpenAiCompatibleStreamAdapter {
         self.tool_calls.len()
     }
 
-    pub fn claude_sources() -> Vec<&'static str> {
-        vec![
-            "src/services/tools/StreamingToolExecutor.ts discard",
-            "src/services/tools/StreamingToolExecutor.ts getCompletedResults",
-            "src/query.ts streaming fallback retry path",
-            "packages/@ant/model-provider/src/providers/gemini/streamAdapter.ts",
-        ]
-    }
-
     fn apply_delta(&mut self, delta: &Value, events: &mut Vec<ProviderStreamEvent>) {
         if let Some(content) = delta.get("content").and_then(Value::as_str) {
             if !content.is_empty() {

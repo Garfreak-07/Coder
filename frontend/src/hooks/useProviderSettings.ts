@@ -14,6 +14,8 @@ export const deepSeekProviderPreset: ProviderFormState = {
   base_url: "https://api.deepseek.com",
   proxy_mode: "direct",
   proxy_url: "",
+  request_max_retries: 4,
+  stream_idle_timeout_ms: 300_000,
   api_key: "",
   mock_mode: false
 };
@@ -24,6 +26,8 @@ const defaultProviderForm: ProviderFormState = {
   base_url: deepSeekProviderPreset.base_url,
   proxy_mode: deepSeekProviderPreset.proxy_mode,
   proxy_url: deepSeekProviderPreset.proxy_url,
+  request_max_retries: deepSeekProviderPreset.request_max_retries,
+  stream_idle_timeout_ms: deepSeekProviderPreset.stream_idle_timeout_ms,
   api_key: "",
   mock_mode: deepSeekProviderPreset.mock_mode
 };
@@ -40,12 +44,15 @@ export function useProviderSettings(onStatus: (status: string) => void) {
         setProviderSettings(settings);
         setProviderStatus(status);
         const provider = settings.default_provider || status.default_provider || "openai";
+        const network = settings.network?.[provider];
         setProviderForm({
           default_provider: provider,
           default_model: settings.default_model || status.default_model || deepSeekProviderPreset.default_model,
           base_url: settings.base_urls[provider] ?? "",
           proxy_mode: (settings.proxy_modes ?? {})[provider] ?? defaultProxyModeForProvider(provider),
           proxy_url: (settings.proxy_urls ?? {})[provider] ?? "",
+          request_max_retries: network?.request_max_retries ?? 4,
+          stream_idle_timeout_ms: network?.stream_idle_timeout_ms ?? 300_000,
           api_key: "",
           mock_mode: settings.mock_mode
         });
@@ -63,6 +70,9 @@ export function useProviderSettings(onStatus: (status: string) => void) {
           merged.proxy_mode =
             (providerSettings?.proxy_modes ?? {})[nextProvider] ?? defaultProxyModeForProvider(nextProvider);
           merged.proxy_url = (providerSettings?.proxy_urls ?? {})[nextProvider] ?? "";
+          const network = providerSettings?.network?.[nextProvider];
+          merged.request_max_retries = network?.request_max_retries ?? 4;
+          merged.stream_idle_timeout_ms = network?.stream_idle_timeout_ms ?? 300_000;
           merged.api_key = "";
           if (!patch.default_model) {
             merged.default_model = defaultModelForProvider(nextProvider);
@@ -147,6 +157,7 @@ function buildProviderSettingsPayload(
   const baseUrls = { ...(providerSettings?.base_urls ?? {}) };
   const proxyUrls = { ...(providerSettings?.proxy_urls ?? {}) };
   const proxyModes = { ...(providerSettings?.proxy_modes ?? {}) };
+  const network = { ...(providerSettings?.network ?? {}) };
   if (providerForm.base_url.trim()) {
     baseUrls[provider] = providerForm.base_url.trim();
   } else {
@@ -159,12 +170,18 @@ function buildProviderSettingsPayload(
   } else {
     delete proxyUrls[provider];
   }
+  network[provider] = {
+    ...(network[provider] ?? {}),
+    request_max_retries: Math.min(100, Math.max(0, Math.trunc(providerForm.request_max_retries))),
+    stream_idle_timeout_ms: Math.max(1, Math.trunc(providerForm.stream_idle_timeout_ms))
+  };
   const payload: Record<string, unknown> = {
     default_provider: provider,
     default_model: providerForm.default_model.trim() || "gpt-4.1-mini",
     base_urls: baseUrls,
     proxy_urls: proxyUrls,
     proxy_modes: proxyModes,
+    network,
     mock_mode: providerForm.mock_mode
   };
   if (providerForm.api_key.trim()) {

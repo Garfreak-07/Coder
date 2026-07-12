@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use coder_config::AgentRuntimePolicy;
-use coder_workflow::{OpenAiCompatibleStreamAdapter, ProviderStreamEventKind};
+use coder_workflow::{ModelToolUseBlock, OpenAiCompatibleStreamAdapter, ProviderStreamEventKind};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 
@@ -13,6 +13,8 @@ use crate::provider_runtime::{
 #[derive(Debug, Clone)]
 pub(crate) struct LivePlannerMessage {
     pub(crate) content: String,
+    pub(crate) tool_uses: Vec<ModelToolUseBlock>,
+    pub(crate) assistant_history: Value,
     pub(crate) finish_reason: Option<String>,
     pub(crate) provider_trace: PlannerProviderTrace,
 }
@@ -47,7 +49,7 @@ pub(crate) async fn parse_live_planner_response_with_idle_timeout(
         let payload: Value = serde_json::from_slice(&bytes)
             .map_err(|error| redact_provider_error(&error.to_string(), redaction_values))?;
         apply_planner_provider_usage(&mut provider_trace, payload.get("usage"));
-        Ok(live_planner_message_from_payload(&payload, provider_trace))
+        live_planner_message_from_payload(&payload, provider_trace)
     }
 }
 
@@ -112,14 +114,18 @@ async fn parse_live_planner_streaming_response(
             issue.code, issue.message
         ));
     }
-    let content = final_state.assistant_content.trim();
-    if content.is_empty() {
+    let content = final_state.assistant_content.trim().to_owned();
+    if content.is_empty() && final_state.tool_uses.is_empty() {
         Ok(None)
     } else {
         provider_trace.finish_reason = final_state.finish_reason.clone();
-        provider_trace.estimated_output_tokens = crate::estimate_text_tokens(content).into();
+        let assistant_history = planner_assistant_history_message(&content, &final_state.tool_uses);
+        provider_trace.estimated_output_tokens =
+            crate::estimate_text_tokens(&assistant_history.to_string()).into();
         Ok(Some(LivePlannerMessage {
-            content: content.to_owned(),
+            content,
+            tool_uses: final_state.tool_uses,
+            assistant_history,
             finish_reason: final_state.finish_reason,
             provider_trace,
         }))
@@ -178,7 +184,7 @@ fn apply_openai_compatible_stream_line(
 fn live_planner_message_from_payload(
     payload: &Value,
     mut provider_trace: PlannerProviderTrace,
-) -> Option<LivePlannerMessage> {
+) -> Result<Option<LivePlannerMessage>, String> {
     let choice = payload
         .get("choices")
         .and_then(Value::as_array)
@@ -190,21 +196,91 @@ fn live_planner_message_from_payload(
         .and_then(Value::as_str)
         .map(str::to_owned);
     provider_trace.finish_reason = finish_reason.clone();
-    choice
-        .as_ref()
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
+    let Some(message) = choice.as_ref().and_then(|choice| choice.get("message")) else {
+        return Ok(None);
+    };
+    let content = message
+        .get("content")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|message| !message.is_empty())
-        .map(|content| LivePlannerMessage {
-            content: content.to_owned(),
-            finish_reason,
-            provider_trace: PlannerProviderTrace {
-                estimated_output_tokens: crate::estimate_text_tokens(content).into(),
-                ..provider_trace
-            },
+        .unwrap_or_default()
+        .to_owned();
+    let tool_uses = planner_tool_uses_from_message(message)?;
+    if content.is_empty() && tool_uses.is_empty() {
+        return Ok(None);
+    }
+    let assistant_history = planner_assistant_history_message(&content, &tool_uses);
+    provider_trace.estimated_output_tokens =
+        crate::estimate_text_tokens(&assistant_history.to_string()).into();
+    Ok(Some(LivePlannerMessage {
+        content,
+        tool_uses,
+        assistant_history,
+        finish_reason,
+        provider_trace,
+    }))
+}
+
+fn planner_tool_uses_from_message(message: &Value) -> Result<Vec<ModelToolUseBlock>, String> {
+    message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(|(index, call)| {
+            let id = call
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("planner-tool-call-{index}"));
+            let function = call
+                .get("function")
+                .ok_or_else(|| "planner tool call did not contain function".to_owned())?;
+            let name = function
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "planner tool call did not contain a function name".to_owned())?;
+            let input = match function.get("arguments") {
+                Some(Value::String(arguments)) => {
+                    serde_json::from_str(arguments).map_err(|error| {
+                        format!("planner tool arguments were not valid JSON: {error}")
+                    })?
+                }
+                Some(Value::Object(_)) => function["arguments"].clone(),
+                None => json!({}),
+                Some(_) => {
+                    return Err("planner tool arguments must be an object or JSON string".to_owned())
+                }
+            };
+            Ok(ModelToolUseBlock::new(id, name, input))
         })
+        .collect()
+}
+
+fn planner_assistant_history_message(content: &str, tool_uses: &[ModelToolUseBlock]) -> Value {
+    let mut message = json!({
+        "role": "assistant",
+        "content": if content.is_empty() { Value::Null } else { json!(content) }
+    });
+    if !tool_uses.is_empty() {
+        message["tool_calls"] = Value::Array(
+            tool_uses
+                .iter()
+                .map(|tool_use| {
+                    json!({
+                        "id": tool_use.id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_use.name,
+                            "arguments": tool_use.input.to_string()
+                        }
+                    })
+                })
+                .collect(),
+        );
+    }
+    message
 }
 
 pub(crate) fn planner_provider_trace(
@@ -220,6 +296,9 @@ pub(crate) fn planner_provider_trace(
         fallback_status,
         finish_reason: None,
         provider_turns: 1,
+        tool_turns: 0,
+        tool_calls: 0,
+        tool_result_bytes: 0,
         estimated_input_tokens: 0,
         estimated_output_tokens: 0,
         input_tokens: None,
@@ -244,6 +323,11 @@ pub(crate) fn merge_planner_provider_trace(
     accumulated.provider_turns = accumulated
         .provider_turns
         .saturating_add(current.provider_turns);
+    accumulated.tool_turns = accumulated.tool_turns.saturating_add(current.tool_turns);
+    accumulated.tool_calls = accumulated.tool_calls.saturating_add(current.tool_calls);
+    accumulated.tool_result_bytes = accumulated
+        .tool_result_bytes
+        .saturating_add(current.tool_result_bytes);
     accumulated.estimated_input_tokens = accumulated
         .estimated_input_tokens
         .saturating_add(current.estimated_input_tokens);
@@ -326,15 +410,46 @@ pub(crate) fn planner_chat_completion_body(
     body
 }
 
-pub(crate) fn planner_chat_completion_streaming_body(
+pub(crate) fn planner_chat_completion_body_with_tools(
     provider: &str,
     model_name: &str,
     messages: Vec<Value>,
     max_output_tokens: u32,
     effort: Option<&str>,
+    tools: Value,
+    parallel_tool_calls: bool,
 ) -> Value {
     let mut body =
         planner_chat_completion_body(provider, model_name, messages, max_output_tokens, effort);
+    if tools.as_array().is_some_and(|tools| !tools.is_empty()) {
+        if let Some(object) = body.as_object_mut() {
+            object.remove("response_format");
+        }
+        body["tools"] = tools;
+        body["tool_choice"] = json!("auto");
+        body["parallel_tool_calls"] = json!(parallel_tool_calls);
+    }
+    body
+}
+
+pub(crate) fn planner_chat_completion_streaming_body_with_tools(
+    provider: &str,
+    model_name: &str,
+    messages: Vec<Value>,
+    max_output_tokens: u32,
+    effort: Option<&str>,
+    tools: Value,
+    parallel_tool_calls: bool,
+) -> Value {
+    let mut body = planner_chat_completion_body_with_tools(
+        provider,
+        model_name,
+        messages,
+        max_output_tokens,
+        effort,
+        tools,
+        parallel_tool_calls,
+    );
     body["stream"] = json!(true);
     body["stream_options"] = json!({"include_usage": true});
     body

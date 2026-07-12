@@ -1,9 +1,7 @@
-use axum::{extract::Query, Json};
-use coder_harness::ToolRegistry;
+use axum::Json;
 
 use crate::api_types::{
-    AgentRoleCard, AgentRoleCardsResponse, CapabilitiesResponse, HealthResponse, ToolRegistryQuery,
-    ToolRegistryResponse,
+    AgentRoleCard, AgentRoleCardsResponse, CapabilitiesResponse, HealthResponse,
 };
 
 pub(crate) async fn health() -> Json<HealthResponse> {
@@ -54,6 +52,7 @@ pub(crate) async fn capabilities() -> Json<CapabilitiesResponse> {
             "command_run",
             "command_background",
             "read_command_output",
+            "write_stdin",
             "cancel_command_background",
             "model_tool_execute",
             "model_tool_turn",
@@ -62,6 +61,7 @@ pub(crate) async fn capabilities() -> Json<CapabilitiesResponse> {
             "cancel_subagent_background",
             "patch_preview",
             "patch_apply",
+            "apply_patch",
         ],
         planner_chat: vec![
             "sessions",
@@ -93,7 +93,7 @@ pub(crate) async fn capabilities() -> Json<CapabilitiesResponse> {
             "mcp_validate",
             "mcp_servers",
             "mcp_tools",
-            "mcp_mock_invoke",
+            "mcp_stdio_invoke",
             "harness_tools",
         ],
         memory: vec![
@@ -144,15 +144,5 @@ pub(crate) async fn agent_role_cards() -> Json<AgentRoleCardsResponse> {
                 default_output_contract: "execution_result",
             },
         ],
-    })
-}
-
-pub(crate) async fn list_harness_tools(
-    Query(query): Query<ToolRegistryQuery>,
-) -> Json<ToolRegistryResponse> {
-    let registry = ToolRegistry::default();
-    Json(ToolRegistryResponse {
-        tools: registry.list_tools(query.harness_id.as_deref()),
-        harness_id: query.harness_id,
     })
 }

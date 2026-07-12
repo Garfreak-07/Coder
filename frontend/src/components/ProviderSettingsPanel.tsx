@@ -83,6 +83,32 @@ export function ProviderSettingsPanel({
             onChange={(event) => onChange({ proxy_url: event.target.value })}
           />
         </label>
+        <details>
+          <summary>Advanced network</summary>
+          <div className="form-stack">
+            <label>
+              Request retries
+              <input
+                type="number"
+                min={0}
+                max={100}
+                step={1}
+                value={form.request_max_retries}
+                onChange={(event) => onChange({ request_max_retries: Number(event.target.value) })}
+              />
+            </label>
+            <label>
+              Stream idle timeout (ms)
+              <input
+                type="number"
+                min={1}
+                step={1000}
+                value={form.stream_idle_timeout_ms}
+                onChange={(event) => onChange({ stream_idle_timeout_ms: Number(event.target.value) })}
+              />
+            </label>
+          </div>
+        </details>
         <label>
           API Key
           <input
@@ -140,7 +166,7 @@ function providerNetworkLabel(mode: string, proxyUrl?: string | null): string {
     return proxyUrl ? "explicit proxy" : "explicit proxy missing URL";
   }
   if (mode === "environment") {
-    return proxyUrl ? "environment proxy" : "environment direct";
+    return proxyUrl ? "environment proxy" : "system/environment route";
   }
   return "direct network";
 }

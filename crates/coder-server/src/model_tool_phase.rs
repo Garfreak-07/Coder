@@ -72,8 +72,7 @@ impl ModelToolPhaseRecorder {
             "required_permission": self.required_permission(),
             "duration_ms": duration_ms,
             "slow_phase_threshold_ms": CLAUDE_SLOW_PHASE_LOG_THRESHOLD_MS,
-            "slow_phase": model_tool_slow_phase_observed(phase, duration_ms),
-            "claude_sources": claude_tool_phase_sources()
+            "slow_phase": model_tool_slow_phase_observed(phase, duration_ms)
         });
         if model_tool_hook_timing_phase(phase) {
             if let Some(object) = payload.as_object_mut() {
@@ -102,8 +101,7 @@ impl ModelToolPhaseRecorder {
             "tool_use_id": self.tool_use_id,
             "tool_name": self.tool_name,
             "canonical_tool_name": self.canonical_tool_name,
-            "required_permission": self.required_permission(),
-            "claude_sources": claude_tool_phase_progress_sources()
+            "required_permission": self.required_permission()
         });
         self.record_phase_event("model_tool.phase.progress", &payload);
     }
@@ -138,26 +136,6 @@ fn merge_object(target: &mut Value, extra: Value) {
     for (key, value) in extra {
         target.insert(key.clone(), value.clone());
     }
-}
-
-fn claude_tool_phase_sources() -> Vec<&'static str> {
-    vec![
-        "src/services/tools/toolExecution.ts",
-        "src/services/tools/StreamingToolExecutor.ts",
-        "packages/builtin-tools/src/tools/BashTool/prompt.ts",
-        "packages/builtin-tools/src/tools/AgentTool/AgentTool.tsx",
-    ]
-}
-
-fn claude_tool_phase_progress_sources() -> Vec<&'static str> {
-    vec![
-        "src/services/tools/toolExecution.ts streamedCheckPermissionsAndCallTool",
-        "src/services/tools/toolExecution.ts tengu_tool_use_progress",
-        "src/services/tools/toolExecution.ts SLOW_PHASE_LOG_THRESHOLD_MS",
-        "src/services/tools/toolExecution.ts preToolHookDurationMs",
-        "src/services/tools/toolExecution.ts permissionDurationMs",
-        "src/services/tools/toolExecution.ts postToolHookDurationMs",
-    ]
 }
 
 #[cfg(test)]

@@ -1,14 +1,20 @@
-use axum::{extract::State, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 use coder_core::RunId;
 use coder_harness::{
-    find_mock_mcp_tool, invoke_mock_mcp_tool, mock_mcp_servers, mock_mcp_tools,
-    validate_mcp_manifest, McpManifestValidation, McpToolCallRequest, McpToolCallResult,
+    mcp_approval_key, validate_mcp_manifest, McpManifestValidation, McpToolCallRequest,
+    McpToolCallResult,
 };
 use coder_store::{RunStore, StoreError};
 use serde_json::{json, Value};
 
 use crate::{
-    api_types::{McpManifestValidationRequest, McpServerListResponse, McpToolListResponse},
+    api_types::{
+        McpManifestValidationRequest, McpServerListResponse, McpServerRegistrationRequest,
+        McpServerRegistrationResponse, McpServerRemoveResponse, McpToolListResponse,
+    },
     stored_run_exists, ApiError, ApiState,
 };
 
@@ -20,15 +26,50 @@ pub(crate) async fn validate_mcp(
     Json(validate_mcp_manifest(&request.manifest))
 }
 
-pub(crate) async fn list_mcp_servers() -> Json<McpServerListResponse> {
+pub(crate) async fn register_mcp_server(
+    State(state): State<ApiState>,
+    Json(request): Json<McpServerRegistrationRequest>,
+) -> Result<Json<McpServerRegistrationResponse>, ApiError> {
+    let validation = validate_mcp_manifest(&request.manifest);
+    if !validation.ok {
+        return Err(ApiError::bad_request(validation.errors.join("; ")));
+    }
+    let manifest = validation
+        .manifest
+        .ok_or_else(|| ApiError::bad_request("MCP manifest was not parsed"))?;
+    let server_id = manifest.server_id.clone();
+    let server = state
+        .mcp_runtime
+        .register(manifest)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let tools = state
+        .mcp_runtime
+        .list_tools()
+        .await
+        .into_iter()
+        .filter(|tool| tool.server_id == server_id)
+        .collect();
+    Ok(Json(McpServerRegistrationResponse { server, tools }))
+}
+
+pub(crate) async fn remove_mcp_server(
+    State(state): State<ApiState>,
+    Path(server_id): Path<String>,
+) -> Json<McpServerRemoveResponse> {
+    let removed = state.mcp_runtime.remove(&server_id).await;
+    Json(McpServerRemoveResponse { server_id, removed })
+}
+
+pub(crate) async fn list_mcp_servers(State(state): State<ApiState>) -> Json<McpServerListResponse> {
     Json(McpServerListResponse {
-        servers: mock_mcp_servers(),
+        servers: state.mcp_runtime.list_servers().await,
     })
 }
 
-pub(crate) async fn list_mcp_tools() -> Json<McpToolListResponse> {
+pub(crate) async fn list_mcp_tools(State(state): State<ApiState>) -> Json<McpToolListResponse> {
     Json(McpToolListResponse {
-        tools: mock_mcp_tools(),
+        tools: state.mcp_runtime.list_tools().await,
     })
 }
 
@@ -36,6 +77,23 @@ pub(crate) async fn invoke_mcp_tool(
     State(state): State<ApiState>,
     Json(request): Json<McpToolCallRequest>,
 ) -> Result<Json<McpToolCallResult>, ApiError> {
+    Ok(Json(invoke_mcp_tool_request(&state, request).await?))
+}
+
+pub(crate) async fn invoke_mcp_tool_request(
+    state: &ApiState,
+    request: McpToolCallRequest,
+) -> Result<McpToolCallResult, ApiError> {
+    let registered_server = state
+        .mcp_runtime
+        .list_servers()
+        .await
+        .into_iter()
+        .find(|server| server.server_id == request.server_id);
+    let discovered = state
+        .mcp_runtime
+        .find_tool(&request.server_id, &request.tool_name)
+        .await;
     if let Some(run_id) = &request.run_id {
         if !stored_run_exists(&state.store, run_id)? {
             return Err(ApiError::not_found(format!(
@@ -43,18 +101,20 @@ pub(crate) async fn invoke_mcp_tool(
                 run_id.as_str()
             )));
         }
-        append_mcp_event(
-            &state.store,
-            run_id,
-            "mcp.server.registered",
-            json!({
-                "server_id": request.server_id.as_str(),
-                "enabled": false,
-                "requires_approval": true
-            }),
-            None,
-        )?;
-        let discovered = find_mock_mcp_tool(&request.server_id, &request.tool_name);
+        if let Some(server) = &registered_server {
+            append_mcp_event(
+                &state.store,
+                run_id,
+                "mcp.server.registered",
+                json!({
+                    "server_id": server.server_id.as_str(),
+                    "name": server.name.as_str(),
+                    "enabled": server.enabled,
+                    "requires_approval": server.requires_approval
+                }),
+                None,
+            )?;
+        }
         append_mcp_event(
             &state.store,
             run_id,
@@ -63,7 +123,7 @@ pub(crate) async fn invoke_mcp_tool(
                 "server_id": request.server_id.as_str(),
                 "tool_name": request.tool_name.as_str(),
                 "discovered": discovered.is_some(),
-                "enabled": false,
+                "enabled": discovered.is_some(),
                 "requires_approval": true,
                 "risk": discovered.as_ref().map(|tool| tool.risk),
                 "side_effect": discovered.as_ref().map(|tool| tool.side_effect)
@@ -84,8 +144,19 @@ pub(crate) async fn invoke_mcp_tool(
         )?;
     }
 
-    let approved = request.approved;
-    let mut result = if approved {
+    let approval_key = mcp_approval_key(&request.server_id, &request.tool_name);
+    let mut result = if !request.approved {
+        blocked_mcp_result(approval_key, "MCP tool calls require explicit approval.")
+    } else if discovered.is_none() {
+        failed_mcp_result(
+            approval_key,
+            json!({
+                "error": "MCP tool was not discovered",
+                "server_id": request.server_id,
+                "tool_name": request.tool_name
+            }),
+        )
+    } else {
         if let Some(run_id) = &request.run_id {
             append_mcp_event(
                 &state.store,
@@ -98,13 +169,27 @@ pub(crate) async fn invoke_mcp_tool(
                 None,
             )?;
         }
-        invoke_mock_mcp_tool(&request)
-    } else {
-        invoke_mock_mcp_tool(&request)
+        match state
+            .mcp_runtime
+            .call_tool(&request.server_id, &request.tool_name, request.args.clone())
+            .await
+        {
+            Ok(output) if output.is_error => failed_mcp_result(approval_key, output.output),
+            Ok(output) => completed_mcp_result(approval_key, output.output),
+            Err(error) => failed_mcp_result(
+                approval_key,
+                json!({
+                    "error": error.to_string(),
+                    "server_id": request.server_id,
+                    "tool_name": request.tool_name
+                }),
+            ),
+        }
     };
 
     if result.status == "failed" {
-        attach_mcp_evidence(&state.store, &mut result)?;
+        let persisted_output = coder_events::redact_payload(result.output.clone());
+        attach_mcp_evidence(&state.store, &mut result, &persisted_output)?;
     }
     externalize_large_mcp_output(&state.store, &mut result)?;
 
@@ -126,13 +211,43 @@ pub(crate) async fn invoke_mcp_tool(
                 "requires_approval": result.requires_approval,
                 "approval_key": result.approval_key.as_str(),
                 "evidence_ref": result.evidence_ref.as_deref(),
-                "output": &result.output
+                "output": coder_events::redact_payload(result.output.clone())
             }),
             result.evidence_ref.as_deref(),
         )?;
     }
 
-    Ok(Json(result))
+    Ok(result)
+}
+
+fn completed_mcp_result(approval_key: String, output: Value) -> McpToolCallResult {
+    McpToolCallResult {
+        status: "completed".to_owned(),
+        requires_approval: false,
+        approval_key,
+        output,
+        evidence_ref: None,
+    }
+}
+
+fn blocked_mcp_result(approval_key: String, reason: &str) -> McpToolCallResult {
+    McpToolCallResult {
+        status: "blocked".to_owned(),
+        requires_approval: true,
+        approval_key,
+        output: json!({"reason": reason}),
+        evidence_ref: None,
+    }
+}
+
+fn failed_mcp_result(approval_key: String, output: Value) -> McpToolCallResult {
+    McpToolCallResult {
+        status: "failed".to_owned(),
+        requires_approval: false,
+        approval_key,
+        output,
+        evidence_ref: None,
+    }
 }
 
 fn append_mcp_event(
@@ -150,11 +265,15 @@ fn append_mcp_event(
     store.append_event(run_id, &event)
 }
 
-fn attach_mcp_evidence(store: &RunStore, result: &mut McpToolCallResult) -> Result<(), StoreError> {
+fn attach_mcp_evidence(
+    store: &RunStore,
+    result: &mut McpToolCallResult,
+    persisted_output: &Value,
+) -> Result<(), StoreError> {
     if result.evidence_ref.is_some() {
         return Ok(());
     }
-    let output = serde_json::to_string(&result.output).unwrap_or_else(|_| "{}".to_owned());
+    let output = serde_json::to_string(persisted_output).unwrap_or_else(|_| "{}".to_owned());
     let evidence_ref = store.write_blob(output.as_bytes())?;
     result.evidence_ref = Some(evidence_ref);
     Ok(())
@@ -164,7 +283,8 @@ fn externalize_large_mcp_output(
     store: &RunStore,
     result: &mut McpToolCallResult,
 ) -> Result<(), StoreError> {
-    let output = serde_json::to_string(&result.output).unwrap_or_else(|_| "{}".to_owned());
+    let persisted_output = coder_events::redact_payload(result.output.clone());
+    let output = serde_json::to_string(&persisted_output).unwrap_or_else(|_| "{}".to_owned());
     if output.len() <= MCP_OUTPUT_INLINE_LIMIT {
         return Ok(());
     }
