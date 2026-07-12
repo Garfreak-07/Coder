@@ -363,6 +363,14 @@ fn core_environment_names() -> &'static [&'static str] {
     ]
 }
 
+#[cfg(not(windows))]
+fn core_environment_names() -> &'static [&'static str] {
+    &[
+        "PATH", "SHELL", "TMPDIR", "TEMP", "TMP", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME",
+        "USER",
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -521,12 +529,4 @@ done
         std::env::remove_var("CODER_MCP_UNFORWARDED");
         let _ = fs::remove_dir_all(root);
     }
-}
-
-#[cfg(not(windows))]
-fn core_environment_names() -> &'static [&'static str] {
-    &[
-        "PATH", "SHELL", "TMPDIR", "TEMP", "TMP", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME",
-        "USER",
-    ]
 }

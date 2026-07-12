@@ -69,28 +69,20 @@ walking an unbounded tree.
 
 ## Build Artifacts
 
-Rust build output can be large. The repository-level `.cargo/config.toml`
-places it in one workspace-sibling `../cargo-target` directory and disables
-incremental compilation. Developer smoke scripts inherit that setting instead
-of creating a second target directory under `tmp/`. This trades some local
-rebuild speed for bounded disk use while retaining compiled dependency
-artifacts. An explicit environment override remains available when needed:
+Cargo uses its standard workspace-local `target/` directory, which Git ignores.
+Developers can override it for a particular environment when needed:
 
 ```powershell
 $env:CARGO_TARGET_DIR="F:\bbb\cargo-target"
 ```
 
 This is a developer workspace choice, not a Coder user workflow. Product code
-should avoid creating large build/test caches on `C:` by default, and developer
-validation should not duplicate the same Cargo artifacts across script-specific
-directories.
+does not create Cargo build caches in users' target projects.
 
 ## Current Validation Snapshot
 
-The 2026-07-12 Windows development baseline, after full workspace tests and
-Clippy, measured one shared Cargo target at 12.6 GB with incremental output
-disabled, 0.08 GB under Coder `tmp`, and 47.23 GB free on the F drive. These are
-workspace measurements, not product requirements.
+The 2026-07-12 Windows development baseline measured 0.08 GB under Coder `tmp`.
+This is a workspace measurement, not a product requirement.
 
 A local server process used 12.41 MiB working set before MCP registration and
 16.35 MiB with one initialized stdio connection. Its Node test server used
