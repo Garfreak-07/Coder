@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use coder_config::ProjectConfig;
+use coder_events::CoderEvent;
 use coder_store::{RunStore, StoreError};
 use thiserror::Error;
 
@@ -15,15 +18,13 @@ mod tool_execution;
 mod workflow_backend_execution;
 mod workflow_compaction_events;
 mod workflow_context_projection;
-mod workflow_control;
 mod workflow_events;
-mod workflow_graph;
 mod workflow_harness_request;
 mod workflow_reports;
 mod workflow_run_types;
 mod workflow_runner_core;
 mod workflow_verification;
-pub use backend_registry::{BackendRegistry, PlannerModelBackend};
+pub use backend_registry::BackendRegistry;
 pub use context_budget::{context_budget_for_runtime, ContextBudget};
 pub use mock_runner::{MockRunOptions, MockRunOutcome, MockRunOutput, MockWorkflowRunner};
 pub use model_tool_loop::{
@@ -60,7 +61,10 @@ pub struct WorkflowRunner {
     config: ProjectConfig,
     store: RunStore,
     backends: BackendRegistry,
+    event_sink: Option<WorkflowEventSink>,
 }
+
+pub type WorkflowEventSink = Arc<dyn Fn(&CoderEvent) + Send + Sync>;
 
 impl WorkflowRunner {
     #[cfg(test)]
@@ -70,6 +74,7 @@ impl WorkflowRunner {
             config,
             store,
             backends,
+            event_sink: None,
         }
     }
 
@@ -82,7 +87,13 @@ impl WorkflowRunner {
             config,
             store,
             backends,
+            event_sink: None,
         }
+    }
+
+    pub fn with_event_sink(mut self, event_sink: WorkflowEventSink) -> Self {
+        self.event_sink = Some(event_sink);
+        self
     }
 }
 

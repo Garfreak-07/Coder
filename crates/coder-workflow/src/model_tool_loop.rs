@@ -12,9 +12,8 @@ use serde_json::{json, Value};
 use tokio::task::JoinSet;
 
 use crate::tool_execution::{
-    max_tool_use_concurrency_from_env, StreamingToolExecutorState,
-    StreamingToolSyntheticErrorReason, StreamingToolUpdate, StreamingToolUpdateKind,
-    ToolConcurrency,
+    max_tool_use_concurrency_from_env, StreamingToolExecutorState, StreamingToolUpdate,
+    StreamingToolUpdateKind, ToolConcurrency,
 };
 
 pub const MODEL_TOOL_RESULT_CONTRACT: &str = "coder.model_tool_result.v1";
@@ -68,13 +67,12 @@ pub struct TurnContext {
     pub repo_root: Option<String>,
     pub harness_id: Option<String>,
     pub agent_id: Option<String>,
-    pub agent_role: Option<String>,
     pub current_model: Option<String>,
     pub model_capabilities: Option<ResolvedModelCapabilities>,
     pub current_effort: Option<Value>,
     pub selected_tools: Vec<String>,
     pub permission_policy: Option<PermissionPolicy>,
-    pub start_work_authorized: bool,
+    pub host_approved: bool,
     pub token_budget: Option<u64>,
     pub drain_later_notifications: bool,
     pub skill_context_modifiers: Vec<Value>,
@@ -334,7 +332,7 @@ pub async fn execute_model_tool_turn(
         ready_ids = next_ready_ids;
     }
 
-    state.cancel_unfinished(StreamingToolSyntheticErrorReason::MissingToolResult);
+    state.cancel_unfinished();
     push_model_tool_updates(
         state.yield_available(),
         &mut pending_results,
@@ -365,13 +363,11 @@ pub fn synthesize_missing_model_tool_results(
     for block in tool_uses {
         state.add_tool(block.id, block.name, block.concurrency);
     }
-    state.cancel_unfinished(StreamingToolSyntheticErrorReason::MissingToolResult);
+    state.cancel_unfinished();
 
     let mut results = Vec::new();
     for update in state.yield_available() {
-        if update.kind != StreamingToolUpdateKind::Progress {
-            results.push(synthetic_result_block_from_update(update));
-        }
+        results.push(synthetic_result_block_from_update(update));
     }
     results
 }
@@ -440,9 +436,6 @@ fn push_model_tool_updates(
     emitted_ids: &mut BTreeSet<String>,
 ) {
     for update in updates {
-        if update.kind == StreamingToolUpdateKind::Progress {
-            continue;
-        }
         let tool_id = update.tool_id.clone();
         let result = pending_results
             .remove(&tool_id)

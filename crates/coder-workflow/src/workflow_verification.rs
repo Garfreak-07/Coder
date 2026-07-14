@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use coder_config::{HarnessSpec, WorkflowNodeSpec};
+use coder_config::HarnessSpec;
 use coder_core::{FinalReport, ReportStatus, RunId};
 use coder_harness::{HarnessRunEvent, HarnessRunResult};
 use serde_json::{json, Value};
@@ -12,7 +12,8 @@ pub(crate) struct VerificationEventContext<'a> {
     pub(crate) run_id: &'a RunId,
     pub(crate) workflow_id: &'a str,
     pub(crate) round: u32,
-    pub(crate) node: &'a WorkflowNodeSpec,
+    pub(crate) task_profile_id: &'a str,
+    pub(crate) harness_id: &'a str,
     pub(crate) backend: &'a str,
     pub(crate) harness: &'a HarnessSpec,
 }
@@ -129,9 +130,9 @@ fn verification_event(
         "run_id": context.run_id.as_str(),
         "workflow_id": context.workflow_id,
         "round": context.round,
-        "node_id": context.node.id,
-        "agent_id": context.node.agent,
-        "harness_id": context.node.harness,
+        "node_id": context.task_profile_id,
+        "agent_id": context.task_profile_id,
+        "harness_id": context.harness_id,
         "backend": context.backend,
         "status": status,
         "require_evidence": true

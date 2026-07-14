@@ -32,21 +32,16 @@ const LOCAL_STORE_DIRS: &[&str] = &[
     "sessions",
     "runs",
     "background-tasks",
-    "timeline",
     "blobs",
-    "artifacts",
     "settings",
     "checkpoints",
-    "changesets",
     "repo-index",
     "plugin-cache",
     "skill-cache",
-    "logs",
     "tmp",
 ];
 const DISPOSABLE_CACHE_DIRS: &[&str] = &["repo-index", "plugin-cache", "skill-cache", "tmp"];
 const COMPACTION_STATE_DIR: &str = "checkpoints/compaction";
-const GOAL_STATE_DIR: &str = "checkpoints/goals";
 pub const MAX_DURABLE_JSONL_PAGE_LIMIT: usize = 1000;
 pub const MAX_CACHE_USAGE_SCAN_ENTRIES: usize = MAX_DURABLE_JSONL_PAGE_LIMIT;
 
@@ -64,12 +59,12 @@ impl RunStore {
         &self.root
     }
 
-    pub fn ensure_local_layout(&self) -> Result<LocalStoreLayout, StoreError> {
+    pub fn ensure_local_layout(&self) -> Result<(), StoreError> {
         fs::create_dir_all(&self.root)?;
         for dir in LOCAL_STORE_DIRS {
             fs::create_dir_all(self.root.join(dir))?;
         }
-        Ok(LocalStoreLayout::new(&self.root))
+        Ok(())
     }
 
     pub fn write_metadata(&self, state: &RunState) -> Result<(), StoreError> {
@@ -126,6 +121,15 @@ impl RunStore {
     ) -> Result<Option<T>, StoreError> {
         let safe_destination = safe_file_name(destination)?;
         read_json_optional(self.permission_settings_path(&safe_destination))
+    }
+
+    pub fn write_provider_settings<T: Serialize>(&self, value: &T) -> Result<(), StoreError> {
+        reject_session_record_secret_like_json(&serde_json::to_value(value)?)?;
+        write_json(self.provider_settings_path(), value)
+    }
+
+    pub fn read_provider_settings<T: DeserializeOwned>(&self) -> Result<Option<T>, StoreError> {
+        read_json_optional(self.provider_settings_path())
     }
 
     pub fn list_run_summaries(&self) -> Result<Vec<StoredRunSummary>, StoreError> {
@@ -519,7 +523,7 @@ impl RunStore {
         let mut patch_ref_seen = BTreeSet::new();
         let mut evidence_ref_seen = BTreeSet::new();
         let mut evidence_refs = Vec::new();
-        let mut plan_context = None;
+        let mut task_context = None;
         let mut requested = None;
         let mut completed = Vec::new();
         if !events.is_empty() {
@@ -540,10 +544,10 @@ impl RunStore {
                     requested = payload_string(&event.payload, "task").or(requested);
                     if let Some(value) = event
                         .payload
-                        .get("plan_context")
+                        .get("task_context")
                         .filter(|value| !value.is_null())
                     {
-                        plan_context = Some(value.clone());
+                        task_context = Some(value.clone());
                     }
                 }
                 "approval.requested" => {
@@ -687,10 +691,10 @@ impl RunStore {
             }
         }
         if requested.is_none() {
-            requested = plan_context_summary(plan_context.as_ref());
+            requested = task_context_summary(task_context.as_ref());
         }
-        if let Some(summary) = plan_context_summary(plan_context.as_ref()) {
-            checks.push(format!("plan_context: {summary}"));
+        if let Some(summary) = task_context_summary(task_context.as_ref()) {
+            checks.push(format!("task_context: {summary}"));
         }
         for (kind, reference) in evidence_ref_seen {
             evidence_refs.push(coder_core::EvidenceRef { kind, reference });
@@ -718,7 +722,7 @@ impl RunStore {
         report.patch_refs = patch_ref_seen.into_iter().collect();
         report.blockers = blockers;
         report.evidence_refs = evidence_refs;
-        report.refresh_planner_style_summary(requested.as_deref(), &completed);
+        report.refresh_evidence_summary(requested.as_deref(), &completed);
         redact_final_report(&mut report);
         Ok(report)
     }
@@ -1047,43 +1051,6 @@ impl RunStore {
         Ok(state)
     }
 
-    pub fn read_goal_state_json(&self, session_id: &str) -> Result<Option<Value>, StoreError> {
-        let safe_session_id = safe_file_name(session_id)?;
-        read_json_optional(
-            self.root
-                .join(GOAL_STATE_DIR)
-                .join(format!("{safe_session_id}.json")),
-        )
-    }
-
-    pub fn write_goal_state_json(
-        &self,
-        session_id: &str,
-        value: &Value,
-    ) -> Result<String, StoreError> {
-        reject_session_record_secret_like_json(value)?;
-        let safe_session_id = safe_file_name(session_id)?;
-        let path = self
-            .root
-            .join(GOAL_STATE_DIR)
-            .join(format!("{safe_session_id}.json"));
-        write_json(&path, value)?;
-        Ok(format!("goal://sessions/{safe_session_id}.json"))
-    }
-
-    pub fn delete_goal_state(&self, session_id: &str) -> Result<bool, StoreError> {
-        let safe_session_id = safe_file_name(session_id)?;
-        let path = self
-            .root
-            .join(GOAL_STATE_DIR)
-            .join(format!("{safe_session_id}.json"));
-        if !path.exists() {
-            return Ok(false);
-        }
-        fs::remove_file(path)?;
-        Ok(true)
-    }
-
     fn safe_run_dir(&self, run_id: &RunId) -> Result<PathBuf, StoreError> {
         let safe_run_id = safe_store_segment(run_id.as_str(), "run_id")?;
         Ok(self.root.join("runs").join(safe_run_id))
@@ -1145,6 +1112,10 @@ impl RunStore {
             .join("settings")
             .join("permissions")
             .join(format!("{safe_destination}.json"))
+    }
+
+    fn provider_settings_path(&self) -> PathBuf {
+        self.root.join("settings").join("providers.json")
     }
 
     pub fn repo_evidence_count(&self, run_id: &RunId) -> Result<usize, StoreError> {
@@ -1389,23 +1360,20 @@ fn repo_evidence_uri(ref_id: &str) -> String {
     }
 }
 
-fn plan_context_summary(plan_context: Option<&Value>) -> Option<String> {
-    let plan_context = plan_context?;
-    let summary = plan_context
-        .get("plan_draft")
-        .and_then(|plan| plan.get("goal"))
-        .and_then(Value::as_str)
-        .or_else(|| {
-            plan_context
-                .get("original_user_request")
-                .and_then(Value::as_str)
-        })
-        .or_else(|| {
-            plan_context
-                .get("planner_conversation_summary")
-                .and_then(Value::as_str)
-        })?
-        .trim();
+fn task_context_summary(task_context: Option<&Value>) -> Option<String> {
+    let task_context = task_context?;
+    let summary = task_context.as_str().or_else(|| {
+        [
+            "objective",
+            "goal",
+            "task",
+            "original_user_request",
+            "summary",
+        ]
+        .iter()
+        .find_map(|key| task_context.get(key).and_then(Value::as_str))
+    })?;
+    let summary = summary.trim();
     if summary.is_empty() {
         None
     } else {

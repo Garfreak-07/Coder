@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 
-use async_trait::async_trait;
 use coder_config::{
-    AgentSpec as ConfigAgentSpec, HarnessSpec as ConfigHarnessSpec, ModelSpec as ConfigModelSpec,
     PermissionSettingsUpdateApplication, PermissionUpdate, PermissionUpdateApplication,
     PermissionUpdateDestination, ProjectConfig, ValidationIssue, ValidationLevel, ValidationReport,
 };
@@ -37,464 +35,78 @@ pub(crate) struct HealthResponse {
 #[derive(Debug, Serialize)]
 pub struct CapabilitiesResponse {
     pub api_version: &'static str,
-    pub workflow: Vec<&'static str>,
+    pub capabilities: Vec<String>,
+    pub tasks: Vec<&'static str>,
     pub runs: Vec<&'static str>,
     pub tools: Vec<&'static str>,
-    pub planner_chat: Vec<&'static str>,
+    pub conversations: Vec<&'static str>,
     pub settings: Vec<&'static str>,
     pub extensions: Vec<&'static str>,
     pub memory: Vec<&'static str>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct AgentRoleCardsResponse {
-    pub role_cards: Vec<AgentRoleCard>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AgentRoleCard {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub archetype: &'static str,
-    pub role: &'static str,
-    pub engine_id: &'static str,
-    pub default_capabilities: Vec<&'static str>,
-    pub description: &'static str,
-    pub default_output_contract: &'static str,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DefaultWorkflowResponse {
-    pub workflow_id: String,
-    pub config: ProjectConfig,
-    pub workflow: Option<coder_config::WorkflowSpec>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct LibraryResponse {
-    pub workflows: Vec<LibraryWorkflowSummary>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct LibraryWorkflowSummary {
-    pub id: String,
-    pub workflow: Value,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct LibraryWorkflowSaveRequest {
-    pub workflow_id: String,
-    pub workflow: Value,
-}
-
-#[derive(Debug, Serialize)]
-pub struct LibraryWorkflowSaveResponse {
-    pub workflow_id: String,
-    pub workflow: Value,
-    pub saved: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct LibraryWorkflowGetResponse {
-    pub workflow_id: String,
-    pub workflow: Value,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlannerChatSession {
+pub struct ConversationSession {
     pub session_id: String,
-    pub workflow_id: String,
     #[serde(default)]
     pub repo_root: Option<String>,
-    pub mode: String,
-    #[serde(skip)]
-    pub runtime: Option<PlannerRuntimeContext>,
-    pub ready: bool,
-    pub readiness: PlannerReadiness,
-    pub plan_draft: Option<PlanDraft>,
-    #[serde(default)]
-    pub open_questions: Vec<String>,
-    #[serde(default)]
-    pub acceptance_criteria: Vec<String>,
-    #[serde(default)]
-    pub risks: Vec<String>,
-    #[serde(default)]
-    pub work_in_progress: bool,
-    #[serde(default)]
-    pub active_run_id: Option<String>,
-    #[serde(default)]
-    pub latest_run_id: Option<String>,
-    pub turns: Vec<PlannerChatTurn>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PlannerRuntimeContext {
-    pub workflow_id: String,
-    pub workflow_name: String,
-    pub node_id: String,
-    pub agent_id: String,
-    pub harness_id: String,
-    pub agent: ConfigAgentSpec,
-    pub harness: ConfigHarnessSpec,
-    pub model: ConfigModelSpec,
+    pub turns: Vec<ConversationTurn>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlannerChatTurn {
+pub struct ConversationTurn {
     pub role: String,
     pub content: String,
-    #[serde(default)]
-    pub artifacts: Vec<PlannerArtifact>,
-    #[serde(default)]
-    pub response_truncated: bool,
 }
 
-pub(crate) fn planner_chat_user_turn(content: String) -> PlannerChatTurn {
-    PlannerChatTurn {
+pub(crate) fn conversation_user_turn(content: String) -> ConversationTurn {
+    ConversationTurn {
         role: "user".to_owned(),
         content,
-        artifacts: Vec::new(),
-        response_truncated: false,
     }
 }
 
-pub(crate) fn planner_chat_assistant_turn(
-    content: String,
-    artifacts: Vec<PlannerArtifact>,
-    response_truncated: bool,
-) -> PlannerChatTurn {
-    PlannerChatTurn {
+pub(crate) fn conversation_assistant_turn(content: String) -> ConversationTurn {
+    ConversationTurn {
         role: "assistant".to_owned(),
         content,
-        artifacts,
-        response_truncated,
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum PlannerArtifact {
-    Table {
-        title: String,
-        columns: Vec<String>,
-        rows: Vec<Vec<String>>,
-        #[serde(default)]
-        collapsed: bool,
-    },
-    Notes {
-        title: String,
-        items: Vec<String>,
-        #[serde(default)]
-        collapsed: bool,
-    },
-    Text {
-        title: String,
-        content: String,
-        #[serde(default)]
-        collapsed: bool,
-    },
-}
-
 #[derive(Debug, Deserialize)]
-pub struct PlannerChatSessionCreateRequest {
+pub struct ConversationSessionCreateRequest {
     pub repo: Option<String>,
-    pub workflow_id: Option<String>,
-    pub planner_agent_id: Option<String>,
-    pub config: Option<ProjectConfig>,
-    pub mode: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct PlannerChatSessionResponse {
-    pub session: PlannerChatSession,
+pub struct ConversationSessionResponse {
+    pub session: ConversationSession,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct PlannerChatTurnRequest {
+pub struct ConversationTurnRequest {
     pub message: String,
-    #[serde(default)]
-    pub operation: PlannerTurnOperation,
-    pub confirmed: Option<bool>,
-    pub mode: Option<String>,
     pub repo: Option<String>,
-    pub planner_agent_id: Option<String>,
-    pub config: Option<ProjectConfig>,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PlannerTurnOperation {
-    #[default]
-    Chat,
-    UserInput,
-    Status,
-    Interrupt,
 }
 
 #[derive(Debug, Serialize)]
-pub struct PlannerChatTurnResponse {
-    pub session: PlannerChatSession,
-    pub assistant_message: String,
-    pub plan_draft: Option<PlanDraft>,
-    pub readiness: PlannerReadiness,
-    pub open_questions: Vec<String>,
-    pub acceptance_criteria: Vec<String>,
-    pub risks: Vec<String>,
-    pub suggested_mode: String,
-    pub should_start_workflow: bool,
-    pub ready: bool,
-    pub ready_for_start_work: bool,
-    pub missing_information: Vec<String>,
-    pub concise_plan_summary: String,
-    pub execution_allowed: bool,
-    pub run_preview: Option<Value>,
-    pub response_truncated: bool,
-    #[serde(default)]
-    pub artifacts: Vec<PlannerArtifact>,
-    #[serde(default)]
-    pub structured_artifacts: Vec<PlannerArtifact>,
-    pub large_artifacts: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_trace: Option<PlannerProviderTrace>,
-    #[serde(default)]
-    pub events: Vec<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PlannerStartWorkRequest {
-    pub repo: Option<String>,
-    pub workflow_id: Option<String>,
-    pub planner_agent_id: Option<String>,
-    pub config: Option<ProjectConfig>,
-    #[serde(default)]
-    pub scopes: Vec<String>,
-    #[serde(default)]
-    pub skill_pack_ids: Vec<String>,
-    #[serde(default)]
-    pub knowledge_pack_ids: Vec<String>,
-    #[serde(default)]
-    pub memory_pack_ids: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct PlannerStartWorkResponse {
-    pub session: PlannerChatSession,
-    pub assistant_message: Option<String>,
-    pub run_id: Option<String>,
+pub struct ConversationTurnResponse {
+    pub session: ConversationSession,
+    pub turn_id: String,
     pub status: String,
-    pub events_url: Option<String>,
-    pub timeline_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum GoalStatus {
-    Active,
-    Paused,
-    Blocked,
-    BudgetLimited,
-    UsageLimited,
-    MaxTurns,
-    Complete,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GoalState {
-    pub session_id: String,
-    pub objective: String,
-    pub status: GoalStatus,
-    pub token_budget: Option<u64>,
-    pub tokens_used: u64,
-    pub created_at_ms: u64,
-    pub updated_at_ms: u64,
-    pub active_started_at_ms: u64,
-    pub paused_at_ms: Option<u64>,
-    pub accumulated_active_ms: u64,
-    pub blocked_attempts: u32,
-    pub last_block_reason: Option<String>,
-    pub turns_executed: u32,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct GoalRuntimePolicy {
-    pub blocked_consecutive_threshold: u32,
-    pub max_goal_turns: u32,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GoalCreateRequest {
-    pub objective: String,
-    pub token_budget: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GoalTokenUpdateRequest {
-    pub delta: u64,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct GoalBlockedAttemptRequest {
-    pub reason: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GoalGetResponse {
-    pub goal: Option<GoalState>,
-    pub policy: GoalRuntimePolicy,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GoalMutationResponse {
-    pub goal: GoalState,
-    pub state_ref: String,
-    pub policy: GoalRuntimePolicy,
-}
-
-#[derive(Debug, Serialize)]
-pub struct GoalClearResponse {
-    pub session_id: String,
-    pub removed: bool,
-    pub policy: GoalRuntimePolicy,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlannerReadiness {
-    Ready,
-    NeedsClarification,
-    Blocked,
-    Casual,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanExecutionMode {
-    ReadOnly,
-    MustWrite,
-    #[serde(other)]
-    #[default]
-    MayWrite,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanReviewMode {
-    Qualitative,
-    #[serde(other)]
-    #[default]
-    Standard,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlanDraft {
-    pub goal: String,
-    #[serde(default)]
-    pub execution_mode: PlanExecutionMode,
-    #[serde(default)]
-    pub review_mode: PlanReviewMode,
-    #[serde(default)]
-    pub scope: Vec<String>,
-    #[serde(default)]
-    pub non_goals: Vec<String>,
-    #[serde(default)]
-    pub assumptions: Vec<String>,
-    #[serde(default)]
-    pub steps: Vec<String>,
-    #[serde(default)]
-    pub affected_paths: Vec<String>,
-    #[serde(default)]
-    pub acceptance_criteria: Vec<String>,
-    #[serde(default)]
-    pub risks: Vec<String>,
-    #[serde(default)]
-    pub open_questions: Vec<String>,
-    #[serde(default)]
-    pub selected_workflow_id: String,
-    #[serde(default)]
-    pub memory_proposals: Vec<MemoryProposalDraft>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryProposalDraft {
-    pub scope: String,
-    pub key: String,
-    pub content: String,
-    pub rationale: String,
-    pub requires_confirmation: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct PlannerConversationRequest {
-    pub session_id: String,
-    pub workflow_id: String,
-    pub repo_root: Option<String>,
-    pub runtime: PlannerRuntimeContext,
-    pub mode: String,
-    pub message: String,
-    pub confirmed: bool,
-    pub history: Vec<PlannerChatTurn>,
-    pub current_plan: Option<PlanDraft>,
-    pub provider_settings: ProviderSettings,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlannerConversationResponse {
     pub assistant_message: String,
-    pub plan_draft: Option<PlanDraft>,
-    pub readiness: PlannerReadiness,
-    #[serde(default)]
-    pub open_questions: Vec<String>,
-    #[serde(default)]
-    pub acceptance_criteria: Vec<String>,
-    #[serde(default)]
-    pub risks: Vec<String>,
-    pub suggested_mode: String,
-    pub should_start_workflow: bool,
-    #[serde(default)]
-    pub artifacts: Vec<PlannerArtifact>,
-    pub response_truncated: bool,
-    pub large_artifacts: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_trace: Option<PlannerProviderTrace>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PlannerProviderTrace {
-    pub requested_stream: bool,
-    pub response_transport: String,
-    pub streaming_fallback: bool,
-    pub fallback_status: Option<u16>,
-    pub finish_reason: Option<String>,
-    #[serde(default)]
-    pub provider_turns: u32,
-    #[serde(default)]
-    pub tool_turns: u32,
-    #[serde(default)]
-    pub tool_calls: u32,
-    #[serde(default)]
-    pub tool_result_bytes: u64,
-    #[serde(default)]
-    pub estimated_input_tokens: u64,
-    #[serde(default)]
-    pub estimated_output_tokens: u64,
-    #[serde(default)]
-    pub input_tokens: Option<u64>,
-    #[serde(default)]
-    pub output_tokens: Option<u64>,
-    #[serde(default)]
-    pub total_tokens: Option<u64>,
-    #[serde(default)]
-    pub cache_read_tokens: Option<u64>,
-    #[serde(default)]
-    pub usage_reported: bool,
+#[derive(Debug, Deserialize)]
+pub struct ConversationSteerRequest {
+    pub message: String,
 }
 
-#[async_trait]
-pub trait PlannerConversationEngine {
-    async fn respond(
-        &self,
-        request: PlannerConversationRequest,
-    ) -> Result<PlannerConversationResponse, String>;
+#[derive(Debug, Serialize)]
+pub struct ConversationTurnControlResponse {
+    pub session_id: String,
+    pub turn_id: String,
+    pub status: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -604,12 +216,6 @@ pub struct KnowledgeRetrieveResponse {
 #[derive(Debug, Deserialize)]
 pub struct ConfigValidationRequest {
     pub config: ProjectConfig,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct WorkflowValidationRequest {
-    pub config: ProjectConfig,
-    pub workflow_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1006,13 +612,14 @@ pub struct ProviderStatus {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct MockRunRequest {
+pub struct TaskRunRequest {
     pub config: ProjectConfig,
     pub workflow_id: String,
     pub task: String,
     pub run_id: Option<String>,
+    pub session_id: Option<String>,
     pub repo_root: Option<String>,
-    pub plan_context: Option<Value>,
+    pub task_context: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1390,7 +997,7 @@ pub struct PatchApplyResponse {
 }
 
 #[derive(Debug, Serialize)]
-pub struct MockRunResponse {
+pub struct TaskRunResponse {
     pub run_id: String,
     pub report_ref: String,
     pub report: coder_core::FinalReport,
@@ -1564,7 +1171,6 @@ pub struct RunTimelineResponse {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TimelineItem {
     UserMessage(MessageTimelineItem),
-    PlannerMessage(MessageTimelineItem),
     ReasoningSummary(ReasoningSummaryItem),
     PlanUpdate(PlanUpdateItem),
     ExecutorStep(ExecutorStepItem),

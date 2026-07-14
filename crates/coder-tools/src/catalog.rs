@@ -263,12 +263,12 @@ fn function_spec(name: &str, description: &str, parameters: Value) -> Value {
 fn repo_find_files_spec() -> Value {
     function_spec(
         "repo_find_files",
-        "List repo files by optional query and extension filters.",
+        "List repo files. Omit query to list all files; query is a literal case-insensitive path substring, not a glob. Use extensions for suffix filtering.",
         json!({
             "type": "object",
             "properties": {
-                "query": {"type": "string"},
-                "extensions": {"type": "array", "items": {"type": "string"}},
+                "query": {"type": "string", "description": "Optional literal path substring. Omit it to list all files; glob characters have no special meaning."},
+                "extensions": {"type": "array", "items": {"type": "string"}, "description": "Optional file extensions such as [\"rs\", \"md\"]."},
                 "max_results": {"type": "integer", "minimum": 1, "maximum": 200}
             },
             "additionalProperties": false

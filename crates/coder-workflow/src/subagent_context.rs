@@ -96,7 +96,7 @@ pub fn subagent_inheritable_tools(tools: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use coder_config::{MemoryAccess, PermissionPolicy};
+    use coder_config::PermissionPolicy;
 
     use super::*;
 
@@ -112,13 +112,12 @@ mod tests {
                 "patch_apply".to_owned(),
             ],
             permissions: PermissionPolicy::default(),
-            memory: MemoryAccess::default(),
             verification: Default::default(),
         };
         let context = create_subagent_context(SubagentContextInput {
             template: SubagentContextTemplateInput {
                 run_id: &RunId::from_string("run-subagent"),
-                workflow_id: "planner-led",
+                workflow_id: "code",
                 node_id: "executor",
                 parent_agent_id: "executor",
                 parent_harness_id: "native-code-edit",
@@ -156,14 +155,13 @@ mod tests {
             backend: "native-rust".to_owned(),
             tools: vec!["terminal".to_owned()],
             permissions: PermissionPolicy::default(),
-            memory: MemoryAccess::default(),
             verification: Default::default(),
         };
 
         let context = create_subagent_context(SubagentContextInput {
             template: SubagentContextTemplateInput {
                 run_id: &RunId::from_string("run-subagent"),
-                workflow_id: "planner-led",
+                workflow_id: "code",
                 node_id: "executor",
                 parent_agent_id: "executor",
                 parent_harness_id: "native",

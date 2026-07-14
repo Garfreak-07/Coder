@@ -1,3 +1,16 @@
+import {
+  CheckCircle2,
+  ChevronDown,
+  KeyRound,
+  Network,
+  RefreshCw,
+  Save,
+  ServerCog,
+  TestTube2,
+  Trash2,
+  WandSparkles,
+  XCircle
+} from "lucide-react";
 import { deepSeekProviderPreset } from "../hooks/useProviderSettings";
 import type {
   ProviderFormState,
@@ -38,54 +51,81 @@ export function ProviderSettingsPanel({
   const keyState = settings?.api_keys[provider];
 
   return (
-    <div className="form-stack">
-      <div className="settings-section">
-        <div className="panel-subtitle">Planner Provider</div>
-        <label>
-          Provider
-          <select value={form.default_provider} onChange={(event) => onChange({ default_provider: event.target.value })}>
-            {["openai-compatible", "deepseek", "custom"].map((providerName) => (
-              <option key={providerName} value={providerName}>
-                {providerName}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Model
-          <input value={form.default_model} onChange={(event) => onChange({ default_model: event.target.value })} />
-        </label>
-        <label>
-          Base URL
-          <input
-            placeholder="Provider default"
-            value={form.base_url}
-            onChange={(event) => onChange({ base_url: event.target.value })}
-          />
-        </label>
-        <label>
-          Provider Network
-          <select
-            value={form.proxy_mode}
-            onChange={(event) => onChange({ proxy_mode: event.target.value })}
-          >
-            <option value="direct">Direct</option>
-            <option value="environment">Current environment</option>
-            <option value="explicit">Explicit proxy</option>
-          </select>
-        </label>
-        <label>
-          Provider Proxy URL
-          <input
-            placeholder="Optional, e.g. http://127.0.0.1:7890"
-            disabled={form.proxy_mode !== "explicit"}
-            value={form.proxy_url}
-            onChange={(event) => onChange({ proxy_url: event.target.value })}
-          />
-        </label>
-        <details>
-          <summary>Advanced network</summary>
-          <div className="form-stack">
+    <div className="provider-settings">
+      <section className="settings-group" aria-labelledby="model-settings-heading">
+        <header className="settings-group-header">
+          <span className="settings-group-icon" aria-hidden="true">
+            <ServerCog size={18} strokeWidth={1.8} />
+          </span>
+          <div>
+            <h3 id="model-settings-heading">Model</h3>
+            <p>Select the provider endpoint used for conversations and code tasks.</p>
+          </div>
+        </header>
+        <div className="settings-field-grid">
+          <label>
+            Provider
+            <select value={form.default_provider} onChange={(event) => onChange({ default_provider: event.target.value })}>
+              {["openai-compatible", "deepseek", "custom"].map((providerName) => (
+                <option key={providerName} value={providerName}>
+                  {providerName}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Model
+            <input value={form.default_model} onChange={(event) => onChange({ default_model: event.target.value })} />
+          </label>
+          <label className="settings-field-wide">
+            Base URL
+            <input
+              placeholder="Use the provider default"
+              value={form.base_url}
+              onChange={(event) => onChange({ base_url: event.target.value })}
+            />
+          </label>
+        </div>
+      </section>
+
+      <section className="settings-group" aria-labelledby="network-settings-heading">
+        <header className="settings-group-header">
+          <span className="settings-group-icon" aria-hidden="true">
+            <Network size={18} strokeWidth={1.8} />
+          </span>
+          <div>
+            <h3 id="network-settings-heading">Network</h3>
+            <p>Keep provider traffic direct or route it through the current environment.</p>
+          </div>
+        </header>
+        <div className="settings-field-grid">
+          <label>
+            Route
+            <select
+              value={form.proxy_mode}
+              onChange={(event) => onChange({ proxy_mode: event.target.value })}
+            >
+              <option value="direct">Direct</option>
+              <option value="environment">Current environment</option>
+              <option value="explicit">Explicit proxy</option>
+            </select>
+          </label>
+          <label>
+            Proxy URL
+            <input
+              placeholder="http://127.0.0.1:7890"
+              disabled={form.proxy_mode !== "explicit"}
+              value={form.proxy_url}
+              onChange={(event) => onChange({ proxy_url: event.target.value })}
+            />
+          </label>
+        </div>
+        <details className="advanced-settings">
+          <summary>
+            <ChevronDown size={16} strokeWidth={1.8} aria-hidden="true" />
+            Advanced network controls
+          </summary>
+          <div className="settings-field-grid">
             <label>
               Request retries
               <input
@@ -109,16 +149,38 @@ export function ProviderSettingsPanel({
             </label>
           </div>
         </details>
-        <label>
-          API Key
-          <input
-            type="password"
-            placeholder={keyState?.configured ? `${keyState.source}: configured` : "Leave blank to keep current value"}
-            autoComplete="off"
-            value={form.api_key}
-            onChange={(event) => onChange({ api_key: event.target.value })}
-          />
-        </label>
+      </section>
+
+      <section className="settings-group" aria-labelledby="credential-settings-heading">
+        <header className="settings-group-header">
+          <span className="settings-group-icon" aria-hidden="true">
+            <KeyRound size={18} strokeWidth={1.8} />
+          </span>
+          <div>
+            <h3 id="credential-settings-heading">Credentials</h3>
+            <p>The API key is stored by Coder and is never shown again.</p>
+          </div>
+        </header>
+        <div className="credential-row">
+          <label>
+            API key
+            <input
+              type="password"
+              placeholder={keyState?.configured ? `${keyState.source}: configured` : "Enter an API key"}
+              autoComplete="off"
+              value={form.api_key}
+              onChange={(event) => onChange({ api_key: event.target.value })}
+            />
+          </label>
+          <button
+            className="quiet-action"
+            disabled={!keyState?.configured && !form.api_key.trim()}
+            onClick={onClearKey}
+          >
+            <Trash2 size={16} strokeWidth={1.8} aria-hidden="true" />
+            <span>Clear key</span>
+          </button>
+        </div>
         {showMockMode && (
           <label className="checkbox-row">
             <input
@@ -126,37 +188,75 @@ export function ProviderSettingsPanel({
               checked={form.mock_mode}
               onChange={(event) => onChange({ mock_mode: event.target.checked })}
             />
-            Use mock output when credentials are missing
+            <span>Use mock output when credentials are missing</span>
           </label>
         )}
-        {currentStatus && (
-          <div className="summary-grid provider-summary">
-            <span>{currentStatus.mode}</span>
-            <span>{currentStatus.credential_source}</span>
-            <span>{currentStatus.configured ? "configured" : "missing"}</span>
-            <span>{currentStatus.base_url ?? "default URL"}</span>
-            <span>{providerNetworkLabel(currentStatus.proxy_mode, currentStatus.proxy_url)}</span>
-          </div>
-        )}
-        {testResult && (
-          <div className={`provider-test-result ${testResult.ok ? "provider-test-ok" : "provider-test-failed"}`}>
-            <strong>{testResult.ok ? "Test succeeded" : "Test failed"}</strong>
-            <span>{testResult.mode}</span>
-            <span>Model: {testResult.model}</span>
-            {testResult.endpoint && <span>Endpoint: {testResult.endpoint}</span>}
-            <p>{testResult.message}</p>
-          </div>
-        )}
-        <div className="button-row">
-          <button onClick={() => onChange(deepSeekProviderPreset)}>DeepSeek preset</button>
-          <button onClick={onSave}>Save</button>
-          <button onClick={onTest}>Test Provider</button>
-          <button disabled={!keyState?.configured && !form.api_key.trim()} onClick={onClearKey}>
-            Clear API Key
+      </section>
+
+      {(currentStatus || testResult) && (
+        <section className="settings-group provider-health" aria-label="Provider status">
+          {currentStatus && (
+            <dl className="provider-summary">
+              <div>
+                <dt>Runtime</dt>
+                <dd>{currentStatus.mode}</dd>
+              </div>
+              <div>
+                <dt>Credential</dt>
+                <dd>{currentStatus.configured ? currentStatus.credential_source : "Missing"}</dd>
+              </div>
+              <div>
+                <dt>Endpoint</dt>
+                <dd>{currentStatus.base_url ?? "Provider default"}</dd>
+              </div>
+              <div>
+                <dt>Network</dt>
+                <dd>{providerNetworkLabel(currentStatus.proxy_mode, currentStatus.proxy_url)}</dd>
+              </div>
+            </dl>
+          )}
+          {testResult && (
+            <div
+              className={`provider-test-result ${testResult.ok ? "provider-test-ok" : "provider-test-failed"}`}
+              role="status"
+            >
+              {testResult.ok ? (
+                <CheckCircle2 size={19} strokeWidth={1.8} aria-hidden="true" />
+              ) : (
+                <XCircle size={19} strokeWidth={1.8} aria-hidden="true" />
+              )}
+              <div>
+                <strong>{testResult.ok ? "Connection succeeded" : "Connection failed"}</strong>
+                <p>{testResult.message}</p>
+                <span>{testResult.mode} · {testResult.model}{testResult.endpoint ? ` · ${testResult.endpoint}` : ""}</span>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
+      <footer className="settings-actions">
+        <div>
+          <button className="quiet-action" onClick={() => onChange(deepSeekProviderPreset)}>
+            <WandSparkles size={16} strokeWidth={1.8} aria-hidden="true" />
+            <span>DeepSeek preset</span>
           </button>
-          <button onClick={onRefresh}>Refresh</button>
+          <button className="quiet-action" onClick={onRefresh}>
+            <RefreshCw size={16} strokeWidth={1.8} aria-hidden="true" />
+            <span>Refresh</span>
+          </button>
         </div>
-      </div>
+        <div>
+          <button onClick={onTest}>
+            <TestTube2 size={16} strokeWidth={1.8} aria-hidden="true" />
+            <span>Test connection</span>
+          </button>
+          <button className="primary-action" onClick={onSave}>
+            <Save size={16} strokeWidth={1.8} aria-hidden="true" />
+            <span>Save changes</span>
+          </button>
+        </div>
+      </footer>
     </div>
   );
 }

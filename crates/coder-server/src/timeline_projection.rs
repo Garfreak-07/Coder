@@ -4,8 +4,7 @@ use serde_json::Value;
 
 use crate::api_types::{
     ApprovalItem, CommandExecutionItem, ExecutorStepItem, FileChangeItem, FinalSummaryItem,
-    MessageTimelineItem, PlanUpdateItem, ReasoningSummaryItem, TimelineItem, ToolCallItem,
-    VerificationItem,
+    PlanUpdateItem, ReasoningSummaryItem, TimelineItem, ToolCallItem, VerificationItem,
 };
 use crate::{
     changed_files_from_payload, command_from_payload, payload_i64, payload_string, payload_u64,
@@ -26,45 +25,18 @@ pub(crate) fn project_timeline_items(
                     .unwrap_or_else(|| "Workflow started.".to_owned());
                 items.push(TimelineItem::PlanUpdate(PlanUpdateItem {
                     id: timeline_id(event, "plan"),
-                    agent_id: "planner".to_owned(),
+                    agent_id: "executor".to_owned(),
                     title: "Work started".to_owned(),
                     summary: public_preview(&task, 800),
                     created_at,
                 }));
             }
-            "planner.message.completed" => {
+            "reasoning.summary" => {
                 let summary = payload_string(&event.payload, "summary")
-                    .or_else(|| payload_string(&event.payload, "message"))
-                    .unwrap_or_else(|| "Planner updated the run.".to_owned());
-                items.push(TimelineItem::PlannerMessage(MessageTimelineItem {
-                    id: timeline_id(event, "planner-message"),
-                    agent_id: payload_string(&event.payload, "agent_id")
-                        .unwrap_or_else(|| "planner".to_owned()),
-                    content: public_preview(&summary, 800),
-                    created_at,
-                }));
-            }
-            "planner.plan.updated" => {
-                items.push(TimelineItem::PlanUpdate(PlanUpdateItem {
-                    id: timeline_id(event, "plan-update"),
-                    agent_id: "planner".to_owned(),
-                    title: "Plan updated".to_owned(),
-                    summary: event
-                        .payload
-                        .get("acceptance_criteria")
-                        .and_then(|value| value.as_array())
-                        .map(|items| format!("{} acceptance criteria", items.len()))
-                        .unwrap_or_else(|| "Planner updated execution context.".to_owned()),
-                    created_at,
-                }));
-            }
-            "planner.readiness.changed" | "reasoning.summary" => {
-                let summary = payload_string(&event.payload, "summary")
-                    .or_else(|| payload_string(&event.payload, "readiness"))
-                    .unwrap_or_else(|| "Planner checked readiness.".to_owned());
+                    .unwrap_or_else(|| "Coder summarized its next step.".to_owned());
                 items.push(TimelineItem::ReasoningSummary(ReasoningSummaryItem {
                     id: timeline_id(event, "reasoning"),
-                    agent_id: "planner".to_owned(),
+                    agent_id: "executor".to_owned(),
                     summary_text: vec![public_preview(&summary, 500)],
                     created_at,
                 }));
@@ -268,7 +240,7 @@ pub(crate) fn project_timeline_items(
     if let Some(report) = report {
         items.push(TimelineItem::FinalSummary(FinalSummaryItem {
             id: format!("timeline-final-{}", run_id.as_str()),
-            agent_id: "planner".to_owned(),
+            agent_id: "executor".to_owned(),
             status: report_status_string(report.status),
             summary: public_preview(&report.summary, 1200),
             changed_files: report.changed_files.clone(),
@@ -323,7 +295,6 @@ fn backend_timeline_title(kind: &str, payload: &Value) -> String {
 fn timeline_backend_display_name(backend: &str) -> &'static str {
     match backend {
         "native-rust" | "native_mock" | "mock" => "Native",
-        "planner-model" => "Planner",
         _ => "unknown",
     }
 }

@@ -48,8 +48,7 @@ pub struct WorkflowRunOptions {
     pub task: String,
     pub repo_root: PathBuf,
     pub dry_run: bool,
-    pub max_rounds_override: Option<u32>,
-    pub plan_context: Option<Value>,
+    pub task_context: Option<Value>,
     pub control: Option<watch::Receiver<WorkflowRunControl>>,
 }
 
@@ -61,8 +60,7 @@ impl WorkflowRunOptions {
             task: task.into(),
             repo_root: PathBuf::from("."),
             dry_run: false,
-            max_rounds_override: None,
-            plan_context: None,
+            task_context: None,
             control: None,
         }
     }

@@ -175,10 +175,5 @@ pub(crate) fn signal_active_run_control(
     run_id: &RunId,
     control: WorkflowRunControl,
 ) -> bool {
-    state
-        .active_run_controls
-        .lock()
-        .unwrap()
-        .get(run_id.as_str())
-        .is_some_and(|sender| sender.send(control).is_ok())
+    state.session_host.signal_task(run_id, control)
 }

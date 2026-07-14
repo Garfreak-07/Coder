@@ -6,9 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use coder_config::{
-    MemoryScope, PermissionDecision, ProjectConfig, WorkflowEdgeSpec, WorkflowNodeSpec,
-};
+use coder_config::{PermissionDecision, ProjectConfig};
 use coder_core::{FinalReport, ReportStatus, RunId, RunStatus};
 use coder_harness::{
     HarnessBackend, HarnessError, HarnessRunEvent, HarnessRunRequest, HarnessRunResult,
@@ -16,9 +14,6 @@ use coder_harness::{
 use coder_store::RepoEvidenceKind;
 use serde_json::{json, Value};
 
-use super::workflow_control::{
-    repair_task_from_feedback, workflow_feedback_value, workflow_planner_result, WorkflowSignal,
-};
 use super::*;
 
 #[test]
@@ -26,7 +21,7 @@ fn mock_runner_writes_jsonl_events_and_report() {
     let (config, root, store) = fixture();
     let runner = MockWorkflowRunner::new(&config, store.clone());
 
-    let output = runner.run("planner-led", "summarize the repo").unwrap();
+    let output = runner.run("code", "summarize the repo").unwrap();
     let events = store.read_events(&output.run_id).unwrap();
 
     assert_eq!(events.first().unwrap().kind, "run.started");
@@ -44,11 +39,10 @@ fn mock_runner_can_finish_blocked() {
 
     let output = runner
         .run_with_options(
-            "planner-led",
+            "code",
             "blocked task",
             MockRunOptions {
                 outcome: MockRunOutcome::Blocked,
-                requested_rounds: 1,
             },
         )
         .unwrap();
@@ -70,11 +64,10 @@ fn mock_runner_can_finish_failed() {
 
     let output = runner
         .run_with_options(
-            "planner-led",
+            "code",
             "failed task",
             MockRunOptions {
                 outcome: MockRunOutcome::Failed,
-                requested_rounds: 1,
             },
         )
         .unwrap();
@@ -87,161 +80,6 @@ fn mock_runner_can_finish_failed() {
         "mock run requested failed outcome"
     );
     let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn mock_runner_blocks_when_requested_rounds_exceed_max_rounds() {
-    let (config, root, store) = fixture();
-    let runner = MockWorkflowRunner::new(&config, store.clone());
-
-    let output = runner
-        .run_with_options(
-            "planner-led",
-            "too many rounds",
-            MockRunOptions {
-                outcome: MockRunOutcome::Completed,
-                requested_rounds: 99,
-            },
-        )
-        .unwrap();
-    let events = store.read_events(&output.run_id).unwrap();
-
-    assert_eq!(events.last().unwrap().kind, "run.blocked");
-    assert_eq!(
-        output.report.blockers[0],
-        "max_rounds reached before a terminal completed outcome"
-    );
-    assert!(
-        events
-            .iter()
-            .filter(|event| event.kind == "round.started")
-            .count()
-            <= 3
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn workflow_feedback_value_includes_loop_contract() {
-    let source_node = WorkflowNodeSpec {
-        id: "executor".to_owned(),
-        agent: "executor".to_owned(),
-        harness: "native-code-edit".to_owned(),
-    };
-    let checks = vec!["browser opened".to_owned()];
-    let blockers = vec!["game did not progress".to_owned()];
-
-    let feedback =
-        workflow_feedback_value(&source_node, WorkflowSignal::Failed, &checks, &blockers);
-
-    assert_eq!(feedback["source_node_id"], "executor");
-    assert_eq!(feedback["signal"], "failed");
-    assert_eq!(
-        feedback["loop_contract"]["required_decision"],
-        "continue_or_blocked"
-    );
-    assert_eq!(
-        feedback["loop_contract"]["finish_requires_executor_evidence"],
-        true
-    );
-    assert_eq!(
-        feedback["loop_contract"]["repair_when_feedback_is_actionable"],
-        true
-    );
-    assert_eq!(feedback["evidence_policy"]["blockers_present"], true);
-    assert_eq!(feedback["checks"][0], "browser opened");
-    assert_eq!(feedback["blockers"][0], "game did not progress");
-}
-
-#[test]
-fn workflow_planner_blocks_malformed_feedback() {
-    let result = workflow_planner_result(workflow_planner_request_with_feedback(Some(json!({
-        "source_node_id": "executor",
-        "signal": "not-a-workflow-signal"
-    }))));
-
-    assert_eq!(result.status, "blocked");
-    let report = result.report.unwrap();
-    assert_eq!(report.status, ReportStatus::Blocked);
-    assert!(report
-        .blockers
-        .iter()
-        .any(|blocker| blocker.contains("not-a-workflow-signal")));
-    let decision = result
-        .events
-        .iter()
-        .find(|event| event.kind == "planner.workflow_decision")
-        .unwrap();
-    assert_eq!(decision.payload["decision"], "blocked");
-    assert_eq!(decision.payload["validation_status"], "invalid_feedback");
-}
-
-#[test]
-fn workflow_planner_finishes_from_executor_completion() {
-    let result = workflow_planner_result(workflow_planner_request_with_feedback(Some(json!({
-        "source_node_id": "executor",
-        "signal": "completed",
-        "evidence_policy": {"checks_present": true}
-    }))));
-
-    assert_eq!(result.status, "finish");
-    assert_eq!(result.report.unwrap().status, ReportStatus::Completed);
-    let decision = result
-        .events
-        .iter()
-        .find(|event| event.kind == "planner.workflow_decision")
-        .unwrap();
-    assert_eq!(decision.payload["decision"], "finish");
-    assert_eq!(decision.payload["validation_status"], "valid_feedback");
-}
-
-#[test]
-fn workflow_planner_blocks_external_executor_dependencies_without_repair_loop() {
-    let result = workflow_planner_result(workflow_planner_request_with_feedback(Some(json!({
-        "source_node_id": "executor",
-        "signal": "blocked",
-        "checks": ["repository checks passed"],
-        "blockers": ["required external runtime was not configured"]
-    }))));
-
-    assert_eq!(result.status, "blocked");
-    let report = result.report.unwrap();
-    assert_eq!(report.status, ReportStatus::Blocked);
-    assert!(report
-        .blockers
-        .iter()
-        .any(|blocker| blocker.contains("required external runtime was not configured")));
-    let decision = result
-        .events
-        .iter()
-        .find(|event| event.kind == "planner.workflow_decision")
-        .unwrap();
-    assert_eq!(decision.payload["decision"], "blocked");
-    assert_eq!(
-        decision.payload["validation_status"],
-        "valid_external_blocker"
-    );
-}
-
-#[test]
-fn repair_round_is_scoped_to_planner_feedback() {
-    let source_node = WorkflowNodeSpec {
-        id: "workflow-planner".to_owned(),
-        agent: "workflow-planner".to_owned(),
-        harness: "workflow-planner".to_owned(),
-    };
-    let task = repair_task_from_feedback(
-        "Build the requested application.",
-        &source_node,
-        WorkflowSignal::Continue,
-        &["planned improvement: repair the restart control".to_owned()],
-        &[],
-    );
-
-    assert!(task.contains("listed feedback is the scope of this round"));
-    assert!(task.contains("Do not restart broad planning or review"));
-    assert!(task.contains("Stop as soon as the implementation is complete and verified"));
-    assert!(task.contains("repair the restart control"));
 }
 
 #[tokio::test]
@@ -262,7 +100,7 @@ async fn workflow_runner_native_rust_read_only_review_writes_evidence() {
         "git_diff".to_owned(),
     ];
     let runner = WorkflowRunner::new(config, store.clone());
-    let mut options = WorkflowRunOptions::new("planner-led", "review README.md for TODO");
+    let mut options = WorkflowRunOptions::new("code", "review README.md for TODO");
     options.repo_root = repo.clone();
 
     let output = runner.run(options).await.unwrap();
@@ -340,7 +178,7 @@ async fn workflow_runner_native_rust_agent_subagent_records_sidechain_and_filter
     config.harnesses.get_mut("native-code-edit").unwrap().tools =
         vec!["agent_subagent".to_owned(), "repo_find_files".to_owned()];
     let runner = WorkflowRunner::new(config, store.clone());
-    let mut options = WorkflowRunOptions::new("planner-led", "delegate repository scan");
+    let mut options = WorkflowRunOptions::new("code", "delegate repository scan");
     options.repo_root = repo.clone();
 
     let output = runner.run(options).await.unwrap();
@@ -364,7 +202,7 @@ async fn workflow_runner_native_rust_agent_subagent_records_sidechain_and_filter
         .unwrap()
         .unwrap();
     assert_eq!(metadata.status.as_deref(), Some("completed"));
-    assert_eq!(metadata.parent_agent_id, "executor");
+    assert_eq!(metadata.parent_agent_id, "code");
     assert_eq!(metadata.parent_harness_id, "native-code-edit");
 
     let records = store
@@ -401,22 +239,21 @@ async fn workflow_runner_records_context_compaction_circuit_success() {
     make_workflow_native_only(&mut config);
     make_single_node_terminal_workflow(&mut config);
     let model_id = {
-        let executor = config.agents.get_mut("executor").unwrap();
-        executor.runtime.compact_output_reserve_tokens = Some(1_000);
-        executor.runtime.max_output_tokens = Some(8_000);
-        executor.model.clone()
+        let profile = config.task_profiles.get_mut("code").unwrap();
+        profile.runtime.compact_output_reserve_tokens = Some(1_000);
+        profile.runtime.max_output_tokens = Some(8_000);
+        profile.model.clone()
     };
     let capabilities = &mut config.models.get_mut(&model_id).unwrap().capabilities;
     capabilities.context_window_tokens = Some(32_000);
     capabilities.max_output_tokens = Some(8_000);
     capabilities.auto_compact_token_limit = Some(30_000);
     let runner = WorkflowRunner::new(config, store.clone());
-    let mut options = WorkflowRunOptions::new("planner-led", "compact large plan context");
-    options.plan_context = Some(json!({
-        "plan_draft": {
-            "steps": ["inspect and refine\n".repeat(10_000)],
-            "acceptance_criteria": (0..100).map(|index| format!("criterion-{index}")).collect::<Vec<_>>()
-        }
+    let mut options = WorkflowRunOptions::new("code", "compact large task context");
+    options.task_context = Some(json!({
+        "goal": "Inspect and refine the repository",
+        "instructions": ["inspect and refine\n".repeat(10_000)],
+        "constraints": (0..100).map(|index| format!("constraint-{index}")).collect::<Vec<_>>()
     }));
 
     let output = runner.run(options).await.unwrap();
@@ -466,7 +303,7 @@ async fn native_react_lifecycle_records_reason_act_observe_steps() {
         "git_diff".to_owned(),
     ];
     let runner = WorkflowRunner::new(config, store.clone());
-    let mut options = WorkflowRunOptions::new("planner-led", "review README.md for TODO");
+    let mut options = WorkflowRunOptions::new("code", "review README.md for TODO");
     options.repo_root = repo.clone();
 
     let output = runner.run(options).await.unwrap();
@@ -522,9 +359,9 @@ async fn native_react_lifecycle_records_reason_act_observe_steps() {
         )
     }) {
         assert_eq!(event.payload["run_id"], output.run_id.as_str());
-        assert_eq!(event.payload["workflow_id"], "planner-led");
-        assert_eq!(event.payload["node_id"], "review");
-        assert_eq!(event.payload["agent_id"], "executor");
+        assert_eq!(event.payload["workflow_id"], "code");
+        assert_eq!(event.payload["node_id"], "code");
+        assert_eq!(event.payload["agent_id"], "code");
         assert_eq!(event.payload["harness_id"], "native-code-edit");
         assert_eq!(event.payload["backend"], "native-rust");
         assert!(event.payload["step"].as_u64().is_some());
@@ -559,7 +396,7 @@ diff --git a/tracked.txt b/tracked.txt
     make_single_node_terminal_workflow(&mut config);
     config.harnesses.get_mut("native-code-edit").unwrap().tools = vec!["patch_preview".to_owned()];
     let runner = WorkflowRunner::new(config, store.clone());
-    let mut options = WorkflowRunOptions::new("planner-led", "preview change.patch");
+    let mut options = WorkflowRunOptions::new("code", "preview change.patch");
     options.repo_root = repo.clone();
 
     let output = runner.run(options).await.unwrap();
@@ -585,13 +422,8 @@ async fn workflow_runner_native_rust_edit_task_blocks_without_side_effects() {
     let (mut config, root, store) = fixture();
     let repo = temp_root();
     fs::create_dir_all(&repo).unwrap();
-    let workflow = config.workflows.get_mut("planner-led").unwrap();
-    workflow.nodes = vec![WorkflowNodeSpec {
-        id: "executor".to_owned(),
-        agent: "executor".to_owned(),
-        harness: "native-code-edit".to_owned(),
-    }];
-    workflow.edges.clear();
+    let workflow = config.task_profiles.get_mut("code").unwrap();
+    workflow.harness = "native-code-edit".to_owned();
     let harness = config.harnesses.get_mut("native-code-edit").unwrap();
     harness.backend = "native-rust".to_owned();
     harness.tools = vec![
@@ -601,13 +433,12 @@ async fn workflow_runner_native_rust_edit_task_blocks_without_side_effects() {
     ];
     harness.verification.require_evidence = false;
     let runner = WorkflowRunner::new(config, store.clone());
-    let mut options = WorkflowRunOptions::new("planner-led", "Create README.md");
+    let mut options = WorkflowRunOptions::new("code", "Create README.md");
     options.repo_root = repo.clone();
-    options.plan_context = Some(json!({
-        "start_work_authorized": true,
-        "execution_mode": "must_write",
-        "affected_paths": ["README.md"],
-        "acceptance_criteria": ["README.md exists"]
+    options.task_context = Some(json!({
+        "execution_mode": "write",
+        "scope": ["README.md"],
+        "constraints": ["README.md exists"]
     }));
 
     let output = runner.run(options).await.unwrap();
@@ -639,7 +470,7 @@ async fn workflow_report_uses_patch_event_files_when_backend_report_omits_them()
     let registry =
         BackendRegistry::native_only().with_native_backend(Arc::new(PatchEventOnlyBackend));
     let runner = WorkflowRunner::with_registry(config, store.clone(), registry);
-    let mut options = WorkflowRunOptions::new("planner-led", "apply a code edit");
+    let mut options = WorkflowRunOptions::new("code", "apply a code edit");
     options.repo_root = repo.clone();
 
     let output = runner.run(options).await.unwrap();
@@ -680,7 +511,7 @@ diff --git a/tracked.txt b/tracked.txt
     harness.tools = vec!["patch_apply".to_owned()];
     harness.permissions.write_files = PermissionDecision::Ask;
     let runner = WorkflowRunner::new(config, store.clone());
-    let mut options = WorkflowRunOptions::new("planner-led", "apply patch change.patch");
+    let mut options = WorkflowRunOptions::new("code", "apply patch change.patch");
     options.repo_root = repo.clone();
 
     let output = runner.run(options).await.unwrap();
@@ -726,7 +557,7 @@ async fn workflow_runner_native_rust_command_run_requires_approval() {
     harness.tools = vec!["command_run".to_owned()];
     harness.permissions.run_commands = PermissionDecision::Ask;
     let runner = WorkflowRunner::new(config, store.clone());
-    let mut options = WorkflowRunOptions::new("planner-led", "run command: definitely-not-run");
+    let mut options = WorkflowRunOptions::new("code", "run command: definitely-not-run");
     options.repo_root = repo.clone();
 
     let output = runner.run(options).await.unwrap();
@@ -777,297 +608,15 @@ async fn workflow_runner_native_mock_blocked() {
     let runner = WorkflowRunner::with_registry(config, store.clone(), registry);
 
     let output = runner
-        .run(WorkflowRunOptions::new("planner-led", "blocked task"))
+        .run(WorkflowRunOptions::new("code", "blocked task"))
         .await
         .unwrap();
     let events = store.read_events(&output.run_id).unwrap();
 
     assert_eq!(output.report.status, ReportStatus::Blocked);
     assert!(output.report.blockers[0].contains("blocked outcome"));
-    assert!(events.iter().any(|event| {
-        event.kind == "round.completed" && event.payload["status"].as_str() == Some("blocked")
-    }));
+    assert!(events.iter().any(|event| event.kind == "node.blocked"));
     assert_eq!(events.last().unwrap().kind, "run.blocked");
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn workflow_runner_routes_verified_success_to_workflow_planner() {
-    let (mut config, root, store) = fixture();
-    make_workflow_native_only(&mut config);
-    let registry = BackendRegistry::native_only()
-        .with_native_backend(Arc::new(ScriptedBackend::new(["completed", "completed"])));
-    let runner = WorkflowRunner::with_registry(config, store.clone(), registry);
-
-    let output = runner
-        .run(WorkflowRunOptions::new("planner-led", "loop task"))
-        .await
-        .unwrap();
-    let events = store.read_events(&output.run_id).unwrap();
-    let transitions = events
-        .iter()
-        .filter(|event| event.kind == "workflow.transition.selected")
-        .map(|event| {
-            (
-                event.payload["from"].as_str().unwrap().to_owned(),
-                event.payload["to"].as_str().unwrap().to_owned(),
-                event.payload["on"].as_str().unwrap().to_owned(),
-            )
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(output.report.status, ReportStatus::Completed);
-    assert_eq!(
-        transitions,
-        vec![(
-            "executor".to_owned(),
-            "workflow-planner".to_owned(),
-            "completed".to_owned()
-        )]
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event.kind == "round.started")
-            .count(),
-        1
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn workflow_runner_routes_blocked_executor_evidence_to_planner() {
-    let (mut config, root, store) = fixture();
-    make_workflow_native_only(&mut config);
-    let registry =
-        BackendRegistry::native_only().with_native_backend(Arc::new(ScriptedBackend::new([
-            "blocked_with_evidence",
-            "completed",
-        ])));
-    let runner = WorkflowRunner::with_registry(config, store.clone(), registry);
-
-    let output = runner
-        .run(WorkflowRunOptions::new(
-            "planner-led",
-            "blocked but checkable",
-        ))
-        .await
-        .unwrap();
-    let events = store.read_events(&output.run_id).unwrap();
-
-    assert_eq!(output.report.status, ReportStatus::Completed);
-    assert!(events.iter().any(|event| {
-        event.kind == "workflow.transition.selected"
-            && event.payload["from"].as_str() == Some("executor")
-            && event.payload["to"].as_str() == Some("workflow-planner")
-            && event.payload["on"].as_str() == Some("blocked")
-    }));
-    assert!(output
-        .report
-        .checks
-        .iter()
-        .any(|check| check.contains("recoverable blocked from node executor")));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn workflow_runner_repairs_after_executor_failure() {
-    let (mut config, root, store) = fixture();
-    make_workflow_native_only(&mut config);
-    let scripted = Arc::new(ScriptedBackend::new([
-        "failed",
-        "continue",
-        "completed",
-        "completed",
-    ]));
-    let registry = BackendRegistry::native_only().with_native_backend(scripted.clone());
-    let runner = WorkflowRunner::with_registry(config, store.clone(), registry);
-
-    let output = runner
-        .run(WorkflowRunOptions::new("planner-led", "repair loop task"))
-        .await
-        .unwrap();
-    let events = store.read_events(&output.run_id).unwrap();
-    let transitions = events
-        .iter()
-        .filter(|event| event.kind == "workflow.transition.selected")
-        .map(|event| {
-            (
-                event.payload["from"].as_str().unwrap().to_owned(),
-                event.payload["to"].as_str().unwrap().to_owned(),
-                event.payload["on"].as_str().unwrap().to_owned(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let tasks = scripted.tasks();
-
-    assert_eq!(output.report.status, ReportStatus::Completed);
-    assert_eq!(
-        transitions,
-        vec![
-            (
-                "executor".to_owned(),
-                "workflow-planner".to_owned(),
-                "failed".to_owned()
-            ),
-            (
-                "workflow-planner".to_owned(),
-                "executor".to_owned(),
-                "continue".to_owned()
-            ),
-            (
-                "executor".to_owned(),
-                "workflow-planner".to_owned(),
-                "completed".to_owned()
-            )
-        ]
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| event.kind == "round.started")
-            .count(),
-        2
-    );
-    assert!(
-        tasks.get(2).is_some_and(
-            |task| task.contains("Previous feedback") && task.contains("scripted failed")
-        )
-    );
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn workflow_runner_hands_planner_bounded_round_local_executor_evidence() {
-    let (mut config, root, store) = fixture();
-    make_workflow_native_only(&mut config);
-    config
-        .workflows
-        .get_mut("planner-led")
-        .unwrap()
-        .token_budget = Some(100_000);
-    let scripted = Arc::new(ScriptedBackend::new([
-        "completed_with_review",
-        "continue",
-        "completed_with_review",
-        "finish",
-    ]));
-    let registry = BackendRegistry::native_only().with_native_backend(scripted.clone());
-    let runner = WorkflowRunner::with_registry(config, store, registry);
-
-    let output = runner
-        .run(WorkflowRunOptions::new(
-            "planner-led",
-            "improve a browser game with task-specific review",
-        ))
-        .await
-        .unwrap();
-    let contexts = scripted.contexts();
-    let executor_contexts = contexts
-        .iter()
-        .filter(|context| {
-            context.pointer("/coder/node_id").and_then(Value::as_str) == Some("executor")
-        })
-        .collect::<Vec<_>>();
-    let planner_contexts = contexts
-        .iter()
-        .filter(|context| {
-            context.pointer("/coder/node_id").and_then(Value::as_str) == Some("workflow-planner")
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(output.report.status, ReportStatus::Completed);
-    assert_eq!(executor_contexts.len(), 2);
-    assert_eq!(planner_contexts.len(), 2);
-    assert!(contexts.iter().all(|context| {
-        let coder = &context["coder"];
-        coder.get("memory").is_none()
-            && coder["agent"].get("model").is_none()
-            && coder["harness"].get("backend").is_none()
-            && coder["model"].get("profile_ref").is_none()
-            && coder["permissions"].get("policy").is_none()
-            && coder["permissions"].get("summary").is_none()
-            && coder["permissions"].get("selected_tools").is_none()
-            && context.to_string().matches("\"selected_tools\"").count() == 1
-    }));
-    assert!(contexts.iter().all(|context| {
-        context
-            .pointer("/coder/workflow_loop/token_budget")
-            .and_then(Value::as_u64)
-            == Some(100_000)
-    }));
-    for context in executor_contexts {
-        assert_eq!(
-            context
-                .pointer("/coder/workflow_loop/executor_evidence_summary")
-                .and_then(Value::as_str),
-            Some("")
-        );
-    }
-    let first_summary = planner_contexts[0]
-        .pointer("/coder/workflow_loop/executor_evidence_summary")
-        .and_then(Value::as_str)
-        .unwrap();
-    let second_summary = planner_contexts[1]
-        .pointer("/coder/workflow_loop/executor_evidence_summary")
-        .and_then(Value::as_str)
-        .unwrap();
-    assert!(first_summary.chars().count() <= 1_000);
-    assert!(second_summary.chars().count() <= 1_000);
-    assert!(first_summary.contains("changed: src/game.rs"));
-    assert!(first_summary.contains("task-specific review round 1"));
-    assert!(!first_summary.contains("task-specific review round 2"));
-    assert!(second_summary.contains("task-specific review round 2"));
-    assert!(!second_summary.contains("task-specific review round 1"));
-    assert!(planner_contexts.iter().all(|context| {
-        context
-            .pointer("/coder/workflow_loop/executor_evidence_this_round")
-            .and_then(Value::as_bool)
-            == Some(true)
-    }));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn workflow_runner_shares_executor_review_without_claiming_change_evidence() {
-    let (mut config, root, store) = fixture();
-    make_workflow_native_only(&mut config);
-    config
-        .harnesses
-        .get_mut("native-code-edit")
-        .unwrap()
-        .verification
-        .require_evidence = false;
-    let scripted = Arc::new(ScriptedBackend::new(["completed_review_only", "finish"]));
-    let registry = BackendRegistry::native_only().with_native_backend(scripted.clone());
-    let runner = WorkflowRunner::with_registry(config, store, registry);
-
-    let output = runner
-        .run(WorkflowRunOptions::new(
-            "planner-led",
-            "review a browser game before deciding whether it is done",
-        ))
-        .await
-        .unwrap();
-    let contexts = scripted.contexts();
-    let planner_context = contexts
-        .iter()
-        .find(|context| {
-            context.pointer("/coder/node_id").and_then(Value::as_str) == Some("workflow-planner")
-        })
-        .unwrap();
-
-    assert_eq!(output.report.status, ReportStatus::Completed);
-    assert_eq!(
-        planner_context
-            .pointer("/coder/workflow_loop/executor_evidence_this_round")
-            .and_then(Value::as_bool),
-        Some(false)
-    );
-    assert!(planner_context
-        .pointer("/coder/workflow_loop/executor_evidence_summary")
-        .and_then(Value::as_str)
-        .is_some_and(|summary| summary.contains("task-specific review round 1")));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1078,7 +627,7 @@ async fn workflow_runner_completed_terminal_stop() {
     let runner = workflow_runner_with_script(config, store.clone(), ["completed"]);
 
     let output = runner
-        .run(WorkflowRunOptions::new("planner-led", "terminal completed"))
+        .run(WorkflowRunOptions::new("code", "terminal completed"))
         .await
         .unwrap();
     let events = store.read_events(&output.run_id).unwrap();
@@ -1089,7 +638,7 @@ async fn workflow_runner_completed_terminal_stop() {
 
     assert_eq!(output.report.status, ReportStatus::Completed);
     assert_eq!(events.last().unwrap().kind, "run.completed");
-    assert!(config_snapshot["workflows"]["planner-led"].is_object());
+    assert!(config_snapshot["task_profiles"]["code"].is_object());
     assert!(config_snapshot["harnesses"]["native-code-edit"]["permissions"].is_object());
     let _ = fs::remove_dir_all(root);
 }
@@ -1103,10 +652,7 @@ async fn workflow_runner_blocks_required_evidence_when_backend_returns_none() {
     let runner = WorkflowRunner::with_registry(config, store.clone(), registry);
 
     let output = runner
-        .run(WorkflowRunOptions::new(
-            "planner-led",
-            "complete without proof",
-        ))
+        .run(WorkflowRunOptions::new("code", "complete without proof"))
         .await
         .unwrap();
     let events = store.read_events(&output.run_id).unwrap();
@@ -1139,10 +685,7 @@ async fn workflow_runner_allows_required_evidence_when_backend_returns_refs() {
     let runner = WorkflowRunner::with_registry(config, store.clone(), registry);
 
     let output = runner
-        .run(WorkflowRunOptions::new(
-            "planner-led",
-            "complete with proof",
-        ))
+        .run(WorkflowRunOptions::new("code", "complete with proof"))
         .await
         .unwrap();
     let events = store.read_events(&output.run_id).unwrap();
@@ -1173,7 +716,7 @@ async fn workflow_runner_blocked_terminal_stop() {
     let runner = workflow_runner_with_script(config, store.clone(), ["blocked"]);
 
     let output = runner
-        .run(WorkflowRunOptions::new("planner-led", "terminal blocked"))
+        .run(WorkflowRunOptions::new("code", "terminal blocked"))
         .await
         .unwrap();
     let events = store.read_events(&output.run_id).unwrap();
@@ -1191,7 +734,7 @@ async fn workflow_runner_failed_terminal_stop() {
     let runner = workflow_runner_with_script(config, store.clone(), ["failed"]);
 
     let output = runner
-        .run(WorkflowRunOptions::new("planner-led", "terminal failed"))
+        .run(WorkflowRunOptions::new("code", "terminal failed"))
         .await
         .unwrap();
     let events = store.read_events(&output.run_id).unwrap();
@@ -1209,7 +752,7 @@ async fn workflow_runner_cancelled_terminal_stop() {
     let runner = workflow_runner_with_script(config, store.clone(), ["cancelled"]);
 
     let output = runner
-        .run(WorkflowRunOptions::new("planner-led", "terminal cancelled"))
+        .run(WorkflowRunOptions::new("code", "terminal cancelled"))
         .await
         .unwrap();
     let events = store.read_events(&output.run_id).unwrap();
@@ -1229,7 +772,7 @@ async fn workflow_control_cancels_an_in_flight_backend_future() {
     let runner = WorkflowRunner::with_registry(config, store.clone(), registry);
     let run_id = RunId::from_string("run-live-cancel");
     let (sender, receiver) = tokio::sync::watch::channel(WorkflowRunControl::Running);
-    let mut options = WorkflowRunOptions::new("planner-led", "long running task");
+    let mut options = WorkflowRunOptions::new("code", "long running task");
     options.run_id = Some(run_id.clone());
     options.control = Some(receiver);
 
@@ -1249,32 +792,7 @@ async fn workflow_control_cancels_an_in_flight_backend_future() {
     assert_eq!(output.report.status, ReportStatus::Cancelled);
     assert_eq!(output.run_id, run_id);
     let events = store.read_events(&output.run_id).unwrap();
-    assert!(events.iter().any(|event| event.kind == "node.cancelled"));
     assert_eq!(events.last().unwrap().kind, "run.cancelled");
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn workflow_runner_blocks_on_no_matching_transition() {
-    let (mut config, root, store) = fixture();
-    make_single_node_terminal_workflow(&mut config);
-    let runner = workflow_runner_with_script(config, store.clone(), ["ready"]);
-
-    let output = runner
-        .run(WorkflowRunOptions::new("planner-led", "missing edge"))
-        .await
-        .unwrap();
-    let events = store.read_events(&output.run_id).unwrap();
-
-    assert_eq!(output.report.status, ReportStatus::Blocked);
-    assert!(events
-        .iter()
-        .any(|event| event.kind == "workflow.transition.missing"));
-    assert!(output
-        .report
-        .blockers
-        .iter()
-        .any(|blocker| blocker.contains("no matching workflow transition")));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1287,59 +805,12 @@ async fn workflow_runner_reports_unknown_backend() {
         .unwrap()
         .backend = "mystery-backend".to_owned();
     let runner = WorkflowRunner::new(config, store);
-    let mut options = WorkflowRunOptions::new("planner-led", "unknown backend");
+    let mut options = WorkflowRunOptions::new("code", "unknown backend");
     options.repo_root = root.clone();
 
     let error = runner.run(options).await.unwrap_err();
 
     assert!(matches!(error, WorkflowError::InvalidConfig(_)));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn workflow_runner_blocks_when_max_rounds_override_exceeds_spec() {
-    let (mut config, root, store) = fixture();
-    make_workflow_native_only(&mut config);
-    let workflow = config.workflows.get_mut("planner-led").unwrap();
-    workflow.max_rounds = 2;
-    workflow.nodes = vec![
-        WorkflowNodeSpec {
-            id: "planner".to_owned(),
-            agent: "planner".to_owned(),
-            harness: "planner-conversation".to_owned(),
-        },
-        WorkflowNodeSpec {
-            id: "executor".to_owned(),
-            agent: "executor".to_owned(),
-            harness: "native-code-edit".to_owned(),
-        },
-    ];
-    workflow.edges = vec![
-        WorkflowEdgeSpec {
-            from: "planner".to_owned(),
-            to: "executor".to_owned(),
-            on: "ready".to_owned(),
-        },
-        WorkflowEdgeSpec {
-            from: "executor".to_owned(),
-            to: "planner".to_owned(),
-            on: "completed".to_owned(),
-        },
-    ];
-    let runner = WorkflowRunner::new(config, store.clone());
-    let mut options = WorkflowRunOptions::new("planner-led", "too many rounds");
-    options.repo_root = root.clone();
-    options.max_rounds_override = Some(3);
-
-    let output = runner.run(options).await.unwrap();
-    let events = store.read_events(&output.run_id).unwrap();
-
-    assert_eq!(output.report.status, ReportStatus::Blocked);
-    assert!(output.report.blockers[0].contains("max_rounds"));
-    assert!(events
-        .iter()
-        .any(|event| event.kind == "workflow.max_rounds_reached"));
-    assert_eq!(events.last().unwrap().kind, "run.blocked");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1350,7 +821,7 @@ async fn workflow_runner_event_sequence_is_monotonic() {
     let runner = WorkflowRunner::new(config, store.clone());
 
     let output = runner
-        .run(WorkflowRunOptions::new("planner-led", "sequence task"))
+        .run(WorkflowRunOptions::new("code", "sequence task"))
         .await
         .unwrap();
     let events = store.read_events(&output.run_id).unwrap();
@@ -1360,7 +831,7 @@ async fn workflow_runner_event_sequence_is_monotonic() {
     }
     let first_node = events
         .iter()
-        .find(|event| event.kind == "node.started")
+        .find(|event| event.kind == "agent.started")
         .unwrap();
     assert_eq!(first_node.payload["runtime"]["context_window"], 128_000);
     assert_eq!(
@@ -1376,7 +847,7 @@ async fn workflow_runner_event_sequence_is_monotonic() {
         .iter()
         .find(|event| event.kind == "run.started")
         .unwrap();
-    assert_eq!(started.payload["token_budget"], 432_000);
+    assert_eq!(started.payload["token_budget"], 144_000);
     assert_eq!(
         started.payload["cost_policy"]["budget_source"],
         "model_capability_default"
@@ -1391,7 +862,7 @@ async fn workflow_runner_final_report_has_event_log_evidence() {
     let runner = WorkflowRunner::new(config, store);
 
     let output = runner
-        .run(WorkflowRunOptions::new("planner-led", "evidence task"))
+        .run(WorkflowRunOptions::new("code", "evidence task"))
         .await
         .unwrap();
 
@@ -1416,7 +887,7 @@ async fn workflow_runner_replays_terminal_status_from_events() {
     let runner = workflow_runner_with_script(config, store.clone(), ["failed"]);
 
     let output = runner
-        .run(WorkflowRunOptions::new("planner-led", "replay task"))
+        .run(WorkflowRunOptions::new("code", "replay task"))
         .await
         .unwrap();
     let events = store.read_events(&output.run_id).unwrap();
@@ -1424,63 +895,6 @@ async fn workflow_runner_replays_terminal_status_from_events() {
     assert_eq!(replay_run_status(&events), Some(RunStatus::Failed));
     let metadata = store.read_metadata(&output.run_id).unwrap().unwrap();
     assert_eq!(replay_run_status(&events), Some(metadata.status));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn workflow_runner_rejects_invalid_edge_target_before_runtime() {
-    let (mut config, root, store) = fixture();
-    config
-        .workflows
-        .get_mut("planner-led")
-        .unwrap()
-        .edges
-        .push(WorkflowEdgeSpec {
-            from: "planner".to_owned(),
-            to: "missing".to_owned(),
-            on: "ready".to_owned(),
-        });
-    let runner = WorkflowRunner::new(config, store);
-
-    let error = runner
-        .run(WorkflowRunOptions::new("planner-led", "invalid edge"))
-        .await
-        .unwrap_err();
-
-    assert!(matches!(error, WorkflowError::InvalidConfig(_)));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn workflow_runner_rejects_duplicate_node_ids_before_runtime() {
-    let (mut config, root, store) = fixture();
-    let workflow = config.workflows.get_mut("planner-led").unwrap();
-    workflow.nodes.push(workflow.nodes[0].clone());
-    let runner = WorkflowRunner::new(config, store);
-
-    let error = runner
-        .run(WorkflowRunOptions::new("planner-led", "duplicate node"))
-        .await
-        .unwrap_err();
-
-    assert!(matches!(error, WorkflowError::InvalidConfig(_)));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn workflow_runner_rejects_missing_start_node_before_runtime() {
-    let (mut config, root, store) = fixture();
-    let workflow = config.workflows.get_mut("planner-led").unwrap();
-    workflow.nodes.clear();
-    workflow.edges.clear();
-    let runner = WorkflowRunner::new(config, store);
-
-    let error = runner
-        .run(WorkflowRunOptions::new("planner-led", "missing start"))
-        .await
-        .unwrap_err();
-
-    assert!(matches!(error, WorkflowError::InvalidConfig(_)));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1516,7 +930,7 @@ async fn subagent_runtime_runs_backend_and_records_sidechain() {
         .run(SubagentRunInput {
             backend,
             run_id: &run_id,
-            workflow_id: "planner-led",
+            workflow_id: "code",
             node_id: "executor",
             parent_agent_id: "executor",
             parent_harness_id: "native-code-edit",
@@ -1611,7 +1025,7 @@ async fn subagent_runtime_records_failed_sidechain_when_backend_errors() {
         .run(SubagentRunInput {
             backend: Arc::new(ErrorBackend),
             run_id: &run_id,
-            workflow_id: "planner-led",
+            workflow_id: "code",
             node_id: "executor",
             parent_agent_id: "executor",
             parent_harness_id: "native-code-edit",
@@ -1677,8 +1091,6 @@ where
 
 struct ScriptedBackend {
     statuses: Mutex<VecDeque<String>>,
-    tasks: Mutex<Vec<String>>,
-    contexts: Mutex<Vec<Value>>,
 }
 
 struct PatchEventOnlyBackend;
@@ -1740,44 +1152,19 @@ impl ScriptedBackend {
     {
         Self {
             statuses: Mutex::new(statuses.into_iter().map(Into::into).collect()),
-            tasks: Mutex::new(Vec::new()),
-            contexts: Mutex::new(Vec::new()),
         }
-    }
-
-    fn tasks(&self) -> Vec<String> {
-        self.tasks.lock().unwrap().clone()
-    }
-
-    fn contexts(&self) -> Vec<Value> {
-        self.contexts.lock().unwrap().clone()
     }
 }
 
 #[async_trait]
 impl HarnessBackend for ScriptedBackend {
     async fn run(&self, request: HarnessRunRequest) -> Result<HarnessRunResult, HarnessError> {
-        self.tasks.lock().unwrap().push(request.task.clone());
-        self.contexts
-            .lock()
-            .unwrap()
-            .push(request.backend_context.clone());
-        let default_status = if request
-            .backend_context
-            .pointer("/coder/agent/output_contract")
-            .and_then(Value::as_str)
-            == Some("workflow_decision")
-        {
-            "finish"
-        } else {
-            "completed"
-        };
         let status_token = self
             .statuses
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or_else(|| default_status.to_owned());
+            .unwrap_or_else(|| "completed".to_owned());
         let (status, include_evidence, include_review, include_change) = match status_token.as_str()
         {
             "blocked_with_evidence" => ("blocked", true, false, false),
@@ -1906,58 +1293,21 @@ fn test_tmp_root() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
-fn workflow_planner_request_with_feedback(feedback: Option<Value>) -> HarnessRunRequest {
-    let mut plan_context = json!({});
-    if let Some(feedback) = feedback {
-        plan_context["workflow_feedback"] = feedback;
-    }
-    HarnessRunRequest {
-        run_id: RunId::from_string("workflow-planner-test"),
-        workflow_id: "planner-led".to_owned(),
-        node_id: "planner".to_owned(),
-        agent_id: "workflow-planner".to_owned(),
-        harness_id: "workflow-planner".to_owned(),
-        repo_root: ".".to_owned(),
-        task: "decide next workflow step".to_owned(),
-        backend_context: json!({
-            "coder": {
-                "agent": {
-                    "output_contract": "workflow_decision"
-                },
-                "plan_context": plan_context
-            }
-        }),
-    }
-}
-
 fn make_workflow_native_only(config: &mut ProjectConfig) {
-    config.surface_bindings.planner_chat = None;
     for harness in config.harnesses.values_mut() {
         harness.backend = "native-rust".to_owned();
         harness.tools.clear();
-        harness.memory.read = vec![MemoryScope::Workflow, MemoryScope::Run];
-        harness.memory.write = vec![MemoryScope::Run];
     }
 }
 
 fn make_single_node_terminal_workflow(config: &mut ProjectConfig) {
-    let workflow = config.workflows.get_mut("planner-led").unwrap();
-    workflow.nodes = vec![WorkflowNodeSpec {
-        id: "review".to_owned(),
-        agent: "executor".to_owned(),
-        harness: "native-code-edit".to_owned(),
-    }];
-    workflow.edges.clear();
+    let workflow = config.task_profiles.get_mut("code").unwrap();
+    workflow.harness = "native-code-edit".to_owned();
 }
 
 fn make_required_evidence_executor_workflow(config: &mut ProjectConfig) {
-    let workflow = config.workflows.get_mut("planner-led").unwrap();
-    workflow.nodes = vec![WorkflowNodeSpec {
-        id: "executor".to_owned(),
-        agent: "executor".to_owned(),
-        harness: "native-code-edit".to_owned(),
-    }];
-    workflow.edges.clear();
+    let workflow = config.task_profiles.get_mut("code").unwrap();
+    workflow.harness = "native-code-edit".to_owned();
     let harness = config.harnesses.get_mut("native-code-edit").unwrap();
     harness.backend = "native-rust".to_owned();
     harness.tools.clear();

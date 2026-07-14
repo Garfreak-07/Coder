@@ -28,7 +28,7 @@ export function SkillDetailsPanel({ detail }: SkillDetailsPanelProps) {
               <code>{skill.version}</code>
             </div>
             <p>{skill.description}</p>
-            <div className="timeline-meta">
+            <div className="plugin-meta">
               <span>{skill.publisher}</span>
               <span>{skill.risk_level}</span>
             </div>

@@ -5,7 +5,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use coder_config::{HarnessSpec, MemoryAccess, PermissionPolicy, VerificationPolicy};
+use coder_config::{HarnessSpec, PermissionPolicy, VerificationPolicy};
 use coder_core::{FinalReport, RunId};
 use coder_harness::{
     HarnessBackend, HarnessError, HarnessRunEvent, HarnessRunRequest, HarnessRunResult,
@@ -22,11 +22,24 @@ use crate::tool_execution::{
     max_tool_use_concurrency_from_env, partition_tool_steps, StreamingToolExecutorState,
     StreamingToolUpdate, ToolConcurrency, ToolExecutionBatch, ToolExecutionStep,
 };
-use crate::workflow_control::concise_join;
 use crate::{subagent_context, SubagentInvocationKind, SubagentRunInput, SubagentRuntime};
 
 static NATIVE_REPO_EVIDENCE_WRITE_LOCK: Mutex<()> = Mutex::new(());
 const NATIVE_SUBAGENT_MAX_DEPTH: u32 = 1;
+
+fn concise_join(items: &[String], max_chars: usize) -> String {
+    let joined = items
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if joined.chars().count() <= max_chars {
+        joined
+    } else {
+        joined.chars().take(max_chars).collect()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct DeterministicNativeBackend {
@@ -550,11 +563,6 @@ fn native_subagent_harness(request: &HarnessRunRequest) -> HarnessSpec {
         .cloned()
         .and_then(|value| serde_json::from_value::<PermissionPolicy>(value).ok())
         .unwrap_or_default();
-    let memory = harness_context
-        .and_then(|harness| harness.get("memory"))
-        .cloned()
-        .and_then(|value| serde_json::from_value::<MemoryAccess>(value).ok())
-        .unwrap_or_default();
     let verification = harness_context
         .and_then(|harness| harness.get("verification"))
         .cloned()
@@ -564,7 +572,6 @@ fn native_subagent_harness(request: &HarnessRunRequest) -> HarnessSpec {
         backend: "native-rust".to_owned(),
         tools,
         permissions,
-        memory,
         verification,
     }
 }
@@ -994,9 +1001,6 @@ fn native_react_lifecycle_events(
     source_events: &[HarnessRunEvent],
     terminal_status: &str,
 ) -> Vec<HarnessRunEvent> {
-    if request_agent_role(request) != Some("executor") {
-        return Vec::new();
-    }
     let action_events = source_events
         .iter()
         .filter(|event| native_event_has_tool_action(event))
@@ -1204,13 +1208,14 @@ fn native_tool_execution_order() -> &'static [(&'static str, ToolConcurrency)] {
     ]
 }
 
-fn native_terminal_status(request: &HarnessRunRequest, state: &NativeToolRunState) -> &'static str {
+fn native_terminal_status(
+    _request: &HarnessRunRequest,
+    state: &NativeToolRunState,
+) -> &'static str {
     if !state.blockers.is_empty() {
         "blocked"
     } else if state.completed_tools == 0 && !state.failures.is_empty() {
         "failed"
-    } else if request_agent_role(request) == Some("planner") {
-        "ready"
     } else {
         "completed"
     }
@@ -1221,8 +1226,7 @@ fn native_executor_required_side_effect_missing(
     tools: &BTreeSet<String>,
     state: &NativeToolRunState,
 ) -> bool {
-    request_agent_role(request) == Some("executor")
-        && native_plan_requires_repository_changes(request)
+    native_task_requires_repository_changes(request)
         && native_selected_tools_include_side_effect(tools)
         && state.changed_files.is_empty()
         && state.patch_refs.is_empty()
@@ -1486,24 +1490,12 @@ fn native_command_args(task: &str) -> Option<Vec<String>> {
     }
 }
 
-fn native_plan_requires_repository_changes(request: &HarnessRunRequest) -> bool {
+fn native_task_requires_repository_changes(request: &HarnessRunRequest) -> bool {
     request
         .backend_context
-        .pointer("/coder/plan_context/plan_draft/execution_mode")
-        .or_else(|| {
-            request
-                .backend_context
-                .pointer("/coder/plan_context/execution_mode")
-        })
+        .pointer("/coder/task_context/execution_mode")
         .and_then(Value::as_str)
-        == Some("must_write")
-}
-
-fn request_agent_role(request: &HarnessRunRequest) -> Option<&str> {
-    request
-        .backend_context
-        .pointer("/coder/agent/role")
-        .and_then(Value::as_str)
+        == Some("write")
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1529,7 +1521,6 @@ impl NativeMockBackend {
 impl HarnessBackend for NativeMockBackend {
     async fn run(&self, request: HarnessRunRequest) -> Result<HarnessRunResult, HarnessError> {
         let status = match self.outcome {
-            NativeMockOutcome::Completed if request.agent_id == "planner" => "ready",
             NativeMockOutcome::Completed => "completed",
             NativeMockOutcome::Blocked => "blocked",
             NativeMockOutcome::Failed => "failed",

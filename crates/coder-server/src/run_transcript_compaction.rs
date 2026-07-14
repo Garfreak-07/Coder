@@ -604,22 +604,22 @@ fn resolve_run_transcript_runtime_policy(
         };
     };
 
-    let Some(agent) = config.agents.get(&agent_id) else {
+    let Some(profile) = config.task_profiles.get(&agent_id) else {
         return RunTranscriptRuntimeResolution {
             policy: default_resolved_agent_runtime(),
-            source: "default_runtime_missing_agent",
+            source: "default_runtime_missing_task_profile",
             agent_id: Some(agent_id),
         };
     };
 
     let model = config
         .models
-        .get(&agent.model)
+        .get(&profile.model)
         .cloned()
         .unwrap_or_else(default_compaction_model);
     RunTranscriptRuntimeResolution {
-        policy: resolve_agent_runtime_policy(&model, &agent.runtime),
-        source: "run_config_agent_runtime",
+        policy: resolve_agent_runtime_policy(&model, &profile.runtime),
+        source: "run_config_task_profile_runtime",
         agent_id: Some(agent_id),
     }
 }

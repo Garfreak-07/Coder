@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 use coder_config::{
-    evaluate_permission, permission_policy_explanation, resolve_agent_tools, PermissionDecision,
+    evaluate_permission, permission_policy_explanation, resolve_task_tools, PermissionDecision,
     PermissionPolicy, PermissionRuleValue, PermissionSettingsRecord, PermissionUpdate,
     PermissionUpdateDestination, ProjectConfig,
 };
@@ -403,10 +403,10 @@ fn model_tool_agent_tool_allowlist_decision(
         .unwrap_or_else(|| DEFAULT_MODEL_TOOL_PERMISSION_HARNESS_ID.to_owned());
     let parent_agent_id = parent_agent_id?;
     let configured_resolution = config
-        .agents
+        .task_profiles
         .get(&parent_agent_id)
         .zip(config.harnesses.get(&parent_harness_id))
-        .map(|(agent, harness)| resolve_agent_tools(agent, harness));
+        .map(|(profile, harness)| resolve_task_tools(profile, harness));
     let inherited_selected_tools = input
         .pointer("/backend_context/coder/harness/selected_tools")
         .and_then(Value::as_array);
@@ -446,7 +446,7 @@ fn model_tool_agent_tool_allowlist_decision(
     };
     Some(json!({
         "contract": "coder.agent_tool_allowed_types.v1",
-        "source": "ProjectConfig.agents tools Agent(...) plus harness.tools",
+        "source": "ProjectConfig.task_profiles tools Agent(...) plus harness.tools",
         "run_id": run_id,
         "parent_agent_id": parent_agent_id,
         "parent_harness_id": parent_harness_id,

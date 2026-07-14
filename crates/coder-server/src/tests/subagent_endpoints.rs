@@ -19,7 +19,7 @@ async fn subagent_run_endpoint_spawns_child_and_records_sidechain() {
         json!({
             "config": config,
             "run_id": run_id,
-            "workflow_id": "planner-led",
+            "workflow_id": "code",
             "node_id": "executor",
             "parent_agent_id": "executor",
             "parent_harness_id": "native-code-edit",
@@ -97,7 +97,7 @@ async fn subagent_run_endpoint_can_launch_background_task_and_report_status() {
         json!({
             "config": config,
             "run_id": run_id,
-            "workflow_id": "planner-led",
+            "workflow_id": "code",
             "node_id": "executor",
             "parent_agent_id": "executor",
             "parent_harness_id": "native-code-edit",
@@ -186,7 +186,7 @@ async fn subagent_background_status_recovers_from_durable_task_record() {
         json!({
             "config": config,
             "run_id": run_id,
-            "workflow_id": "planner-led",
+            "workflow_id": "code",
             "node_id": "executor",
             "parent_agent_id": "executor",
             "parent_harness_id": "native-code-edit",

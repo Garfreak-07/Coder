@@ -16,7 +16,7 @@ const AGGRESSIVE_MAX_DEPTH: usize = 4;
 
 #[derive(Debug, Clone)]
 pub struct ContextCompactionOutput {
-    pub plan_context: Option<Value>,
+    pub task_context: Option<Value>,
     pub report: Value,
     pub circuit_outcome: Option<ContextCompactionCircuitOutcome>,
 }
@@ -33,13 +33,13 @@ impl ContextCompactionCircuitOutcome {
     }
 }
 
-pub fn compact_plan_context_with_circuit(
-    plan_context: Option<&Value>,
+pub fn compact_task_context_with_circuit(
+    task_context: Option<&Value>,
     runtime: &ResolvedAgentRuntimePolicy,
     circuit_state: Option<&CompactionCircuitState>,
 ) -> ContextCompactionOutput {
     let budget = context_budget_for_runtime(runtime);
-    let original_tokens = plan_context.map(estimate_json_tokens).unwrap_or(0);
+    let original_tokens = task_context.map(estimate_json_tokens).unwrap_or(0);
     let original_projected_tokens =
         original_tokens.saturating_add(budget.estimated_max_turn_growth_tokens);
     let circuit = compaction_circuit_report(runtime, circuit_state);
@@ -60,9 +60,9 @@ pub fn compact_plan_context_with_circuit(
         "persisted_max_consecutive_failures": circuit.persisted_max_consecutive_failures
     });
 
-    let Some(plan_context) = plan_context else {
+    let Some(task_context) = task_context else {
         return ContextCompactionOutput {
-            plan_context: None,
+            task_context: None,
             report: report_with_status(base_report, "not_needed", false, 0, 0),
             circuit_outcome: None,
         };
@@ -70,7 +70,7 @@ pub fn compact_plan_context_with_circuit(
 
     if original_projected_tokens <= budget.autocompact_threshold_tokens {
         return ContextCompactionOutput {
-            plan_context: Some(plan_context.clone()),
+            task_context: Some(task_context.clone()),
             report: report_with_status(
                 base_report,
                 "not_needed",
@@ -83,7 +83,7 @@ pub fn compact_plan_context_with_circuit(
     }
 
     let primary = compact_value(
-        plan_context,
+        task_context,
         PRIMARY_MAX_DEPTH,
         PRIMARY_MAX_STRING_CHARS,
         PRIMARY_MAX_ARRAY_ITEMS,
@@ -94,7 +94,7 @@ pub fn compact_plan_context_with_circuit(
         primary_tokens.saturating_add(budget.estimated_max_turn_growth_tokens);
     if primary_projected_tokens <= budget.blocking_limit_tokens {
         return ContextCompactionOutput {
-            plan_context: Some(primary),
+            task_context: Some(primary),
             report: report_with_status(
                 base_report,
                 "completed",
@@ -107,7 +107,7 @@ pub fn compact_plan_context_with_circuit(
     }
 
     let aggressive = compact_value(
-        plan_context,
+        task_context,
         AGGRESSIVE_MAX_DEPTH,
         AGGRESSIVE_MAX_STRING_CHARS,
         AGGRESSIVE_MAX_ARRAY_ITEMS,
@@ -122,7 +122,7 @@ pub fn compact_plan_context_with_circuit(
         "over_blocking_limit"
     };
     ContextCompactionOutput {
-        plan_context: Some(aggressive),
+        task_context: Some(aggressive),
         report: report_with_status(
             base_report,
             status,
@@ -314,15 +314,13 @@ mod tests {
     }
 
     #[test]
-    fn small_plan_context_does_not_compact() {
+    fn small_task_context_does_not_compact() {
         let context = json!({
-            "plan_draft": {
-                "steps": ["Update docs"],
-                "acceptance_criteria": ["tests pass"]
-            }
+            "goal": "Update docs",
+            "constraints": ["tests pass"]
         });
 
-        let output = compact_plan_context_with_circuit(
+        let output = compact_task_context_with_circuit(
             Some(&context),
             &resolved_runtime(AgentRuntimePolicy::default()),
             None,
@@ -330,11 +328,11 @@ mod tests {
 
         assert_eq!(output.report["status"], "not_needed");
         assert_eq!(output.report["applied"], false);
-        assert_eq!(output.plan_context, Some(context));
+        assert_eq!(output.task_context, Some(context));
     }
 
     #[test]
-    fn large_plan_context_compacts_before_backend_payload() {
+    fn large_task_context_compacts_before_backend_payload() {
         let runtime = resolved_runtime_with_capabilities(
             AgentRuntimePolicy {
                 compact_output_reserve_tokens: Some(1_000),
@@ -350,20 +348,18 @@ mod tests {
         );
         let huge = "x".repeat(140_000);
         let context = json!({
-            "plan_draft": {
-                "execution_mode": "must_write",
-                "review_mode": "qualitative",
-                "steps": [huge],
-                "acceptance_criteria": (0..100).map(|index| format!("criterion-{index}")).collect::<Vec<_>>()
-            }
+            "goal": "Complete the repository task",
+            "execution_mode": "write",
+            "instructions": [huge],
+            "constraints": (0..100).map(|index| format!("constraint-{index}")).collect::<Vec<_>>()
         });
 
-        let output = compact_plan_context_with_circuit(Some(&context), &runtime, None);
+        let output = compact_task_context_with_circuit(Some(&context), &runtime, None);
         assert_eq!(
             output.circuit_outcome,
             Some(ContextCompactionCircuitOutcome::Success)
         );
-        let compacted = output.plan_context.unwrap();
+        let compacted = output.task_context.unwrap();
 
         assert_eq!(output.report["applied"], true);
         assert!(matches!(
@@ -371,11 +367,11 @@ mod tests {
             Some("completed" | "completed_aggressive" | "over_blocking_limit")
         ));
         assert!(estimate_json_tokens(&compacted) < estimate_json_tokens(&context));
-        assert!(compacted["plan_draft"]["steps"][0]
+        assert!(compacted["instructions"][0]
             .as_str()
             .unwrap()
             .ends_with("..."));
-        assert_eq!(compacted["plan_draft"]["execution_mode"], "must_write");
-        assert_eq!(compacted["plan_draft"]["review_mode"], "qualitative");
+        assert_eq!(compacted["execution_mode"], "write");
+        assert_eq!(compacted["goal"], "Complete the repository task");
     }
 }

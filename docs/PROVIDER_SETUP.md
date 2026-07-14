@@ -17,8 +17,11 @@ Provider Settings can configure:
   timeout, WebSocket connect timeout, and provider WebSocket capability
 - mock mode for local plumbing tests
 
-Settings are kept in the local Coder store. API keys must never be committed to
-scripts, docs, examples, or workflow specs.
+Provider Settings survive server restarts. Coder stores API keys in the OS
+credential store and writes only non-secret settings plus configured-provider
+references to `settings/providers.json` in the Coder store. Environment
+variables remain a developer/headless fallback. API keys must never be
+committed to scripts, docs, examples, or task profile configuration.
 
 ## Provider Defaults
 
@@ -45,7 +48,7 @@ provider needs it.
 
 Credential lookup order:
 
-1. Provider Settings secret.
+1. Provider Settings secret loaded from the OS credential store.
 2. Provider-specific environment variable.
 3. `CODER_API_KEY`.
 4. `LLM_API_KEY`.
@@ -127,35 +130,18 @@ This prevents accidental key disclosure but is not OS-level network isolation;
 commands can still open sockets until a platform sandbox and managed proxy are
 implemented together.
 
-## Live Tests
+## Live Provider Checks
 
-Provider-only live smoke:
+Use Provider Settings in the app to test credentials and transport. Run an
+ordinary Task against a throwaway repository to test the complete model/tool
+path. Coder does not require a separate platform-specific smoke script.
 
-```powershell
-$env:CODER_LIVE_LLM_SMOKE="1"
-powershell -ExecutionPolicy Bypass -File .\scripts\live-llm-smoke.ps1 -SkipIfMissingProvider
-```
+Live checks send their Conversation or Task context to the configured
+provider. Use throwaway work roots and an explicitly configured cache location
+when large artifacts are expected. Coder does not write plaintext provider
+secrets to run artifacts or print them in status output.
 
-Native full-path live self-test:
-
-```powershell
-$env:CODER_SELFTEST_LIVE="1"
-powershell -ExecutionPolicy Bypass -File .\scripts\live-coder-selftest-suite.ps1 -SkipIfMissingLiveConfig
-```
-
-Real provider plus local stdio MCP path:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\live-coder-selftest-suite.ps1 -Live -LoadLocalEnv -Minimal -IncludeMcpCase -Force
-```
-
-Live tests send the temporary task context to the configured provider. They
-should use throwaway work roots and repo-local/F-drive cache paths when large
-artifacts are expected. The smoke scripts use process-scoped environment
-variables for keys; Coder does not write plaintext provider secrets to run
-artifacts or print them in status output.
-
-During Start Work, `native-code-edit` can use the configured provider through
+During a Task run, `native-code-edit` can use the configured provider through
 `native-model-tool-loop`. It is an OpenAI-compatible tool-call loop for
 repo/git/write/finish operations and a frozen snapshot of registered stdio MCP
 tools. Rust owns the only side-effect
@@ -167,7 +153,7 @@ explicitly enabled. Plain assistant text is summary-only and cannot write files.
 ## Secret Hygiene
 
 - Do not put keys in committed scripts.
-- Do not paste keys into docs or workflow JSON.
+- Do not paste keys into docs or task profile JSON.
 - Prefer app Settings for normal use.
-- Prefer process-scoped environment variables for developer smokes.
+- Use process-scoped environment variables only for developer/headless runs.
 - Error messages returned through Provider Settings are redacted.

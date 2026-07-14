@@ -8,7 +8,7 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use coder_config::{resolve_agent_tools, validate_project_config, HarnessSpec, ProjectConfig};
+use coder_config::{resolve_task_tools, validate_project_config, HarnessSpec, ProjectConfig};
 use coder_core::{FinalReport, RunId};
 use coder_harness::HarnessRunEvent;
 use coder_store::{DurableJsonlPageOptions, SubagentBackgroundTaskRecord};
@@ -418,22 +418,20 @@ fn project_subagent_backend_context(
         *coder = json!({});
     }
 
-    if let Some((agent_id, agent)) =
-        subagent_name.and_then(|agent_id| config.agents.get_key_value(agent_id))
+    if let Some((profile_id, profile)) =
+        subagent_name.and_then(|profile_id| config.task_profiles.get_key_value(profile_id))
     {
         coder["agent"] = json!({
-            "agent_type": agent_id,
-            "role": &agent.role,
-            "system": &agent.system,
-            "output_contract": &agent.output_contract,
-            "runtime": &agent.runtime
+            "agent_type": profile_id,
+            "system": &profile.instructions,
+            "runtime": &profile.runtime
         });
-        let selected_tools = resolve_agent_tools(agent, harness).selected_tools;
+        let selected_tools = resolve_task_tools(profile, harness).selected_tools;
         if !coder.get("harness").is_some_and(Value::is_object) {
             coder["harness"] = json!({});
         }
         coder["harness"]["selected_tools"] = json!(selected_tools);
-        if let Some(model) = config.models.get(&agent.model) {
+        if let Some(model) = config.models.get(&profile.model) {
             coder["model"] = json!({
                 "provider": &model.provider,
                 "model": &model.model,
@@ -764,24 +762,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn configured_subagent_projects_real_agent_runtime_and_typed_overrides() {
+    fn configured_subagent_projects_task_profile_runtime_and_typed_overrides() {
         let config = crate::default_project_config();
         let harness = config.harnesses.get("native-code-edit").unwrap();
         let context = project_subagent_backend_context(
             &config,
             harness,
-            Some("executor"),
+            Some("code"),
             Some("override-model"),
             Some(&json!("max")),
-            &json!({"coder": {"plan_context": {"marker": "preserved"}}}),
+            &json!({"coder": {"task_context": {"marker": "preserved"}}}),
         );
 
-        assert_eq!(context["coder"]["plan_context"]["marker"], "preserved");
-        assert_eq!(context["coder"]["agent"]["agent_type"], "executor");
-        assert_eq!(context["coder"]["agent"]["role"], "executor");
-        assert!(context["coder"]["agent"]["system"]
-            .as_str()
-            .is_some_and(|system| system.contains("coding executor")));
+        assert_eq!(context["coder"]["task_context"]["marker"], "preserved");
+        assert_eq!(context["coder"]["agent"]["agent_type"], "code");
+        assert_eq!(
+            context["coder"]["agent"]["system"].as_str(),
+            Some(config.task_profiles["code"].instructions.as_str())
+        );
         assert_eq!(context["coder"]["agent"]["runtime"]["effort"], "max");
         assert_eq!(context["coder"]["model"]["model"], "override-model");
         assert!(context["coder"]["harness"]["selected_tools"]

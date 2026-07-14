@@ -69,7 +69,7 @@ pub(crate) async fn execute_model_tool_request_with_route(
                     .run_id
                     .as_ref()
                     .map(|run_id| RunId::from_string(run_id.clone())),
-                approved: host_context.start_work_authorized,
+                approved: host_context.host_approved,
             },
         )
         .await?;
@@ -272,7 +272,7 @@ fn model_tool_subagent_run_request(
         .as_deref()
         .and_then(|run_id| latest_run_context(&state.store, run_id))
         .unwrap_or_default();
-    let inherited_plan_context = run_context.plan_context.clone();
+    let inherited_task_context = run_context.task_context.clone();
     let mut config = run_id
         .as_deref()
         .and_then(|run_id| read_run_project_config_snapshot(&state.store, run_id))
@@ -280,7 +280,7 @@ fn model_tool_subagent_run_request(
     let provider_settings = state.provider_settings.lock().unwrap().clone();
     apply_provider_settings_to_project_config(&mut config, &provider_settings);
     let workflow_id = model_tool_string(input, &["workflow_id"])
-        .or(run_context.workflow_id)
+        .or(run_context.task_profile_id)
         .unwrap_or_else(|| "model-tool".to_owned());
     let node_id = model_tool_string(input, &["node_id"])
         .or(run_context.node_id)
@@ -307,7 +307,7 @@ fn model_tool_subagent_run_request(
         &["subagent_name", "subagent_type", "name", "description"],
     );
     let backend_context = model_tool_object(input, "backend_context")
-        .unwrap_or_else(|| inherited_model_tool_backend_context(inherited_plan_context));
+        .unwrap_or_else(|| inherited_model_tool_backend_context(inherited_task_context));
     let parent_query_depth = model_tool_u32(input, &["parent_query_depth"])
         .or_else(|| {
             [
@@ -352,14 +352,14 @@ fn model_tool_subagent_run_request(
     })
 }
 
-fn inherited_model_tool_backend_context(plan_context: Option<Value>) -> Value {
-    let Some(plan_context) = plan_context else {
+fn inherited_model_tool_backend_context(task_context: Option<Value>) -> Value {
+    let Some(task_context) = task_context else {
         return json!({});
     };
     json!({
         "coder": {
-            "plan_context": plan_context,
-            "backend_context_source": "run_started_plan_context"
+            "task_context": task_context,
+            "backend_context_source": "run_started_task_context"
         }
     })
 }

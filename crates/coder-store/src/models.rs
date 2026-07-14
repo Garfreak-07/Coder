@@ -1,5 +1,3 @@
-use std::path::{Path, PathBuf};
-
 use coder_core::{FinalReport, RunState};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7,47 +5,6 @@ use thiserror::Error;
 use time::OffsetDateTime;
 
 use crate::MAX_DURABLE_JSONL_PAGE_LIMIT;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LocalStoreLayout {
-    pub root: PathBuf,
-    pub sessions: PathBuf,
-    pub runs: PathBuf,
-    pub background_tasks: PathBuf,
-    pub timeline: PathBuf,
-    pub blobs: PathBuf,
-    pub artifacts: PathBuf,
-    pub settings: PathBuf,
-    pub checkpoints: PathBuf,
-    pub changesets: PathBuf,
-    pub repo_index: PathBuf,
-    pub plugin_cache: PathBuf,
-    pub skill_cache: PathBuf,
-    pub logs: PathBuf,
-    pub tmp: PathBuf,
-}
-
-impl LocalStoreLayout {
-    pub(crate) fn new(root: &Path) -> Self {
-        Self {
-            root: root.to_path_buf(),
-            sessions: root.join("sessions"),
-            runs: root.join("runs"),
-            background_tasks: root.join("background-tasks"),
-            timeline: root.join("timeline"),
-            blobs: root.join("blobs"),
-            artifacts: root.join("artifacts"),
-            settings: root.join("settings"),
-            checkpoints: root.join("checkpoints"),
-            changesets: root.join("changesets"),
-            repo_index: root.join("repo-index"),
-            plugin_cache: root.join("plugin-cache"),
-            skill_cache: root.join("skill-cache"),
-            logs: root.join("logs"),
-            tmp: root.join("tmp"),
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionJsonlRecord {

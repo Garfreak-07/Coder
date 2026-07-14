@@ -301,7 +301,14 @@ pub(crate) fn provider_api_key(
         .and_then(|state| state.secret.as_deref())
         .map(str::trim)
         .filter(|secret| !secret.is_empty())
-        .map(|secret| (secret.to_owned(), "settings".to_owned()))
+        .map(|secret| {
+            let source = settings
+                .api_keys
+                .get(provider)
+                .map(|state| state.source.clone())
+                .unwrap_or_else(|| "settings".to_owned());
+            (secret.to_owned(), source)
+        })
         .or_else(|| {
             provider_api_key_from_env(provider, model_api_key_env)
                 .map(|secret| (secret, "environment".to_owned()))

@@ -4,12 +4,12 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ModelToolRunContext {
-    pub workflow_id: Option<String>,
+    pub task_profile_id: Option<String>,
     pub node_id: Option<String>,
     pub agent_id: Option<String>,
     pub harness_id: Option<String>,
     pub repo_root: Option<String>,
-    pub plan_context: Option<Value>,
+    pub task_context: Option<Value>,
 }
 
 pub(crate) fn latest_run_context(store: &RunStore, run_id: &str) -> Option<ModelToolRunContext> {
@@ -20,10 +20,11 @@ pub(crate) fn latest_run_context(store: &RunStore, run_id: &str) -> Option<Model
     let mut context = ModelToolRunContext::default();
     for event in &page.records {
         if event.kind == "run.started" {
-            context.workflow_id = context.workflow_id.or_else(|| {
+            context.task_profile_id = context.task_profile_id.or_else(|| {
                 event
                     .payload
-                    .get("workflow_id")
+                    .get("task_profile_id")
+                    .or_else(|| event.payload.get("workflow_id"))
                     .and_then(Value::as_str)
                     .map(str::to_owned)
             });
@@ -34,9 +35,9 @@ pub(crate) fn latest_run_context(store: &RunStore, run_id: &str) -> Option<Model
                     .and_then(Value::as_str)
                     .map(str::to_owned)
             });
-            context.plan_context = context
-                .plan_context
-                .or_else(|| event.payload.get("plan_context").cloned());
+            context.task_context = context
+                .task_context
+                .or_else(|| event.payload.get("task_context").cloned());
         }
         if event.kind == "node.started" {
             context.node_id = event

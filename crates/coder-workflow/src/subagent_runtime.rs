@@ -477,7 +477,7 @@ mod context_tests {
     fn child_backend_context_keeps_one_parent_projection() {
         let parent = json!({
             "coder": {
-                "plan_context": {"marker": "single-copy-marker"},
+                "task_context": {"marker": "single-copy-marker"},
                 "harness": {"selected_tools": ["repo_read_file", "agent_subagent"]}
             }
         });

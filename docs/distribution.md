@@ -15,8 +15,8 @@ Useful commands:
 
 ```sh
 cargo run -p coder-cli --bin coder-rust -- config validate --path examples/coder.yaml
-cargo run -p coder-cli --bin coder-rust -- workflow preview planner-led "summarize this repo"
-cargo run -p coder-cli --bin coder-rust -- workflow run --mock planner-led "summarize this repo"
+cargo run -p coder-cli --bin coder-rust -- task preview code "summarize this repo"
+cargo run -p coder-cli --bin coder-rust -- task run --mock code "summarize this repo"
 cargo run -p coder-cli --bin coder-rust -- runs list --store .coder
 cargo run -p coder-cli --bin coder-rust -- server --host 127.0.0.1 --port 8876
 ```

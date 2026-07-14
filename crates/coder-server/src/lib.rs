@@ -1,7 +1,7 @@
 #[cfg(test)]
 use std::env;
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     net::SocketAddr,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -17,6 +17,7 @@ use axum::{
 use coder_config::PermissionSettingsRecord;
 #[cfg(test)]
 use coder_config::ProjectConfig;
+use coder_config::{ValidationLevel, ValidationReport};
 #[cfg(test)]
 use coder_core::FinalReport;
 #[cfg(test)]
@@ -28,15 +29,22 @@ use coder_memory::MemoryError;
 use coder_store::RepoEvidenceKind;
 use coder_store::{RunStore, StoreError};
 use coder_tools::RepoToolError;
-use coder_workflow::{WorkflowError, WorkflowRunControl};
+use coder_workflow::WorkflowError;
+#[cfg(test)]
+use coder_workflow::WorkflowRunControl;
 use serde_json::{json, Value};
 
 mod api_types;
 mod background_commands;
 mod cache_runtime;
+mod capability_registry;
 mod change_sets;
+mod code_task_runtime;
+mod conversation;
+mod conversation_provider;
+mod conversation_runtime;
+mod credential_store;
 mod extension_endpoints;
-mod goal_runtime;
 mod local_api_transport;
 mod mcp_runtime;
 mod memory_endpoints;
@@ -65,15 +73,7 @@ mod model_tool_webhook_hooks;
 mod native_model_backend;
 mod native_model_mcp;
 mod outbound_http;
-mod planner_api;
-mod planner_conversation;
-mod planner_history;
-mod planner_provider_dispatch;
-mod planner_provider_recovery;
-mod planner_provider_runtime;
-mod planner_runtime;
-mod planner_session;
-mod planner_tool_runtime;
+mod output_hub;
 mod provider_runtime;
 mod provider_settings;
 mod run_control;
@@ -82,13 +82,13 @@ mod run_records;
 mod run_reports;
 mod run_token_budget;
 mod run_transcript_compaction;
+mod session_host;
 mod skill_model_tool;
 mod subagent_tools;
 mod surface_endpoints;
 mod timeline_projection;
 mod tool_endpoints;
 mod workflow_endpoints;
-mod workflow_planner_backend;
 use api_types::InstalledSkillRecord;
 pub use api_types::*;
 use background_commands::{
@@ -111,17 +111,9 @@ use memory_endpoints::{
     list_knowledge_sources, load_project_memory, propose_project_memory_write, retrieve_knowledge,
 };
 use model_tool_execution::{execute_model_tool_endpoint, execute_model_tool_turn_endpoint};
-#[cfg(test)]
-use planner_history::{
-    planner_history_compaction_attempt, record_planner_history_compaction_outcome,
-};
-#[cfg(test)]
-use planner_runtime::resolve_planner_runtime;
-use planner_runtime::validation_issue_summary;
-use planner_session::StoredPlannerChatSession;
 use provider_settings::{
     apply_provider_settings_to_project_config, get_provider_settings, get_provider_status,
-    save_provider_settings, test_provider_status,
+    load_provider_settings, save_provider_settings, test_provider_status,
 };
 pub(crate) use run_records::stored_run_exists;
 use run_records::{
@@ -134,42 +126,32 @@ use subagent_tools::{
     cancel_background_subagent_endpoint, get_background_subagent_endpoint, run_subagent_endpoint,
     BackgroundSubagentTask,
 };
-use surface_endpoints::{agent_role_cards, capabilities, health};
+use surface_endpoints::{capabilities, health};
 use tool_endpoints::{
     apply_patch_endpoint, ensure_tool_boundary, git_diff_endpoint, git_status_endpoint,
     preview_command_endpoint, preview_patch_endpoint, record_command_events,
     repo_find_files_endpoint, repo_read_file_endpoint, repo_read_file_range_endpoint,
     repo_search_text_endpoint, run_command_endpoint, write_tool_evidence,
 };
+pub(crate) use workflow_endpoints::default_project_config;
 pub use workflow_endpoints::run_embedded_workflow;
-pub(crate) use workflow_endpoints::{default_project_config, workflow_runner_for_api};
-use workflow_endpoints::{
-    default_workflow, get_library, get_library_workflow, preview_run, run_mock_workflow,
-    run_workflow, save_library_workflow, validate_config, validate_workflow,
-};
+use workflow_endpoints::{preview_run, run_workflow, validate_config};
 
-const PLANNER_CHAT_MAX_OUTPUT_TOKENS_DEFAULT: u32 = 900;
-// Claude Code's dumpPrompts cache keeps only 5 full API requests for ant users
-// and query.ts creates the dump fetch wrapper once so only the latest request
-// body is retained. Coder has no dump-prompts cache on this path; the constants
-// below make the Planner provider request/response retention policy explicit.
-#[cfg(test)]
-const CLAUDE_DUMP_PROMPTS_MAX_CACHED_REQUESTS: usize = 5;
-#[cfg(test)]
-const PLANNER_PROVIDER_RETAINED_FULL_REQUEST_BODIES: usize = 1;
-const PLANNER_PROVIDER_RESPONSE_MAX_BYTES: usize = 2 * 1024 * 1024;
-const PLANNER_PROVIDER_STREAM_PENDING_MAX_BYTES: usize = 2 * 1024 * 1024;
-const PLANNER_MAX_OUTPUT_RECOVERY_MESSAGE: &str =
-    "Output token limit hit. Resume directly - no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.";
-const PLANNER_NORMAL_WORD_LIMIT: usize = 600;
-const PLANNER_READY_WORD_LIMIT: usize = 120;
-const PLANNER_TRUNCATED_NOTICE: &str =
-    "That response was too long, so I summarized it. Ask for details if needed.";
+pub(crate) fn validation_issue_summary(report: &ValidationReport) -> String {
+    report
+        .issues
+        .iter()
+        .filter(|issue| issue.level == ValidationLevel::Error)
+        .take(3)
+        .map(|issue| format!("{} at {}", issue.code, issue.target))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 // Claude Code caps per-session transcript write queues at 1000 entries. Coder
 // applies the same bounded-queue size to retained run transcript slices so
 // event capture cannot grow without limit during long agent runs.
 const CLAUDE_CODE_BOUNDED_QUEUE_ENTRIES: usize = 1000;
-const PLANNER_CHAT_HISTORY_RECENT_TURN_LIMIT: usize = 10;
 const CONTENT_REPLACEMENT_REPLAY_CONTRACT: &str = "coder.content_replacement_replay.v1";
 const RUN_TRANSCRIPT_COMPACTION_CONTRACT: &str = "coder.run_transcript_compaction.v1";
 const RUN_TRANSCRIPT_COMPACTION_ATTACHMENT_CONTRACT: &str =
@@ -193,34 +175,32 @@ const INVOKED_SKILL_CONTRACT: &str = "coder.invoked_skill.v1";
 #[derive(Debug, Clone)]
 pub struct ApiState {
     pub store: RunStore,
-    pub(crate) library_workflows: Arc<Mutex<BTreeMap<String, Value>>>,
-    planner_sessions: Arc<Mutex<BTreeMap<String, StoredPlannerChatSession>>>,
+    pub(crate) session_host: session_host::SessionHost,
     background_commands: Arc<Mutex<BTreeMap<String, Arc<Mutex<BackgroundCommandTask>>>>>,
     background_subagents: Arc<Mutex<BTreeMap<String, Arc<Mutex<BackgroundSubagentTask>>>>>,
-    pub(crate) pending_planner_guidance:
-        Arc<Mutex<BTreeMap<String, VecDeque<model_tool_async_attachments::PlannerUserGuidance>>>>,
-    pub(crate) active_run_controls:
-        Arc<Mutex<BTreeMap<String, tokio::sync::watch::Sender<WorkflowRunControl>>>>,
-    pub(crate) run_token_budgets:
-        Arc<Mutex<BTreeMap<String, run_token_budget::RunTokenBudgetState>>>,
     pub(crate) installed_skills: Arc<Mutex<BTreeMap<String, InstalledSkillRecord>>>,
     pub(crate) plugin_marketplaces: Arc<Mutex<BTreeMap<String, PluginMarketplace>>>,
     pub(crate) skill_extra_roots: Arc<Mutex<Vec<SkillExtraRoot>>>,
     pub(crate) provider_settings: Arc<Mutex<ProviderSettings>>,
+    pub(crate) credential_store: Arc<dyn credential_store::KeyringStore>,
     pub(crate) mcp_runtime: coder_extensions::StdioMcpRuntime,
 }
 
 impl ApiState {
     pub fn new(store: RunStore) -> Self {
+        Self::new_with_credential_store(store, credential_store::default_keyring_store())
+    }
+
+    pub(crate) fn new_with_credential_store(
+        store: RunStore,
+        credential_store: Arc<dyn credential_store::KeyringStore>,
+    ) -> Self {
+        let provider_settings = load_provider_settings(&store, credential_store.as_ref());
         Self {
             store,
-            library_workflows: Arc::new(Mutex::new(BTreeMap::new())),
-            planner_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+            session_host: session_host::SessionHost::default(),
             background_commands: Arc::new(Mutex::new(BTreeMap::new())),
             background_subagents: Arc::new(Mutex::new(BTreeMap::new())),
-            pending_planner_guidance: Arc::new(Mutex::new(BTreeMap::new())),
-            active_run_controls: Arc::new(Mutex::new(BTreeMap::new())),
-            run_token_budgets: Arc::new(Mutex::new(BTreeMap::new())),
             installed_skills: Arc::new(Mutex::new(BTreeMap::new())),
             plugin_marketplaces: Arc::new(Mutex::new(BTreeMap::from([(
                 "builtin".to_owned(),
@@ -231,7 +211,8 @@ impl ApiState {
                 },
             )]))),
             skill_extra_roots: Arc::new(Mutex::new(Vec::new())),
-            provider_settings: Arc::new(Mutex::new(ProviderSettings::default())),
+            provider_settings: Arc::new(Mutex::new(provider_settings)),
+            credential_store,
             mcp_runtime: coder_extensions::StdioMcpRuntime::default(),
         }
     }
@@ -241,7 +222,6 @@ pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/api/v3/health", get(health))
         .route("/api/v3/capabilities", get(capabilities))
-        .route("/api/v3/agent-role-cards", get(agent_role_cards))
         .route("/api/v3/memory/project/load", post(load_project_memory))
         .route(
             "/api/v3/memory/project/propose-write",
@@ -262,71 +242,26 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/api/v3/knowledge/retrieve", post(retrieve_knowledge))
         .route("/api/v3/config/validate", post(validate_config))
-        .route("/api/v3/workflows/default", get(default_workflow))
-        .route("/api/v3/workflows/validate", post(validate_workflow))
-        .route("/api/v3/workflows/preview", post(preview_run))
-        .route("/api/v3/workflows/run", post(run_workflow))
-        .route("/api/v3/library", get(get_library))
-        .route("/api/v3/library/workflows", post(save_library_workflow))
+        .route("/api/v3/conversations", post(conversation::create_session))
         .route(
-            "/api/v3/library/workflows/{workflow_id}",
-            get(get_library_workflow),
+            "/api/v3/conversations/{session_id}",
+            get(conversation::get_session),
         )
         .route(
-            "/api/v3/planner-chat/sessions",
-            post(planner_api::create_planner_chat_session),
+            "/api/v3/conversations/{session_id}/turn",
+            post(conversation::turn),
         )
         .route(
-            "/api/v3/planner-chat/sessions/{session_id}",
-            get(planner_api::get_planner_chat_session),
+            "/api/v3/conversations/{session_id}/events",
+            get(conversation::output_events),
         )
         .route(
-            "/api/v3/planner-chat/sessions/{session_id}/turn",
-            post(planner_api::planner_chat_turn),
+            "/api/v3/conversations/{session_id}/turns/{turn_id}/interrupt",
+            post(conversation::interrupt_turn),
         )
         .route(
-            "/api/v3/planner-chat/sessions/{session_id}/start-work",
-            post(planner_api::start_planner_chat_work),
-        )
-        .route(
-            "/api/v3/goals/{session_id}",
-            get(goal_runtime::get_goal_endpoint).post(goal_runtime::create_goal_endpoint),
-        )
-        .route(
-            "/api/v3/goals/{session_id}/pause",
-            post(goal_runtime::pause_goal_endpoint),
-        )
-        .route(
-            "/api/v3/goals/{session_id}/resume",
-            post(goal_runtime::resume_goal_endpoint),
-        )
-        .route(
-            "/api/v3/goals/{session_id}/complete",
-            post(goal_runtime::complete_goal_endpoint),
-        )
-        .route(
-            "/api/v3/goals/{session_id}/tokens",
-            post(goal_runtime::update_goal_tokens_endpoint),
-        )
-        .route(
-            "/api/v3/goals/{session_id}/turn",
-            post(goal_runtime::increment_goal_turn_endpoint),
-        )
-        .route(
-            "/api/v3/goals/{session_id}/blocked",
-            post(goal_runtime::record_goal_blocked_endpoint),
-        )
-        .route(
-            "/api/v3/goals/{session_id}/usage-limited",
-            post(goal_runtime::mark_goal_usage_limited_endpoint),
-        )
-        .route(
-            "/api/v3/goals/{session_id}/continue",
-            post(goal_runtime::continue_goal_from_max_turns_endpoint),
-        )
-        .route(
-            "/api/v3/goals/{session_id}/clear",
-            post(goal_runtime::clear_goal_endpoint),
+            "/api/v3/conversations/{session_id}/turns/{turn_id}/steer",
+            post(conversation::steer_turn),
         )
         .route(
             "/api/v3/mcp/servers",
@@ -481,7 +416,6 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v3/tools/git/diff", post(git_diff_endpoint))
         .route("/api/v3/tools/patch/preview", post(preview_patch_endpoint))
         .route("/api/v3/tools/patch/apply", post(apply_patch_endpoint))
-        .route("/api/v3/runs/mock", post(run_mock_workflow))
         .route("/api/v3/runs/{run_id}", get(get_run_detail))
         .route("/api/v3/runs/{run_id}/events", get(list_run_events))
         .route(

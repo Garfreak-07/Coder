@@ -1,4 +1,4 @@
-use coder_config::{AgentSpec, HarnessSpec, ModelSpec, WorkflowNodeSpec};
+use coder_config::{HarnessSpec, ModelSpec, TaskProfile};
 use coder_core::{FinalReport, RunId};
 use coder_harness::{HarnessError, HarnessRunEvent, HarnessRunResult};
 use coder_store::CompactionCircuitState;
@@ -18,17 +18,11 @@ pub(super) struct WorkflowBackendRunInput<'a> {
     pub(super) repo_root: &'a str,
     pub(super) current_task: &'a str,
     pub(super) workflow_id: &'a str,
-    pub(super) node: &'a WorkflowNodeSpec,
-    pub(super) agent: &'a AgentSpec,
+    pub(super) profile: &'a TaskProfile,
     pub(super) harness: &'a HarnessSpec,
     pub(super) model: &'a ModelSpec,
-    pub(super) plan_context: Option<&'a Value>,
-    pub(super) loop_feedback: Option<&'a Value>,
-    pub(super) max_rounds: u32,
+    pub(super) task_context: Option<&'a Value>,
     pub(super) token_budget: Option<u64>,
-    pub(super) executor_evidence_this_round: bool,
-    pub(super) executor_evidence_summary: &'a str,
-    pub(super) previous_planner_improvements: &'a [Vec<String>],
     pub(super) compaction_circuit_state: Option<&'a CompactionCircuitState>,
 }
 
@@ -51,7 +45,8 @@ impl WorkflowRunner {
                         run_id: input.run_id,
                         sequence: input.sequence,
                         round: input.round,
-                        node: input.node,
+                        task_profile_id: input.workflow_id,
+                        harness_id: &input.profile.harness,
                     },
                     BackendSelectionEvent {
                         backend: &requested_backend,
@@ -71,18 +66,11 @@ impl WorkflowRunner {
                 repo_root: input.repo_root,
                 task: input.current_task,
                 workflow_id: input.workflow_id,
-                node: input.node,
-                agent: input.agent,
+                profile: input.profile,
                 harness: input.harness,
                 model: input.model,
-                plan_context: input.plan_context,
-                loop_feedback: input.loop_feedback,
-                round: input.round,
-                max_rounds: input.max_rounds,
+                task_context: input.task_context,
                 token_budget: input.token_budget,
-                executor_evidence_this_round: input.executor_evidence_this_round,
-                executor_evidence_summary: input.executor_evidence_summary,
-                previous_planner_improvements: input.previous_planner_improvements,
                 compaction_circuit_state: input.compaction_circuit_state,
             }))
             .await
@@ -94,7 +82,8 @@ impl WorkflowRunner {
                         run_id: input.run_id,
                         sequence: input.sequence,
                         round: input.round,
-                        node: input.node,
+                        task_profile_id: input.workflow_id,
+                        harness_id: &input.profile.harness,
                     },
                     BackendBlockedEvent {
                         backend: &requested_backend,
@@ -130,7 +119,8 @@ impl WorkflowRunner {
                 run_id: input.run_id,
                 workflow_id: input.workflow_id,
                 round: input.round,
-                node: input.node,
+                task_profile_id: input.workflow_id,
+                harness_id: &input.profile.harness,
                 backend: &effective_backend,
                 harness: input.harness,
             },

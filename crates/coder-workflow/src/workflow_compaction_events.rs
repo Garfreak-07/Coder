@@ -1,19 +1,19 @@
-use coder_config::{resolve_agent_runtime_policy, AgentSpec, ModelSpec, WorkflowNodeSpec};
+use coder_config::{resolve_agent_runtime_policy, ModelSpec, TaskProfile};
 use coder_core::RunId;
 use coder_store::CompactionCircuitState;
 use serde_json::{json, Value};
 
 use crate::{
-    context_compaction::{compact_plan_context_with_circuit, ContextCompactionCircuitOutcome},
+    context_compaction::{compact_task_context_with_circuit, ContextCompactionCircuitOutcome},
     WorkflowError, WorkflowRunner,
 };
 
 pub(super) struct ContextCompactionEventInput<'a> {
     pub(super) round: u32,
-    pub(super) node: &'a WorkflowNodeSpec,
-    pub(super) agent: &'a AgentSpec,
+    pub(super) task_profile_id: &'a str,
+    pub(super) profile: &'a TaskProfile,
     pub(super) model: &'a ModelSpec,
-    pub(super) plan_context: Option<&'a Value>,
+    pub(super) task_context: Option<&'a Value>,
     pub(super) current_state: Option<&'a CompactionCircuitState>,
 }
 
@@ -24,15 +24,15 @@ impl WorkflowRunner {
         sequence: &mut u64,
         input: ContextCompactionEventInput<'_>,
     ) -> Result<Option<CompactionCircuitState>, WorkflowError> {
-        let runtime = resolve_agent_runtime_policy(input.model, &input.agent.runtime);
+        let runtime = resolve_agent_runtime_policy(input.model, &input.profile.runtime);
         let output =
-            compact_plan_context_with_circuit(input.plan_context, &runtime, input.current_state);
+            compact_task_context_with_circuit(input.task_context, &runtime, input.current_state);
         let Some(outcome) = output.circuit_outcome else {
             return Ok(input.current_state.cloned());
         };
         let updated = self.store.record_compaction_circuit_outcome(
             run_id.as_str(),
-            input.agent.runtime.max_consecutive_compaction_failures,
+            input.profile.runtime.max_consecutive_compaction_failures,
             outcome.success(),
         )?;
         self.emit(
@@ -41,8 +41,8 @@ impl WorkflowRunner {
             "context.compaction.outcome",
             json!({
                 "round": input.round,
-                "node_id": input.node.id,
-                "agent": input.node.agent,
+                "node_id": input.task_profile_id,
+                "agent": input.task_profile_id,
                 "status": output.report["status"].clone(),
                 "applied": output.report["applied"].clone(),
                 "success": outcome.success(),

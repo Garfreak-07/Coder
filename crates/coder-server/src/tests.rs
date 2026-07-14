@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::{Arc, Mutex},
-    time::{Duration, UNIX_EPOCH},
+    time::Duration,
 };
 
 use axum::{
@@ -15,30 +15,16 @@ use axum::{
     routing::post,
     Json,
 };
-use coder_config::{
-    MemoryScope as ConfigMemoryScope, ModelSpec as ConfigModelSpec,
-    PermissionDecision as ConfigPermissionDecision,
-};
+use coder_config::{ModelSpec as ConfigModelSpec, PermissionDecision as ConfigPermissionDecision};
 use coder_core::RunState;
 use coder_events::CoderEvent;
-use coder_harness::{HarnessBackend, HarnessRunEvent, HarnessRunRequest};
+use coder_harness::HarnessRunEvent;
 use coder_workflow::ModelToolResultBlock;
-use futures_util::StreamExt;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use super::model_tool_command_hooks::CLAUDE_TOOL_HOOK_EXECUTION_TIMEOUT_SECONDS;
 use super::outbound_http::url_matches_no_proxy;
-use super::planner_provider_dispatch::{planner_event_text, NativePlannerContextAdapter};
-use super::planner_provider_recovery::PlannerProviderRequestMode;
-use super::planner_provider_runtime::{
-    parse_live_planner_response_with_idle_timeout, planner_chat_completion_body,
-    planner_chat_completion_body_with_tools, planner_provider_trace,
-};
-use super::planner_session::{
-    store_planner_session_snapshot, trim_planner_session_turns, PLANNER_SESSION_CACHE_LIMIT,
-    PLANNER_SESSION_MAX_TURNS,
-};
 use super::provider_runtime::{
     provider_api_key, provider_chat_completions_endpoint,
     provider_chat_completions_endpoint_for_display, provider_proxy_mode,
@@ -53,32 +39,6 @@ use super::*;
 
 type CaptureState = Arc<(Value, Arc<Mutex<Option<Value>>>)>;
 type SequenceCaptureState = Arc<(Mutex<VecDeque<Value>>, Arc<Mutex<Vec<Value>>>)>;
-type StreamingSequenceCaptureState = Arc<(Mutex<VecDeque<String>>, Arc<Mutex<Vec<Value>>>)>;
-type CommandLoopState = Arc<(Vec<String>, Arc<Mutex<Vec<Value>>>)>;
-type StatusSequenceState = Arc<(
-    Mutex<VecDeque<OpenAiCompatibleStatusResponse>>,
-    Arc<Mutex<Vec<Value>>>,
-)>;
-
-fn planner_session_fixture(session_id: impl Into<String>) -> PlannerChatSession {
-    PlannerChatSession {
-        session_id: session_id.into(),
-        workflow_id: "planner-led".to_owned(),
-        repo_root: None,
-        mode: "discuss".to_owned(),
-        runtime: None,
-        ready: false,
-        readiness: PlannerReadiness::NeedsClarification,
-        plan_draft: None,
-        open_questions: Vec::new(),
-        acceptance_criteria: Vec::new(),
-        risks: Vec::new(),
-        work_in_progress: false,
-        active_run_id: None,
-        latest_run_id: None,
-        turns: Vec::new(),
-    }
-}
 
 #[tokio::test]
 async fn health_endpoint_returns_v3_status() {
@@ -99,45 +59,8 @@ async fn health_endpoint_returns_v3_status() {
     assert_eq!(body["api_version"], "v3");
 }
 
-#[test]
-fn planner_session_turn_cache_keeps_recent_history() {
-    let mut session = planner_session_fixture("session-trim");
-    for index in 0..(PLANNER_SESSION_MAX_TURNS + 5) {
-        session.turns.push(PlannerChatTurn {
-            role: if index % 2 == 0 { "user" } else { "assistant" }.to_owned(),
-            content: format!("turn-{index}"),
-            artifacts: Vec::new(),
-            response_truncated: false,
-        });
-    }
-
-    trim_planner_session_turns(&mut session);
-
-    assert_eq!(session.turns.len(), PLANNER_SESSION_MAX_TURNS);
-    assert_eq!(session.turns.first().unwrap().content, "turn-5");
-    assert_eq!(
-        session.turns.last().unwrap().content,
-        format!("turn-{}", PLANNER_SESSION_MAX_TURNS + 4)
-    );
-}
-
-#[test]
-fn planner_session_cache_evicts_oldest_live_session() {
-    let mut sessions = BTreeMap::new();
-    for index in 0..=PLANNER_SESSION_CACHE_LIMIT {
-        let session_id = format!("session-{index:03}");
-        let session = planner_session_fixture(session_id);
-        let now = UNIX_EPOCH + Duration::from_secs(index as u64);
-        store_planner_session_snapshot(&mut sessions, session, now);
-    }
-
-    assert_eq!(sessions.len(), PLANNER_SESSION_CACHE_LIMIT);
-    assert!(!sessions.contains_key("session-000"));
-    assert!(sessions.contains_key(&format!("session-{PLANNER_SESSION_CACHE_LIMIT:03}")));
-}
-
 #[tokio::test]
-async fn capabilities_and_role_cards_expose_product_surface() {
+async fn capabilities_expose_product_surface() {
     let app = test_router();
     let capabilities_response = app
         .clone()
@@ -152,11 +75,12 @@ async fn capabilities_and_role_cards_expose_product_surface() {
     assert_eq!(capabilities_response.status(), StatusCode::OK);
     let capabilities = response_json(capabilities_response).await;
     assert_eq!(capabilities["api_version"], "v3");
-    assert!(capabilities["workflow"]
+    assert_eq!(capabilities["capabilities"], json!(["code"]));
+    assert!(capabilities["tasks"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|item| item.as_str() == Some("graph_semantics")));
+        .any(|item| item.as_str() == Some("run")));
     assert!(capabilities["tools"]
         .as_array()
         .unwrap()
@@ -217,268 +141,9 @@ async fn capabilities_and_role_cards_expose_product_surface() {
         .unwrap()
         .iter()
         .any(|item| item.as_str() == Some("permission_updates")));
-    assert!(capabilities["planner_chat"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|item| item.as_str() == Some("persistent_goals")));
-
-    let role_cards_response = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/v3/agent-role-cards")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(role_cards_response.status(), StatusCode::OK);
-    let role_cards = response_json(role_cards_response).await;
-    let executor = role_cards["role_cards"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|card| card["id"] == "executor")
-        .unwrap();
-    assert_eq!(executor["role"], "executor");
-    assert!(executor["default_capabilities"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|item| item.as_str() == Some("return_execution_result")));
 }
 
-#[tokio::test]
-async fn goal_runtime_endpoints_persist_claude_style_state_transitions() {
-    let store_root = temp_root();
-    let store = RunStore::new(&store_root);
-    let app = router(ApiState::new(store.clone()));
-
-    let empty_response = get_json(app.clone(), "/api/v3/goals/session-goal").await;
-    assert_eq!(empty_response.status(), StatusCode::OK);
-    let empty = response_json(empty_response).await;
-    assert_eq!(empty["goal"], Value::Null);
-    assert_eq!(empty["policy"]["blocked_consecutive_threshold"], 3);
-    assert_eq!(empty["policy"]["max_goal_turns"], 150);
-
-    let create_response = post_json(
-        app.clone(),
-        "/api/v3/goals/session-goal",
-        json!({
-            "objective": "Ship goal runtime",
-            "token_budget": 100
-        }),
-    )
-    .await;
-    assert_eq!(create_response.status(), StatusCode::OK);
-    let created = response_json(create_response).await;
-    assert_eq!(created["state_ref"], "goal://sessions/session-goal.json");
-    assert_eq!(created["goal"]["status"], "active");
-
-    let loaded_response = get_json(app.clone(), "/api/v3/goals/session-goal").await;
-    assert_eq!(loaded_response.status(), StatusCode::OK);
-    let loaded = response_json(loaded_response).await;
-    assert_eq!(loaded["goal"]["objective"], "Ship goal runtime");
-    assert!(store
-        .read_goal_state_json("session-goal")
-        .unwrap()
-        .is_some());
-
-    let first_block = post_json(
-        app.clone(),
-        "/api/v3/goals/session-goal/blocked",
-        json!({"reason": "Need provider"}),
-    )
-    .await;
-    assert_eq!(first_block.status(), StatusCode::OK);
-    let first = response_json(first_block).await;
-    assert_eq!(first["goal"]["status"], "active");
-    assert_eq!(first["goal"]["blocked_attempts"], 1);
-
-    let reset_block = post_json(
-        app.clone(),
-        "/api/v3/goals/session-goal/blocked",
-        json!({"reason": "Need approval"}),
-    )
-    .await;
-    assert_eq!(reset_block.status(), StatusCode::OK);
-    let reset = response_json(reset_block).await;
-    assert_eq!(reset["goal"]["status"], "active");
-    assert_eq!(reset["goal"]["blocked_attempts"], 1);
-
-    let second_block = post_json(
-        app.clone(),
-        "/api/v3/goals/session-goal/blocked",
-        json!({"reason": " need approval "}),
-    )
-    .await;
-    assert_eq!(second_block.status(), StatusCode::OK);
-    let second = response_json(second_block).await;
-    assert_eq!(second["goal"]["status"], "active");
-    assert_eq!(second["goal"]["blocked_attempts"], 2);
-
-    let blocked_response = post_json(
-        app.clone(),
-        "/api/v3/goals/session-goal/blocked",
-        json!({"reason": "Need Approval"}),
-    )
-    .await;
-    assert_eq!(blocked_response.status(), StatusCode::OK);
-    let blocked = response_json(blocked_response).await;
-    assert_eq!(blocked["goal"]["status"], "blocked");
-    assert_eq!(blocked["goal"]["blocked_attempts"], 3);
-
-    let turn_create_response = post_json(
-        app.clone(),
-        "/api/v3/goals/session-turns",
-        json!({
-            "objective": "Exercise max turns",
-            "token_budget": null
-        }),
-    )
-    .await;
-    assert_eq!(turn_create_response.status(), StatusCode::OK);
-
-    let mut last_turn = Value::Null;
-    for _ in 0..150 {
-        let turn_response =
-            post_json(app.clone(), "/api/v3/goals/session-turns/turn", json!({})).await;
-        assert_eq!(turn_response.status(), StatusCode::OK);
-        last_turn = response_json(turn_response).await;
-    }
-    assert_eq!(last_turn["goal"]["status"], "max_turns");
-    assert_eq!(last_turn["goal"]["turns_executed"], 150);
-
-    let continue_response = post_json(
-        app.clone(),
-        "/api/v3/goals/session-turns/continue",
-        json!({}),
-    )
-    .await;
-    assert_eq!(continue_response.status(), StatusCode::OK);
-    let continued = response_json(continue_response).await;
-    assert_eq!(continued["goal"]["status"], "active");
-    assert_eq!(continued["goal"]["turns_executed"], 0);
-
-    let budget_create_response = post_json(
-        app.clone(),
-        "/api/v3/goals/session-budget",
-        json!({
-            "objective": "Exercise token budget",
-            "token_budget": 10
-        }),
-    )
-    .await;
-    assert_eq!(budget_create_response.status(), StatusCode::OK);
-    let first_tokens = post_json(
-        app.clone(),
-        "/api/v3/goals/session-budget/tokens",
-        json!({"delta": 4}),
-    )
-    .await;
-    assert_eq!(first_tokens.status(), StatusCode::OK);
-    let first_tokens = response_json(first_tokens).await;
-    assert_eq!(first_tokens["goal"]["status"], "active");
-    assert_eq!(first_tokens["goal"]["tokens_used"], 4);
-
-    let budget_limited = post_json(
-        app.clone(),
-        "/api/v3/goals/session-budget/tokens",
-        json!({"delta": 6}),
-    )
-    .await;
-    assert_eq!(budget_limited.status(), StatusCode::OK);
-    let budget_limited = response_json(budget_limited).await;
-    assert_eq!(budget_limited["goal"]["status"], "budget_limited");
-    assert_eq!(budget_limited["goal"]["tokens_used"], 10);
-
-    let clear_response =
-        post_json(app.clone(), "/api/v3/goals/session-budget/clear", json!({})).await;
-    assert_eq!(clear_response.status(), StatusCode::OK);
-    let clear = response_json(clear_response).await;
-    assert_eq!(clear["removed"], true);
-    let cleared_response = get_json(app, "/api/v3/goals/session-budget").await;
-    assert_eq!(cleared_response.status(), StatusCode::OK);
-    assert_eq!(response_json(cleared_response).await["goal"], Value::Null);
-    let _ = fs::remove_dir_all(store_root);
-}
-
-#[tokio::test]
-async fn default_workflow_endpoint_returns_planner_led_spec() {
-    let app = test_router();
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/v3/workflows/default")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response_json(response).await;
-    assert_eq!(body["workflow_id"], "planner-led");
-    assert_eq!(body["config"]["version"], 1);
-    assert_eq!(
-        body["config"]["harnesses"]["planner-conversation"]["backend"],
-        "planner-model"
-    );
-    assert_eq!(body["workflow"]["nodes"][0]["harness"], "native-code-edit");
-    assert_eq!(body["workflow"]["nodes"][1]["harness"], "workflow-planner");
-    assert_eq!(body["workflow"]["nodes"].as_array().unwrap().len(), 2);
-    assert_eq!(body["workflow"]["name"], "Verified Execution Workflow");
-}
-
-#[tokio::test]
-async fn library_workflow_endpoints_roundtrip_in_memory_specs() {
-    let app = test_router();
-    let save_response = post_json(
-        app.clone(),
-        "/api/v3/library/workflows",
-        json!({
-            "workflow_id": "custom-flow",
-            "workflow": {
-                "name": "Custom Flow",
-                "nodes": [{"id": "planner", "agent": "planner", "harness": "planner-harness"}],
-                "edges": []
-            }
-        }),
-    )
-    .await;
-    assert_eq!(save_response.status(), StatusCode::OK);
-    let save_body = response_json(save_response).await;
-    assert_eq!(save_body["workflow_id"], "custom-flow");
-    assert_eq!(save_body["saved"], true);
-
-    let get_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v3/library/workflows/custom-flow")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(get_response.status(), StatusCode::OK);
-    let get_body = response_json(get_response).await;
-    assert_eq!(get_body["workflow"]["name"], "Custom Flow");
-
-    let list_response = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/v3/library")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let list_body = response_json(list_response).await;
-    assert_eq!(list_body["workflows"][0]["id"], "custom-flow");
-}
-
-mod planner_chat;
+mod conversation;
 
 #[tokio::test]
 async fn project_memory_load_records_summary_event_without_full_content() {
@@ -514,7 +179,7 @@ async fn project_memory_load_records_summary_event_without_full_content() {
         json!({
             "repo_root": repo.display().to_string(),
             "memory_path": "memory.json",
-            "requested_by_role": "planning_chat",
+            "requested_by_role": "conversation",
             "run_id": "run-1"
         }),
     )
@@ -550,7 +215,7 @@ async fn workflow_agents_cannot_read_project_memory() {
         json!({
             "repo_root": repo.display().to_string(),
             "memory_path": "memory.json",
-            "requested_by_role": "task_execution"
+            "requested_by_role": "task"
         }),
     )
     .await;
@@ -574,7 +239,7 @@ async fn project_memory_write_proposal_records_bounded_event_only() {
         "/api/v3/memory/project/propose-write",
         json!({
             "run_id": "run-1",
-            "proposed_by_role": "planning_chat",
+            "proposed_by_role": "conversation",
             "record": {
                 "id": "mem_2",
                 "scope": "project",
@@ -616,7 +281,7 @@ async fn workflow_agents_cannot_propose_project_memory_write() {
         "/api/v3/memory/project/propose-write",
         json!({
             "run_id": "run-1",
-            "proposed_by_role": "task_execution",
+            "proposed_by_role": "task",
             "record": {
                 "id": "mem_executor_proposal",
                 "scope": "project",
@@ -651,7 +316,7 @@ async fn project_memory_confirm_write_persists_and_records_summary_event() {
             "repo_root": repo.display().to_string(),
             "memory_path": "memory.json",
             "run_id": "run-1",
-            "confirmed_by_role": "planning_chat",
+            "confirmed_by_role": "conversation",
             "record": {
                 "id": "mem_3",
                 "scope": "project",
@@ -686,7 +351,7 @@ async fn project_memory_confirm_write_persists_and_records_summary_event() {
 async fn workflow_agents_cannot_confirm_project_memory_write() {
     let repo = temp_root();
     let store_root = temp_root();
-    for role in ["workflow_supervisor", "task_execution"] {
+    for role in ["task", "task"] {
         fs::create_dir_all(&repo).unwrap();
         let store = RunStore::new(&store_root);
         let run_id = RunId::from_string(format!("run-{role}"));
@@ -735,9 +400,9 @@ async fn knowledge_endpoints_import_list_chunks_and_retrieve_hints() {
             "title": "Rust migration notes",
             "text": "# Workflow\n\nRust workflow evidence lives in crates/coder-server/src/lib.rs.",
             "tags": ["rust"],
-            "allowed_agents": ["workflow_supervisor"],
+            "allowed_agents": ["task"],
             "purpose": ["project_rules"],
-            "allowed_contexts": ["planner_order"],
+            "allowed_contexts": ["task_context"],
             "sensitivity": "project"
         }),
     )
@@ -790,9 +455,9 @@ async fn knowledge_endpoints_import_list_chunks_and_retrieve_hints() {
         "/api/v3/knowledge/retrieve",
         json!({
             "repo_root": repo.display().to_string(),
-            "role": "workflow_supervisor",
+            "role": "task",
             "query": "workflow evidence",
-            "requested_context": "planner_order",
+            "requested_context": "task_context",
             "tags": ["rust"],
             "include_content": false
         }),
@@ -818,9 +483,9 @@ async fn knowledge_endpoints_import_list_chunks_and_retrieve_hints() {
         "/api/v3/knowledge/retrieve",
         json!({
             "repo_root": repo.display().to_string(),
-            "role": "workflow_supervisor",
+            "role": "task",
             "query": "workflow evidence coder server",
-            "requested_context": "planner_order",
+            "requested_context": "task_context",
             "backend": "dense_mock",
             "scope": "project",
             "top_k": 5,
@@ -841,7 +506,7 @@ async fn knowledge_endpoints_import_list_chunks_and_retrieve_hints() {
         "/api/v3/knowledge/retrieve",
         json!({
             "repo_root": repo.display().to_string(),
-            "role": "task_execution",
+            "role": "task",
             "query": "workflow evidence",
             "requested_context": "execution_prompt",
             "include_content": true
@@ -1148,7 +813,7 @@ async fn run_preview_is_side_effect_free_and_reports_ready() {
         "/api/v3/runs/preview",
         json!({
             "config": example_config(),
-            "workflow_id": "planner-led",
+            "workflow_id": "code",
             "task": "summarize the repo"
         }),
     )
@@ -1197,7 +862,7 @@ async fn run_preview_blocks_missing_workflow_and_empty_task() {
 }
 
 #[tokio::test]
-async fn run_endpoint_uses_workflow_runner_and_plan_context() {
+async fn run_endpoint_routes_custom_profile_to_code_task_runtime() {
     let root = temp_root();
     fs::create_dir_all(&root).unwrap();
     let store_root = temp_root();
@@ -1206,39 +871,36 @@ async fn run_endpoint_uses_workflow_runner_and_plan_context() {
     for harness in config.harnesses.values_mut() {
         harness.backend = "native-rust".to_owned();
         harness.tools.clear();
-        harness.memory.read = vec![ConfigMemoryScope::Workflow, ConfigMemoryScope::Run];
-        harness.memory.write = vec![ConfigMemoryScope::Run];
     }
-    config.surface_bindings.planner_chat = None;
-    let app = router(ApiState::new(RunStore::new(&store_root)));
+    let profile = config.task_profiles.remove("code").unwrap();
+    config
+        .task_profiles
+        .insert("custom-code".to_owned(), profile);
+    let state = ApiState::new(RunStore::new(&store_root));
+    let session = state
+        .session_host
+        .create_conversation(&state, ConversationSessionCreateRequest { repo: None })
+        .unwrap()
+        .session;
+    let mut output = state
+        .session_host
+        .subscribe_output(&session.session_id)
+        .unwrap();
+    let app = router(state);
 
     let response = post_json(
         app,
         "/api/v3/runs",
         json!({
             "config": config,
-            "workflow_id": "planner-led",
+            "workflow_id": "custom-code",
             "task": "Inspect project scope acceptance: evidence report exists",
+            "session_id": session.session_id,
             "repo_root": root.display().to_string(),
-            "plan_context": {
-                "original_user_request": "Inspect project scope",
-                "planner_conversation_summary": "Ready to inspect project scope.",
-                "plan_draft": {
-                    "goal": "Inspect project scope",
-                    "scope": ["."],
-                    "non_goals": [],
-                    "assumptions": [],
-                    "steps": ["Inspect", "Report"],
-                    "affected_paths": ["."],
-                    "acceptance_criteria": ["evidence report exists"],
-                    "risks": [],
-                    "open_questions": [],
-                    "selected_workflow_id": "planner-led"
-                },
-                "acceptance_criteria": ["evidence report exists"],
-                "risks": [],
-                "affected_paths": ["."],
-                "selected_workflow_id": "planner-led"
+            "task_context": {
+                "goal": "Inspect project scope",
+                "scope": ["."],
+                "constraints": ["evidence report exists"]
             }
         }),
     )
@@ -1256,6 +918,11 @@ async fn run_endpoint_uses_workflow_runner_and_plan_context() {
         .as_str()
         .unwrap()
         .ends_with("/final-report.json"));
+    let output_events = std::iter::from_fn(|| output.try_recv().ok()).collect::<Vec<_>>();
+    assert!(output_events.iter().any(|envelope| {
+        envelope.source == "code"
+            && matches!(envelope.output, coder_events::OutputEvent::CodeEvent { .. })
+    }));
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(store_root);
 }
@@ -1467,7 +1134,7 @@ async fn run_verification_evidence_endpoint_records_completed_browser_result() {
                 "checks": {
                     "canvas_visible": true,
                     "direction_key_moves_game": true,
-                    "restart_works": true
+                    "retry_after_reset": true
                 }
             }
         }),
@@ -1615,10 +1282,9 @@ async fn run_control_endpoints_record_events_and_cancel_report() {
     let (control_sender, _control_receiver) =
         tokio::sync::watch::channel(WorkflowRunControl::Running);
     api_state
-        .active_run_controls
-        .lock()
-        .unwrap()
-        .insert(run_id.to_string(), control_sender);
+        .session_host
+        .register_task(&run_id, control_sender)
+        .unwrap();
     let app = router(api_state.clone());
 
     let heartbeat_response = app
@@ -1685,11 +1351,7 @@ async fn run_control_endpoints_record_events_and_cancel_report() {
         "toolu-resume-1"
     );
 
-    api_state
-        .active_run_controls
-        .lock()
-        .unwrap()
-        .remove(run_id.as_str());
+    api_state.session_host.deactivate_task(&run_id);
 
     let cancel_response = app
         .clone()
@@ -1755,93 +1417,6 @@ fn native_executor_reuses_changed_file_evidence_from_previous_workflow_rounds() 
         native_model_backend::recorded_run_changed_files(&ApiState::new(store), &run_id).unwrap();
 
     assert_eq!(files, vec!["index.html", "main.js", "style.css"]);
-    let _ = fs::remove_dir_all(root);
-}
-
-#[tokio::test]
-async fn mock_run_endpoint_writes_events_visible_through_events_endpoint() {
-    let root = temp_root();
-    let app = router(ApiState::new(RunStore::new(&root)));
-    let response = post_json(
-        app.clone(),
-        "/api/v3/runs/mock",
-        json!({
-            "config": example_config(),
-            "workflow_id": "planner-led",
-            "task": "summarize the repo"
-        }),
-    )
-    .await;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response_json(response).await;
-    let events_url = body["events_url"].as_str().unwrap();
-    let run_id = body["run_id"].as_str().unwrap();
-
-    let events_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(events_url)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(events_response.status(), StatusCode::OK);
-    let events_body = response_json(events_response).await;
-    assert_eq!(events_body["events"][0]["kind"], "run.started");
-
-    let detail_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/v3/runs/{run_id}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(detail_response.status(), StatusCode::OK);
-    let detail_body = response_json(detail_response).await;
-    assert_eq!(detail_body["metadata"]["status"], "completed");
-    assert_eq!(detail_body["report"]["status"], "completed");
-    assert_eq!(
-        detail_body["report"]["evidence_refs"][0]["kind"],
-        "event_log"
-    );
-
-    let list_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/api/v3/runs")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(list_response.status(), StatusCode::OK);
-    let list_body = response_json(list_response).await;
-    assert_eq!(list_body["runs"].as_array().unwrap().len(), 1);
-    assert_eq!(list_body["runs"][0]["run_id"], run_id);
-    assert_eq!(list_body["runs"][0]["metadata"]["status"], "completed");
-    assert!(list_body["runs"][0]["event_count"].as_u64().unwrap() >= 1);
-    assert_eq!(list_body["runs"][0]["has_report"], true);
-
-    let artifact_response = app
-        .oneshot(
-            Request::builder()
-                .uri(format!("/api/v3/runs/{run_id}/artifacts/final-report.json"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(artifact_response.status(), StatusCode::OK);
-    let artifact_body = response_json(artifact_response).await;
-    assert_eq!(artifact_body["artifact_name"], "final-report.json");
-    assert_eq!(artifact_body["payload"]["status"], "completed");
     let _ = fs::remove_dir_all(root);
 }
 
@@ -2251,7 +1826,7 @@ async fn run_transcript_compaction_uses_model_summary_and_records_circuit() {
                 1,
                 "run.started",
                 json!({
-                    "task": "Improve planner harness",
+                    "task": "Improve transcript compaction",
                     "repo_root": "F:/bbb/coder"
                 }),
             ),
@@ -2287,7 +1862,7 @@ async fn run_transcript_compaction_uses_model_summary_and_records_circuit() {
         "choices": [
             {
                 "message": {
-                    "content": "<analysis>draft details that must not be stored</analysis>\n<summary>1. Primary Request and Intent:\nImprove Coder's planner harness.\n\n9. Optional Next Step:\nContinue compaction wiring.</summary>"
+                    "content": "<analysis>draft details that must not be stored</analysis>\n<summary>1. Primary Request and Intent:\nImprove Coder's transcript compaction.\n\n9. Optional Next Step:\nContinue compaction wiring.</summary>"
                 }
             }
         ]
@@ -2301,7 +1876,7 @@ async fn run_transcript_compaction_uses_model_summary_and_records_circuit() {
         app,
         "/api/v3/runs/run-transcript-compact/transcript/compact",
         json!({
-            "custom_instructions": "Keep Claude parameter evidence explicit."
+            "custom_instructions": "Keep provider evidence explicit."
         }),
     )
     .await;
@@ -2316,7 +1891,7 @@ async fn run_transcript_compaction_uses_model_summary_and_records_circuit() {
     assert!(body["summary_estimated_tokens"].as_u64().unwrap() > 0);
     let summary = body["summary"].as_str().unwrap();
     assert!(summary.starts_with("Summary:\n"));
-    assert!(summary.contains("Improve Coder's planner harness"));
+    assert!(summary.contains("Improve Coder's transcript compaction"));
     assert!(!summary.contains("draft details"));
     assert_eq!(body["transcript_event_count"], 2);
     assert_eq!(body["transcript_events_included"], 2);
@@ -2336,9 +1911,9 @@ async fn run_transcript_compaction_uses_model_summary_and_records_circuit() {
     let prompt = captured["messages"][1]["content"].as_str().unwrap();
     assert!(prompt.starts_with("CRITICAL: Respond with TEXT ONLY."));
     assert!(prompt.contains("<analysis> block followed by a <summary> block"));
-    assert!(prompt.contains("Keep Claude parameter evidence explicit."));
+    assert!(prompt.contains("Keep provider evidence explicit."));
     assert!(prompt.contains("[sequence=1; kind=run.started]"));
-    assert!(prompt.contains("Improve planner harness"));
+    assert!(prompt.contains("Improve transcript compaction"));
     assert!(prompt.contains("[content_replacement_replay]"));
     assert!(prompt.contains("toolu-large-output"));
     assert!(prompt.contains("cached compaction replay marker"));
@@ -2734,7 +2309,7 @@ async fn model_tool_turn_auto_compaction_uses_run_agent_runtime_policy() {
     let store = RunStore::new(&store_root);
     let run_id = RunId::from_string("run-auto-transcript-compact-agent-runtime");
     let mut config = default_project_config();
-    let model_id = config.agents.get("executor").unwrap().model.clone();
+    let model_id = config.task_profiles.get("code").unwrap().model.clone();
     let capabilities = &mut config.models.get_mut(&model_id).unwrap().capabilities;
     capabilities.context_window_tokens = Some(32_000);
     capabilities.auto_compact_token_limit = Some(11_000);
@@ -2781,7 +2356,7 @@ async fn model_tool_turn_auto_compaction_uses_run_agent_runtime_policy() {
         json!({
             "run_id": "run-auto-transcript-compact-agent-runtime",
             "harness_id": "native-code-edit",
-            "agent_id": "executor",
+            "agent_id": "code",
             "tool_uses": [
                 {
                     "id": "toolu-auto-compact-agent-runtime",
@@ -2801,8 +2376,11 @@ async fn model_tool_turn_auto_compaction_uses_run_agent_runtime_policy() {
         .find(|attachment| attachment["type"] == "context_compaction_summary")
         .expect("auto compaction attachment should be present");
     let decision = &compaction_attachment["decision"];
-    assert_eq!(decision["runtime_source"], "run_config_agent_runtime");
-    assert_eq!(decision["runtime_agent_id"], "executor");
+    assert_eq!(
+        decision["runtime_source"],
+        "run_config_task_profile_runtime"
+    );
+    assert_eq!(decision["runtime_agent_id"], "code");
     assert_eq!(decision["runtime_context_window_tokens"], 32_000);
     assert_eq!(decision["runtime_auto_compact_token_limit"], 11_000);
     assert_eq!(decision["threshold_tokens"], 11_000);
@@ -2822,7 +2400,7 @@ async fn run_transcript_auto_compaction_infers_latest_node_agent_runtime_policy(
     let store = RunStore::new(&store_root);
     let run_id = RunId::from_string("run-auto-transcript-compact-latest-node-runtime");
     let mut config = default_project_config();
-    let model_id = config.agents.get("executor").unwrap().model.clone();
+    let model_id = config.task_profiles.get("code").unwrap().model.clone();
     let capabilities = &mut config.models.get_mut(&model_id).unwrap().capabilities;
     capabilities.context_window_tokens = Some(32_000);
     capabilities.auto_compact_token_limit = Some(11_000);
@@ -2847,7 +2425,7 @@ async fn run_transcript_auto_compaction_infers_latest_node_agent_runtime_policy(
                 "node.started",
                 json!({
                     "node_id": "execute",
-                    "agent": "executor",
+                    "agent": "code",
                     "harness": "native-code-edit"
                 }),
             ),
@@ -2858,8 +2436,8 @@ async fn run_transcript_auto_compaction_infers_latest_node_agent_runtime_policy(
         run_transcript_compaction::run_transcript_auto_compaction_decision(&store, &run_id)
             .unwrap();
     assert!(decision.should_compact);
-    assert_eq!(decision.runtime_source, "run_config_agent_runtime");
-    assert_eq!(decision.runtime_agent_id.as_deref(), Some("executor"));
+    assert_eq!(decision.runtime_source, "run_config_task_profile_runtime");
+    assert_eq!(decision.runtime_agent_id.as_deref(), Some("code"));
     assert_eq!(decision.runtime_context_window_tokens, 32_000);
     assert_eq!(decision.runtime_auto_compact_token_limit, Some(11_000));
     assert_eq!(decision.threshold_tokens, 11_000);
@@ -3163,14 +2741,14 @@ index df967b9..5ea2ed4 100644
         "/api/v3/tools/model/turn",
         json!({
             "run_id": "run-model-tool-host-context",
-            "harness_id": "workflow-planner",
+            "harness_id": "native-code-edit",
             "tool_uses": [{
                 "id": "toolu-host-context",
                 "name": "patch_preview",
                 "input": {
                     "repo_root": repo,
                     "patch_file": "change.patch",
-                    "harness_id": "workflow-planner"
+                    "harness_id": "native-code-edit"
                 }
             }]
         }),
@@ -3197,12 +2775,12 @@ index df967b9..5ea2ed4 100644
     );
     assert_eq!(
         permission_phase["permission_policy_source"]["harness_id"],
-        "workflow-planner"
+        "native-code-edit"
     );
-    assert_eq!(permission_phase["permission_result"]["behavior"], "deny");
+    assert_eq!(permission_phase["permission_result"]["behavior"], "ask");
     assert_eq!(
         permission_phase["policy_decision_status"],
-        "denied_by_policy"
+        "requires_confirmation"
     );
     let tool_execution_phase = result["phases"]
         .as_array()
@@ -3261,7 +2839,7 @@ index df967b9..5ea2ed4 100644
                 "node.started",
                 json!({
                     "node_id": "review",
-                    "harness": "workflow-planner"
+                    "harness": "native-code-edit"
                 }),
             ),
         )
@@ -3301,12 +2879,12 @@ index df967b9..5ea2ed4 100644
     );
     assert_eq!(
         permission_phase["permission_policy_source"]["harness_id"],
-        "workflow-planner"
+        "native-code-edit"
     );
-    assert_eq!(permission_phase["permission_result"]["behavior"], "deny");
+    assert_eq!(permission_phase["permission_result"]["behavior"], "ask");
     assert_eq!(
         permission_phase["policy_decision_status"],
-        "denied_by_policy"
+        "requires_confirmation"
     );
     let tool_execution_phase = body["phases"]
         .as_array()
@@ -3330,72 +2908,6 @@ index df967b9..5ea2ed4 100644
 }
 
 #[tokio::test]
-async fn model_tool_permission_deny_blocks_patch_apply_without_editing_file() {
-    let store_root = temp_root();
-    let store = RunStore::new(&store_root);
-    let app = router(ApiState::new(store));
-    let repo = temp_root();
-    fs::create_dir_all(&repo).unwrap();
-    fs::write(repo.join("tracked.txt"), "base\n").unwrap();
-    fs::write(
-        repo.join("change.patch"),
-        "\
-diff --git a/tracked.txt b/tracked.txt
---- a/tracked.txt
-+++ b/tracked.txt
-@@ -1 +1 @@
--base
-+changed
-",
-    )
-    .unwrap();
-
-    let response = post_json(
-        app,
-        "/api/v3/tools/model/execute",
-        json!({
-            "tool_use_id": "toolu-denied-patch-apply",
-            "tool_name": "patch_apply",
-            "run_id": "run-model-tool-denied-patch-apply",
-            "harness_id": "workflow-planner",
-            "input": {
-                "repo_root": repo,
-                "patch_file": "change.patch",
-                "source": "model",
-                "approved": true,
-                "run_id": "run-model-tool-denied-patch-apply"
-            }
-        }),
-    )
-    .await;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response_json(response).await;
-    assert_eq!(body["status"], "blocked");
-    assert_eq!(body["is_error"], true);
-    assert_eq!(body["payload"]["blocked_by"], "permission_decision");
-    assert_eq!(
-        body["payload"]["policy_decision_status"],
-        "denied_by_policy"
-    );
-    assert_eq!(body["payload"]["required_permission"], "write_files");
-    assert_eq!(
-        fs::read_to_string(repo.join("tracked.txt")).unwrap(),
-        "base\n"
-    );
-    let tool_execution_phase = body["phases"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|phase| phase["phase"].as_str() == Some("tool_execution"))
-        .unwrap();
-    assert_eq!(tool_execution_phase["status"], "blocked");
-    assert_eq!(tool_execution_phase["blocked_by"], "permission_decision");
-    let _ = fs::remove_dir_all(repo);
-    let _ = fs::remove_dir_all(store_root);
-}
-
-#[tokio::test]
 async fn model_tool_agent_alias_accepts_claude_shape_from_run_snapshot() {
     let store_root = temp_root();
     let store = RunStore::new(&store_root);
@@ -3408,7 +2920,8 @@ async fn model_tool_agent_alias_accepts_claude_shape_from_run_snapshot() {
         "read_file".to_owned(),
         "repo_search_text".to_owned(),
     ];
-    config.agents.get_mut("executor").unwrap().tools = vec!["agent_subagent(reviewer)".to_owned()];
+    config.task_profiles.get_mut("code").unwrap().tools =
+        vec!["agent_subagent(reviewer)".to_owned()];
     store.write_run_config_snapshot(&run_id, &config).unwrap();
     store
         .append_event(
@@ -3418,7 +2931,7 @@ async fn model_tool_agent_alias_accepts_claude_shape_from_run_snapshot() {
                 1,
                 "run.started",
                 json!({
-                    "workflow_id": "planner-led",
+                    "workflow_id": "code",
                     "repo_root": ".",
                     "task": "delegate from model tool"
                 }),
@@ -3434,8 +2947,8 @@ async fn model_tool_agent_alias_accepts_claude_shape_from_run_snapshot() {
                 "node.started",
                 json!({
                     "round": 1,
-                    "node_id": "executor",
-                    "agent": "executor",
+                    "node_id": "code",
+                    "agent": "code",
                     "harness": "native-code-edit",
                     "backend": "mock"
                 }),
@@ -3473,16 +2986,10 @@ async fn model_tool_agent_alias_accepts_claude_shape_from_run_snapshot() {
     assert_eq!(records[0].kind, "subagent.started");
     assert_eq!(
         records[0].payload["context"]["parent"]["workflow_id"],
-        "planner-led"
+        "code"
     );
-    assert_eq!(
-        records[0].payload["context"]["parent"]["node_id"],
-        "executor"
-    );
-    assert_eq!(
-        records[0].payload["context"]["parent"]["agent_id"],
-        "executor"
-    );
+    assert_eq!(records[0].payload["context"]["parent"]["node_id"], "code");
+    assert_eq!(records[0].payload["context"]["parent"]["agent_id"], "code");
     assert_eq!(
         records[0].payload["context"]["parent"]["harness_id"],
         "native-code-edit"
@@ -3532,13 +3039,13 @@ async fn model_tool_agent_alias_accepts_claude_shape_from_run_snapshot() {
 }
 
 #[tokio::test]
-async fn model_tool_agent_subagent_inherits_run_plan_context_when_input_omits_backend_context() {
+async fn model_tool_agent_subagent_inherits_run_task_context_when_input_omits_backend_context() {
     let repo = temp_root();
     fs::create_dir_all(&repo).unwrap();
     fs::write(repo.join("README.md"), "# Authorized Subagent\n").unwrap();
     let store_root = temp_root();
     let store = RunStore::new(&store_root);
-    let run_id = RunId::from_string("run-model-tool-agent-plan-context");
+    let run_id = RunId::from_string("run-model-tool-agent-task-context");
     let mut config = default_project_config();
     let harness = config.harnesses.get_mut("native-code-edit").unwrap();
     harness.permissions.child_harness_permissions = ConfigPermissionDecision::Allow;
@@ -3558,15 +3065,12 @@ async fn model_tool_agent_subagent_inherits_run_plan_context_when_input_omits_ba
                 1,
                 "run.started",
                 json!({
-                    "workflow_id": "planner-led",
+                    "task_profile_id": "code",
                     "repo_root": repo.display().to_string(),
-                    "task": "delegate after Start Work",
-                    "plan_context": {
-                        "start_work_authorized": true,
-                        "plan_draft": {
-                            "goal": "delegate after Start Work"
-                        },
-                        "acceptance_criteria": ["subagent can inspect README.md"]
+                    "task": "delegate a repository task",
+                    "task_context": {
+                        "goal": "delegate a repository task",
+                        "constraints": ["subagent can inspect README.md"]
                     }
                 }),
             ),
@@ -3581,8 +3085,8 @@ async fn model_tool_agent_subagent_inherits_run_plan_context_when_input_omits_ba
                 "node.started",
                 json!({
                     "round": 1,
-                    "node_id": "executor",
-                    "agent": "executor",
+                    "node_id": "code",
+                    "agent": "code",
                     "harness": "native-code-edit",
                     "backend": "native-rust"
                 }),
@@ -3597,9 +3101,9 @@ async fn model_tool_agent_subagent_inherits_run_plan_context_when_input_omits_ba
         app,
         "/api/v3/tools/model/execute",
         json!({
-            "tool_use_id": "toolu-agent-plan-context",
+            "tool_use_id": "toolu-agent-task-context",
             "tool_name": "agent_subagent",
-            "run_id": "run-model-tool-agent-plan-context",
+            "run_id": "run-model-tool-agent-task-context",
             "input": {
                 "task": "Inspect README.md and report a one-line status.",
                 "run_in_background": false
@@ -3619,9 +3123,10 @@ async fn model_tool_agent_subagent_inherits_run_plan_context_when_input_omits_ba
     assert!(records.iter().any(|record| {
         record.kind == "subagent.event" && record.payload["kind"] == "backend.native_rust.completed"
     }));
-    let serialized = serde_json::to_string(&records).unwrap();
-    assert!(!serialized.contains("missing_start_work_approval"));
-    assert!(!serialized.contains("file writes require Start Work approval"));
+    assert_eq!(
+        records[0].payload["context"]["parent"]["workflow_id"],
+        "code"
+    );
     let _ = fs::remove_dir_all(repo);
     let _ = fs::remove_dir_all(store_root);
 }
@@ -3641,7 +3146,8 @@ async fn model_tool_agent_alias_blocks_disallowed_subagent_type_from_run_snapsho
         .unwrap()
         .tools
         .push("agent_subagent".to_owned());
-    config.agents.get_mut("executor").unwrap().tools = vec!["agent_subagent(reviewer)".to_owned()];
+    config.task_profiles.get_mut("code").unwrap().tools =
+        vec!["agent_subagent(reviewer)".to_owned()];
     store.write_run_config_snapshot(&run_id, &config).unwrap();
     store
         .append_event(
@@ -3651,7 +3157,7 @@ async fn model_tool_agent_alias_blocks_disallowed_subagent_type_from_run_snapsho
                 1,
                 "run.started",
                 json!({
-                    "workflow_id": "planner-led",
+                    "workflow_id": "code",
                     "repo_root": ".",
                     "task": "delegate from model tool"
                 }),
@@ -3667,8 +3173,8 @@ async fn model_tool_agent_alias_blocks_disallowed_subagent_type_from_run_snapsho
                 "node.started",
                 json!({
                     "round": 1,
-                    "node_id": "executor",
-                    "agent": "executor",
+                    "node_id": "code",
+                    "agent": "code",
                     "harness": "native-code-edit",
                     "backend": "mock"
                 }),
@@ -3764,7 +3270,7 @@ async fn model_tool_agent_alias_blocks_persisted_agent_type_deny_rule() {
                 1,
                 "run.started",
                 json!({
-                    "workflow_id": "planner-led",
+                    "workflow_id": "code",
                     "repo_root": ".",
                     "task": "delegate from model tool"
                 }),
@@ -3862,7 +3368,7 @@ async fn model_tool_agent_alias_applies_runtime_session_agent_type_deny_rule() {
                 1,
                 "run.started",
                 json!({
-                    "workflow_id": "planner-led",
+                    "workflow_id": "code",
                     "repo_root": ".",
                     "task": "delegate from model tool"
                 }),
@@ -4017,7 +3523,7 @@ async fn model_tool_background_subagent_status_uses_explicit_tool() {
                 1,
                 "run.started",
                 json!({
-                    "workflow_id": "planner-led",
+                    "workflow_id": "code",
                     "repo_root": ".",
                     "task": "background delegate from model tool"
                 }),
@@ -4212,7 +3718,7 @@ async fn run_permission_update_allows_followup_model_tool_without_inline_approva
                 run_id.clone(),
                 1,
                 "run.started",
-                json!({"workflow_id": "planner-led"}),
+                json!({"workflow_id": "code"}),
             ),
         )
         .unwrap();
@@ -4388,7 +3894,7 @@ async fn run_permission_update_persists_local_settings_destination() {
                 run_id.clone(),
                 1,
                 "run.started",
-                json!({"workflow_id": "planner-led"}),
+                json!({"workflow_id": "code"}),
             ),
         )
         .unwrap();
@@ -5174,8 +4680,6 @@ async fn blob_endpoint_returns_content_by_digest() {
     let _ = fs::remove_dir_all(root);
 }
 
-mod planner_workflow;
-
 mod projections_cache;
 
 #[derive(Default, Clone)]
@@ -5431,35 +4935,6 @@ fn test_router() -> Router {
     router(state)
 }
 
-async fn spawn_openai_compatible_test_server() -> String {
-    spawn_openai_compatible_test_server_with_payload(json!({
-        "choices": [
-            {
-                "message": {
-                    "content": "Live provider response."
-                }
-            }
-        ]
-    }))
-    .await
-}
-
-fn native_finish_tool_call(call_id: &str, content: &str) -> Value {
-    let arguments: Value = serde_json::from_str(content).expect("finish arguments must be JSON");
-    assert!(
-        arguments.get("files").is_none(),
-        "finish cannot carry the removed text file-plan protocol"
-    );
-    json!({
-        "id": call_id,
-        "type": "function",
-        "function": {
-            "name": "finish",
-            "arguments": content
-        }
-    })
-}
-
 async fn spawn_openai_compatible_test_server_with_payload(payload: Value) -> String {
     async fn chat_completion(State(payload): State<Arc<Value>>) -> Json<Value> {
         Json((*payload).clone())
@@ -5493,110 +4968,6 @@ async fn spawn_delayed_openai_compatible_test_server(delay: Duration, payload: V
     format!("http://{addr}")
 }
 
-async fn spawn_raw_openai_compatible_test_server(
-    status: StatusCode,
-    content_type: &'static str,
-    body: String,
-) -> String {
-    async fn chat_completion(
-        State(state): State<Arc<(StatusCode, &'static str, String)>>,
-    ) -> axum::response::Response {
-        axum::response::Response::builder()
-            .status(state.0)
-            .header("content-type", state.1)
-            .body(Body::from(state.2.clone()))
-            .unwrap()
-    }
-
-    let app = Router::new()
-        .route("/chat/completions", post(chat_completion))
-        .with_state(Arc::new((status, content_type, body)));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    format!("http://{addr}")
-}
-
-async fn spawn_planner_work_concurrency_test_server(executor_delay: Duration) -> String {
-    async fn chat_completion(
-        State(executor_delay): State<Duration>,
-        request: Request<Body>,
-    ) -> Json<Value> {
-        let bytes = to_bytes(request.into_body(), usize::MAX).await.unwrap();
-        let body = serde_json::from_slice::<Value>(&bytes).unwrap();
-        let is_executor_request = body
-            .get("tools")
-            .and_then(Value::as_array)
-            .is_some_and(|tools| !tools.is_empty());
-        if is_executor_request {
-            tokio::time::sleep(executor_delay).await;
-            if provider_request_has_tool_result(&body, "call-write-parallel") {
-                let final_content = json!({
-                    "status": "completed",
-                    "summary": "Created the requested concurrency fixture.",
-                    "checks": ["parallel_planner_test: completed"],
-                    "blockers": []
-                })
-                .to_string();
-                return Json(json!({
-                    "choices": [{
-                        "message": {
-                            "role": "assistant",
-                            "content": Value::Null,
-                            "tool_calls": [native_finish_tool_call(
-                                "call-finish-parallel",
-                                &final_content
-                            )]
-                        }
-                    }]
-                }));
-            }
-            let write_args = json!({
-                "path": "PARALLEL.md",
-                "content": "# Parallel Planner Test\n"
-            })
-            .to_string();
-            return Json(json!({
-                "choices": [{
-                    "message": {
-                        "role": "assistant",
-                        "content": Value::Null,
-                        "tool_calls": [{
-                            "id": "call-write-parallel",
-                            "type": "function",
-                            "function": {
-                                "name": "write_text_file",
-                                "arguments": write_args
-                            }
-                        }]
-                    }
-                }]
-            }));
-        }
-        Json(json!({
-            "choices": [{
-                "finish_reason": "stop",
-                "message": {
-                    "role": "assistant",
-                    "content": "I can continue planning while the active workflow runs."
-                }
-            }]
-        }))
-    }
-
-    let app = Router::new()
-        .route("/chat/completions", post(chat_completion))
-        .with_state(executor_delay);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    format!("http://{addr}")
-}
-
 async fn spawn_openai_compatible_capture_test_server(
     payload: Value,
 ) -> (String, Arc<Mutex<Option<Value>>>) {
@@ -5620,112 +4991,6 @@ async fn spawn_openai_compatible_capture_test_server(
         axum::serve(listener, app).await.unwrap();
     });
     (format!("http://{addr}"), captured)
-}
-
-async fn spawn_openai_compatible_streaming_capture_test_server(
-) -> (String, Arc<Mutex<Option<Value>>>) {
-    async fn chat_completion(
-        State(captured): State<Arc<Mutex<Option<Value>>>>,
-        request: Request<Body>,
-    ) -> axum::response::Response {
-        let bytes = to_bytes(request.into_body(), usize::MAX).await.unwrap();
-        *captured.lock().unwrap() = serde_json::from_slice::<Value>(&bytes).ok();
-        let stream_text = [
-            "data: {\"choices\":[{\"delta\":{\"content\":\"Streamed \"},\"finish_reason\":null}]}\n\n",
-            "data: {\"choices\":[{\"delta\":{\"content\":\"provider response.\"},\"finish_reason\":\"stop\"}]}\n\n",
-            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":41,\"completion_tokens\":7,\"total_tokens\":48,\"prompt_cache_hit_tokens\":11}}\n\n",
-            "data: [DONE]\n\n",
-        ]
-        .join("");
-        axum::response::Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/event-stream")
-            .body(Body::from(stream_text))
-            .unwrap()
-    }
-
-    let captured = Arc::new(Mutex::new(None));
-    let app = Router::new()
-        .route("/chat/completions", post(chat_completion))
-        .with_state(captured.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (format!("http://{addr}"), captured)
-}
-
-async fn spawn_openai_compatible_streaming_tool_sequence_test_server(
-) -> (String, Arc<Mutex<Vec<Value>>>) {
-    async fn chat_completion(
-        State(state): State<StreamingSequenceCaptureState>,
-        request: Request<Body>,
-    ) -> axum::response::Response {
-        let bytes = to_bytes(request.into_body(), usize::MAX).await.unwrap();
-        if let Ok(body) = serde_json::from_slice::<Value>(&bytes) {
-            state.1.lock().unwrap().push(body);
-        }
-        let stream_text = state.0.lock().unwrap().pop_front().unwrap();
-        axum::response::Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/event-stream")
-            .body(Body::from(stream_text))
-            .unwrap()
-    }
-
-    let tool_stream = [
-        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"stream-read-1\",\"type\":\"function\",\"function\":{\"name\":\"repo_read_file_range\",\"arguments\":\"{\\\"path\\\":\\\"README.md\\\"}\"}}]},\"finish_reason\":null}]}\n\n",
-        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
-        "data: [DONE]\n\n",
-    ]
-    .join("");
-    let final_stream = [
-        "data: {\"choices\":[{\"delta\":{\"content\":\"Streaming inspection found stream-read-ok.\"},\"finish_reason\":\"stop\"}]}\n\n",
-        "data: [DONE]\n\n",
-    ]
-    .join("");
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let state = Arc::new((
-        Mutex::new(VecDeque::from(vec![tool_stream, final_stream])),
-        captured.clone(),
-    ));
-    let app = Router::new()
-        .route("/chat/completions", post(chat_completion))
-        .with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (format!("http://{addr}"), captured)
-}
-
-async fn spawn_delayed_openai_compatible_streaming_test_server() -> String {
-    async fn chat_completion() -> axum::response::Response {
-        let opened = futures_util::stream::once(async {
-            Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_static(b": stream-open\n\n"))
-        });
-        let delayed = futures_util::stream::once(async {
-            tokio::time::sleep(Duration::from_millis(80)).await;
-            Ok::<_, std::convert::Infallible>(axum::body::Bytes::from_static(
-                b"data: {\"choices\":[{\"delta\":{\"content\":\"late\"},\"finish_reason\":\"stop\"}]}\n\n",
-            ))
-        });
-        axum::response::Response::builder()
-            .status(StatusCode::OK)
-            .header("content-type", "text/event-stream")
-            .body(Body::from_stream(opened.chain(delayed)))
-            .unwrap()
-    }
-
-    let app = Router::new().route("/chat/completions", post(chat_completion));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    format!("http://{addr}")
 }
 
 async fn spawn_openai_compatible_sequence_capture_test_server(
@@ -5777,720 +5042,6 @@ async fn spawn_openai_compatible_sequence_capture_test_server(
     (format!("http://{addr}"), captured)
 }
 
-async fn spawn_native_background_command_tool_loop_test_server(
-    background_argv: Vec<String>,
-) -> (String, Arc<Mutex<Vec<Value>>>) {
-    async fn chat_completion(
-        State(state): State<CommandLoopState>,
-        request: Request<Body>,
-    ) -> Json<Value> {
-        let bytes = to_bytes(request.into_body(), usize::MAX).await.unwrap();
-        let body = serde_json::from_slice::<Value>(&bytes).unwrap();
-        let turn = {
-            let mut captured = state.1.lock().unwrap();
-            let turn = captured.len();
-            captured.push(body.clone());
-            turn
-        };
-        let payload = match turn {
-            0 => {
-                let background_args = json!({"argv": state.0.clone()}).to_string();
-                json!({
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "content": Value::Null,
-                                "tool_calls": [
-                                    {
-                                        "id": "call-bg",
-                                        "type": "function",
-                                        "function": {
-                                            "name": "command_background",
-                                            "arguments": background_args
-                                        }
-                                    }
-                                ]
-                            }
-                        }
-                    ]
-                })
-            }
-            1 => {
-                let task_id = native_background_task_id_from_provider_request(&body)
-                    .expect("background task id should be visible to the next model turn");
-                let read_args = json!({
-                    "task_id": task_id,
-                    "timeout": 2000,
-                    "block": true
-                })
-                .to_string();
-                let write_args = json!({
-                    "path": "BACKGROUND.md",
-                    "content": "# Background Command\n\nObserved native-bg-done through shared tool execution.\n"
-                })
-                .to_string();
-                json!({
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "content": Value::Null,
-                                "tool_calls": [
-                                    {
-                                        "id": "call-bg-output",
-                                        "type": "function",
-                                        "function": {
-                                            "name": "read_command_output",
-                                            "arguments": read_args
-                                        }
-                                    },
-                                    {
-                                        "id": "call-bg-write",
-                                        "type": "function",
-                                        "function": {
-                                            "name": "write_text_file",
-                                            "arguments": write_args
-                                        }
-                                    }
-                                ]
-                            }
-                        }
-                    ]
-                })
-            }
-            _ => {
-                let final_content = json!({
-                    "status": "completed",
-                    "summary": "Background command output was observed and BACKGROUND.md was written.",
-                    "checks": ["command_background: observed"],
-                    "blockers": []
-                })
-                .to_string();
-                json!({
-                    "choices": [
-                        {
-                            "message": {
-                                "role": "assistant",
-                                "content": Value::Null, "tool_calls": [native_finish_tool_call("call-finish", &final_content)]
-                            }
-                        }
-                    ]
-                })
-            }
-        };
-        Json(payload)
-    }
-
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let state = Arc::new((background_argv, captured.clone()));
-    let app = Router::new()
-        .route("/chat/completions", post(chat_completion))
-        .with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (format!("http://{addr}"), captured)
-}
-
-async fn spawn_native_background_subagent_status_test_server() -> (String, Arc<Mutex<Vec<Value>>>) {
-    async fn chat_completion(
-        State(captured): State<Arc<Mutex<Vec<Value>>>>,
-        request: Request<Body>,
-    ) -> Json<Value> {
-        let bytes = to_bytes(request.into_body(), usize::MAX).await.unwrap();
-        let body = serde_json::from_slice::<Value>(&bytes).unwrap();
-        captured.lock().unwrap().push(body.clone());
-
-        if provider_request_has_tool_result(&body, "call-bg-agent-write") {
-            let final_content = json!({
-                "status": "completed",
-                "summary": "Background subagent output was observed and BG-SUBAGENT.md was written.",
-                "checks": ["background_subagent_status: observed"],
-                "blockers": []
-            })
-            .to_string();
-            return Json(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": Value::Null, "tool_calls": [native_finish_tool_call("call-finish", &final_content)]
-                        }
-                    }
-                ]
-            }));
-        }
-
-        if provider_request_has_tool_result(&body, "call-bg-agent-output") {
-            let write_args = json!({
-                "path": "BG-SUBAGENT.md",
-                "content": "# Background Subagent\n\nThe explicit status tool observed the background subagent.\n"
-            })
-            .to_string();
-            return Json(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": Value::Null,
-                            "tool_calls": [
-                                {
-                                    "id": "call-bg-agent-write",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "write_text_file",
-                                        "arguments": write_args
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }));
-        }
-
-        if provider_request_has_tool_result(&body, "call-bg-agent") {
-            let task_id = native_task_id_from_provider_request(&body, "call-bg-agent")
-                .expect("background subagent task id should be visible to the next model turn");
-            let output_args = json!({
-                "task_id": task_id,
-                "block": true,
-                "timeout": 2000
-            })
-            .to_string();
-            return Json(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": Value::Null,
-                            "tool_calls": [
-                                {
-                                    "id": "call-bg-agent-output",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "read_subagent_status",
-                                        "arguments": output_args
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }));
-        }
-
-        if provider_request_content_contains(&body, "Review whether BG-SUBAGENT.md is in scope") {
-            let child_final_content = json!({
-                "status": "completed",
-                "summary": "Background child confirmed BG-SUBAGENT.md is in scope.",
-                "checks": ["background_child: completed"],
-                "blockers": []
-            })
-            .to_string();
-            return Json(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": Value::Null, "tool_calls": [native_finish_tool_call("call-child-finish", &child_final_content)]
-                        }
-                    }
-                ]
-            }));
-        }
-
-        let agent_args = json!({
-            "prompt": "Review whether BG-SUBAGENT.md is in scope and return a short status.",
-            "description": "background reviewer",
-            "subagent_type": "reviewer",
-            "run_in_background": true
-        })
-        .to_string();
-        Json(json!({
-            "choices": [
-                {
-                    "message": {
-                        "role": "assistant",
-                        "content": Value::Null,
-                        "tool_calls": [
-                            {
-                                "id": "call-bg-agent",
-                                "type": "function",
-                                "function": {
-                                    "name": "Agent",
-                                    "arguments": agent_args
-                                }
-                            }
-                        ]
-                    }
-                }
-            ]
-        }))
-    }
-
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let app = Router::new()
-        .route("/chat/completions", post(chat_completion))
-        .with_state(captured.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (format!("http://{addr}"), captured)
-}
-
-async fn spawn_native_background_subagent_writes_file_test_server(
-) -> (String, Arc<Mutex<Vec<Value>>>) {
-    async fn chat_completion(
-        State(captured): State<Arc<Mutex<Vec<Value>>>>,
-        request: Request<Body>,
-    ) -> Json<Value> {
-        let bytes = to_bytes(request.into_body(), usize::MAX).await.unwrap();
-        let body = serde_json::from_slice::<Value>(&bytes).unwrap();
-        captured.lock().unwrap().push(body.clone());
-
-        if provider_request_has_tool_result(&body, "call-child-write") {
-            let child_final_content = json!({
-                "status": "completed",
-                "summary": "Background child wrote CHILD-ONLY.md.",
-                "checks": ["background_child: wrote CHILD-ONLY.md"],
-                "blockers": []
-            })
-            .to_string();
-            return Json(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": Value::Null, "tool_calls": [native_finish_tool_call("call-child-finish", &child_final_content)]
-                        }
-                    }
-                ]
-            }));
-        }
-
-        if provider_request_content_contains(&body, "Child-only subagent file") {
-            let write_args = json!({
-                "path": "CHILD-ONLY.md",
-                "content": "# Child Only\n\nThis file was written by the background subagent.\n"
-            })
-            .to_string();
-            return Json(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": Value::Null,
-                            "tool_calls": [
-                                {
-                                    "id": "call-child-write",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "write_text_file",
-                                        "arguments": write_args
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }));
-        }
-
-        if provider_request_has_tool_result(&body, "call-parent-output") {
-            let final_content = json!({
-                "status": "completed",
-                "summary": "Background subagent completed and parent aggregated its report.",
-                "checks": ["background_subagent_report: observed"],
-                "blockers": []
-            })
-            .to_string();
-            return Json(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": Value::Null, "tool_calls": [native_finish_tool_call("call-finish", &final_content)]
-                        }
-                    }
-                ]
-            }));
-        }
-
-        if provider_request_has_tool_result(&body, "call-parent-agent") {
-            let task_id = native_task_id_from_provider_request(&body, "call-parent-agent")
-                .expect("background subagent task id should be visible to the next model turn");
-            let output_args = json!({
-                "task_id": task_id,
-                "block": true,
-                "timeout": 2000
-            })
-            .to_string();
-            return Json(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": Value::Null,
-                            "tool_calls": [
-                                {
-                                    "id": "call-parent-output",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "read_subagent_status",
-                                        "arguments": output_args
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }));
-        }
-
-        let agent_args = json!({
-            "prompt": "Child-only subagent file task: write CHILD-ONLY.md exactly once, then report completion.",
-            "description": "child file writer",
-            "subagent_type": "writer",
-            "run_in_background": true
-        })
-        .to_string();
-        Json(json!({
-            "choices": [
-                {
-                    "message": {
-                        "role": "assistant",
-                        "content": Value::Null,
-                        "tool_calls": [
-                            {
-                                "id": "call-parent-agent",
-                                "type": "function",
-                                "function": {
-                                    "name": "Agent",
-                                    "arguments": agent_args
-                                }
-                            }
-                        ]
-                    }
-                }
-            ]
-        }))
-    }
-
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let app = Router::new()
-        .route("/chat/completions", post(chat_completion))
-        .with_state(captured.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (format!("http://{addr}"), captured)
-}
-
-async fn spawn_native_background_subagent_cancel_test_server(
-    child_background_argv: Vec<String>,
-) -> (String, Arc<Mutex<Vec<Value>>>) {
-    async fn chat_completion(
-        State(state): State<CommandLoopState>,
-        request: Request<Body>,
-    ) -> Json<Value> {
-        let bytes = to_bytes(request.into_body(), usize::MAX).await.unwrap();
-        let body = serde_json::from_slice::<Value>(&bytes).unwrap();
-        state.1.lock().unwrap().push(body.clone());
-
-        if provider_request_has_tool_result(&body, "call-cancel-bg-write") {
-            let final_content = json!({
-                "status": "completed",
-                "summary": "Background subagent was cancelled and BG-SUBAGENT-CANCEL.md was written.",
-                "checks": ["background_subagent_cancel: cancelled"],
-                "blockers": []
-            })
-            .to_string();
-            return Json(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": Value::Null, "tool_calls": [native_finish_tool_call("call-finish", &final_content)]
-                        }
-                    }
-                ]
-            }));
-        }
-
-        if provider_request_has_tool_result(&body, "call-cancel-bg-stop") {
-            let write_args = json!({
-                "path": "BG-SUBAGENT-CANCEL.md",
-                "content": "# Background Subagent Cancelled\n\nThe explicit cancel tool stopped the background subagent.\n"
-            })
-            .to_string();
-            return Json(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": Value::Null,
-                            "tool_calls": [
-                                {
-                                    "id": "call-cancel-bg-write",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "write_text_file",
-                                        "arguments": write_args
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }));
-        }
-
-        if provider_request_has_tool_result(&body, "call-cancel-bg-agent") {
-            let task_id = native_task_id_from_provider_request(&body, "call-cancel-bg-agent")
-                .expect("background subagent task id should be visible to parent model turn");
-            let stop_args = json!({
-                "task_id": task_id
-            })
-            .to_string();
-            return Json(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": Value::Null,
-                            "tool_calls": [
-                                {
-                                    "id": "call-cancel-bg-stop",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "cancel_subagent_background",
-                                        "arguments": stop_args
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }));
-        }
-
-        if provider_request_has_tool_result(&body, "call-child-bg-command") {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            let child_final_content = json!({
-                "status": "completed",
-                "summary": "Child cancellation probe would have completed if it had not been cancelled.",
-                "checks": ["child_background_command: observed"],
-                "blockers": []
-            })
-            .to_string();
-            return Json(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": Value::Null, "tool_calls": [native_finish_tool_call("call-child-finish", &child_final_content)]
-                        }
-                    }
-                ]
-            }));
-        }
-
-        if provider_request_is_child_cancellation_probe(&body) {
-            let background_args = json!({
-                "argv": state.0.clone()
-            })
-            .to_string();
-            return Json(json!({
-                "choices": [
-                    {
-                        "message": {
-                            "role": "assistant",
-                            "content": Value::Null,
-                            "tool_calls": [
-                                {
-                                    "id": "call-child-bg-command",
-                                    "type": "function",
-                                    "function": {
-                                        "name": "command_background",
-                                        "arguments": background_args
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }));
-        }
-
-        let agent_args = json!({
-            "prompt": "Hold cancellation probe: start a background command and wait until the parent stops this subagent.",
-            "description": "cancellable background reviewer",
-            "subagent_type": "reviewer",
-            "run_in_background": true
-        })
-        .to_string();
-        Json(json!({
-            "choices": [
-                {
-                    "message": {
-                        "role": "assistant",
-                        "content": Value::Null,
-                        "tool_calls": [
-                            {
-                                "id": "call-cancel-bg-agent",
-                                "type": "function",
-                                "function": {
-                                    "name": "Agent",
-                                    "arguments": agent_args
-                                }
-                            }
-                        ]
-                    }
-                }
-            ]
-        }))
-    }
-
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let state = Arc::new((child_background_argv, captured.clone()));
-    let app = Router::new()
-        .route("/chat/completions", post(chat_completion))
-        .with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (format!("http://{addr}"), captured)
-}
-
-fn native_background_task_id_from_provider_request(request: &Value) -> Option<String> {
-    native_task_id_from_provider_request(request, "call-bg")
-}
-
-fn native_task_id_from_provider_request(request: &Value, tool_call_id: &str) -> Option<String> {
-    request
-        .get("messages")?
-        .as_array()?
-        .iter()
-        .filter(|message| {
-            message.get("role").and_then(Value::as_str) == Some("tool")
-                && message.get("tool_call_id").and_then(Value::as_str) == Some(tool_call_id)
-        })
-        .find_map(|message| {
-            let content = message.get("content")?.as_str()?;
-            let payload = serde_json::from_str::<Value>(content).ok()?;
-            payload
-                .get("task_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .or_else(|| {
-                    payload
-                        .get("background_task")
-                        .and_then(|task| task.get("task_id"))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-        })
-}
-
-fn provider_request_has_tool_result(request: &Value, tool_call_id: &str) -> bool {
-    request
-        .get("messages")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .any(|message| {
-            message.get("role").and_then(Value::as_str) == Some("tool")
-                && message.get("tool_call_id").and_then(Value::as_str) == Some(tool_call_id)
-        })
-}
-
-fn provider_request_is_child_cancellation_probe(request: &Value) -> bool {
-    provider_request_content_contains(request, "Hold cancellation probe")
-}
-
-fn provider_request_content_contains(request: &Value, needle: &str) -> bool {
-    request
-        .get("messages")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .any(|message| {
-            message
-                .get("content")
-                .and_then(Value::as_str)
-                .is_some_and(|content| content.contains(needle))
-        })
-}
-
-#[derive(Clone)]
-struct OpenAiCompatibleStatusResponse {
-    status: StatusCode,
-    content_type: &'static str,
-    body: String,
-}
-
-async fn spawn_openai_compatible_status_sequence_capture_test_server(
-    responses: Vec<OpenAiCompatibleStatusResponse>,
-) -> (String, Arc<Mutex<Vec<Value>>>) {
-    async fn chat_completion(
-        State(state): State<StatusSequenceState>,
-        request: Request<Body>,
-    ) -> axum::response::Response {
-        let bytes = to_bytes(request.into_body(), usize::MAX).await.unwrap();
-        if let Ok(body) = serde_json::from_slice::<Value>(&bytes) {
-            state.1.lock().unwrap().push(body);
-        }
-        let response =
-            state
-                .0
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or_else(|| OpenAiCompatibleStatusResponse {
-                    status: StatusCode::OK,
-                    content_type: "application/json",
-                    body: json!({
-                        "choices": [
-                            {
-                                "finish_reason": "stop",
-                                "message": {
-                                    "content": "default provider response"
-                                }
-                            }
-                        ]
-                    })
-                    .to_string(),
-                });
-        axum::response::Response::builder()
-            .status(response.status)
-            .header("content-type", response.content_type)
-            .body(Body::from(response.body))
-            .unwrap()
-    }
-
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let state = Arc::new((Mutex::new(VecDeque::from(responses)), captured.clone()));
-    let app = Router::new()
-        .route("/chat/completions", post(chat_completion))
-        .with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (format!("http://{addr}"), captured)
-}
-
 fn configure_test_provider(state: &ApiState, provider_base_url: String, default_model: &str) {
     let mut settings = state.provider_settings.lock().unwrap();
     settings.mock_mode = false;
@@ -6507,28 +5058,6 @@ fn configure_test_provider(state: &ApiState, provider_base_url: String, default_
             secret: Some("provider-test-token".to_owned()),
         },
     );
-}
-
-fn provider_backed_test_app(store_root: &PathBuf, provider_base_url: String) -> Router {
-    let state = ApiState::new(RunStore::new(store_root));
-    {
-        let mut settings = state.provider_settings.lock().unwrap();
-        settings.mock_mode = false;
-        settings.default_provider = "openai-compatible".to_owned();
-        settings.default_model = "test-model".to_owned();
-        settings
-            .base_urls
-            .insert("openai-compatible".to_owned(), provider_base_url);
-        settings.api_keys.insert(
-            "openai-compatible".to_owned(),
-            ProviderKeyState {
-                configured: true,
-                source: "settings".to_owned(),
-                secret: Some("provider-test-token".to_owned()),
-            },
-        );
-    }
-    router(state)
 }
 
 async fn post_json(app: Router, uri: &str, body: Value) -> axum::response::Response {
@@ -6678,23 +5207,6 @@ fn platform_echo_args(text: &str) -> Vec<String> {
         ]
     } else {
         vec!["sh".to_owned(), "-c".to_owned(), format!("printf {text}")]
-    }
-}
-
-fn platform_write_file_args(path: &str, text: &str) -> Vec<String> {
-    if cfg!(windows) {
-        vec![
-            "powershell.exe".to_owned(),
-            "-NoProfile".to_owned(),
-            "-Command".to_owned(),
-            format!("Set-Content -LiteralPath {path:?} -Value {text:?} -NoNewline -Encoding UTF8"),
-        ]
-    } else {
-        vec![
-            "sh".to_owned(),
-            "-c".to_owned(),
-            format!("printf '%s' '{}' > '{}'", text, path),
-        ]
     }
 }
 

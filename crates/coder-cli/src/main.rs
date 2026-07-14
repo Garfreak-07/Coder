@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, fs, net::SocketAddr, path::PathBuf};
+use std::{fs, net::SocketAddr, path::PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 use coder_config::{
@@ -35,9 +35,9 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    Workflow {
+    Task {
         #[command(subcommand)]
-        command: WorkflowCommand,
+        command: TaskCommand,
     },
     Runs {
         #[command(subcommand)]
@@ -50,7 +50,7 @@ enum Command {
     Server {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
-        #[arg(long, default_value_t = 8766)]
+        #[arg(long, default_value_t = 8876)]
         port: u16,
         #[arg(long, default_value = DEFAULT_STORE)]
         store: PathBuf,
@@ -66,7 +66,7 @@ enum ConfigCommand {
 }
 
 #[derive(Debug, Subcommand)]
-enum WorkflowCommand {
+enum TaskCommand {
     Validate {
         #[arg(long, default_value = "examples/coder.yaml")]
         config: PathBuf,
@@ -74,7 +74,7 @@ enum WorkflowCommand {
     Preview {
         #[arg(long, default_value = "examples/coder.yaml")]
         config: PathBuf,
-        workflow_id: String,
+        task_profile_id: String,
         task: String,
     },
     Run {
@@ -86,7 +86,7 @@ enum WorkflowCommand {
         config: PathBuf,
         #[arg(long, default_value = DEFAULT_STORE)]
         store: PathBuf,
-        workflow_id: String,
+        task_profile_id: String,
         task: String,
     },
 }
@@ -235,19 +235,19 @@ fn ensure_valid_config(config: &ProjectConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn workflow_preview_json(
+fn task_preview_json(
     config: &ProjectConfig,
-    workflow_id: &str,
+    task_profile_id: &str,
     task: &str,
 ) -> serde_json::Value {
     let mut issues = validate_project_config(config).issues;
-    let workflow = config.workflows.get(workflow_id);
+    let workflow = config.task_profiles.get(task_profile_id);
     if workflow.is_none() {
         issues.push(validation_issue(
             ValidationLevel::Error,
-            "workflow_not_found",
-            format!("workflow '{workflow_id}' was not found"),
-            "workflow_id",
+            "task_profile_not_found",
+            format!("task profile '{task_profile_id}' was not found"),
+            "task_profile_id",
         ));
     }
     if task.trim().is_empty() {
@@ -267,22 +267,14 @@ fn workflow_preview_json(
         "ready"
     };
     let backends = workflow
-        .map(|workflow| {
-            workflow
-                .nodes
-                .iter()
-                .filter_map(|node| config.harnesses.get(&node.harness))
-                .map(|harness| harness.backend.clone())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect::<Vec<_>>()
-        })
+        .and_then(|workflow| config.harnesses.get(&workflow.harness))
+        .map(|harness| vec![harness.backend.clone()])
         .unwrap_or_default();
 
     json!({
         "status": status,
         "requires_confirmation": status == "ready",
-        "workflow_id": workflow_id,
+        "task_profile_id": task_profile_id,
         "task": task,
         "backends": backends,
         "issues": issues,
@@ -574,8 +566,8 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
-        Command::Workflow {
-            command: WorkflowCommand::Validate { config },
+        Command::Task {
+            command: TaskCommand::Validate { config },
         } => {
             let config = load_project_config(&config)?;
             let report = validate_project_config(&config);
@@ -584,43 +576,43 @@ async fn main() -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
-        Command::Workflow {
+        Command::Task {
             command:
-                WorkflowCommand::Preview {
+                TaskCommand::Preview {
                     config,
-                    workflow_id,
+                    task_profile_id,
                     task,
                 },
         } => {
             let config = load_project_config(&config)?;
-            let output = workflow_preview_json(&config, &workflow_id, &task);
+            let output = task_preview_json(&config, &task_profile_id, &task);
             println!("{}", serde_json::to_string_pretty(&output)?);
             if output["status"] == "blocked" {
                 std::process::exit(1);
             }
         }
-        Command::Workflow {
+        Command::Task {
             command:
-                WorkflowCommand::Run {
+                TaskCommand::Run {
                     mock,
                     repo,
                     config,
                     store,
-                    workflow_id,
+                    task_profile_id,
                     task,
                 },
         } => {
             let config = load_project_config(&config)?;
             if mock {
                 let runner = MockWorkflowRunner::new(&config, RunStore::new(store));
-                let output = runner.run(&workflow_id, &task)?;
+                let output = runner.run(&task_profile_id, &task)?;
                 println!("run_id={}", output.run_id);
                 println!("report_ref={}", output.report_ref);
                 println!("summary={}", output.report.summary);
             } else {
                 ensure_valid_config(&config)?;
                 let store = RunStore::new(store);
-                let mut options = WorkflowRunOptions::new(workflow_id, task);
+                let mut options = WorkflowRunOptions::new(task_profile_id, task);
                 options.repo_root = repo;
                 let output = run_embedded_workflow(config, store, options).await?;
                 println!("run_id={}", output.run_id);
@@ -986,19 +978,12 @@ mod tests {
             _ => panic!("expected server command"),
         }
 
-        let cli = Cli::parse_from([
-            "coder-rust",
-            "workflow",
-            "run",
-            "--mock",
-            "planner-led",
-            "summarize",
-        ]);
+        let cli = Cli::parse_from(["coder-rust", "task", "run", "--mock", "code", "summarize"]);
         match cli.command {
-            Command::Workflow {
-                command: WorkflowCommand::Run { store, .. },
+            Command::Task {
+                command: TaskCommand::Run { store, .. },
             } => assert_eq!(store, PathBuf::from(DEFAULT_STORE)),
-            _ => panic!("expected workflow run command"),
+            _ => panic!("expected task run command"),
         }
 
         let cli = Cli::parse_from(["coder-rust", "runs", "list"]);
@@ -1011,11 +996,11 @@ mod tests {
     }
 
     #[test]
-    fn workflow_preview_reports_ready_with_backends() {
+    fn task_preview_reports_ready_with_backends() {
         let config: ProjectConfig =
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
 
-        let preview = workflow_preview_json(&config, "planner-led", "summarize the repo");
+        let preview = task_preview_json(&config, "code", "summarize the repo");
 
         assert_eq!(preview["status"], "ready");
         assert_eq!(preview["requires_confirmation"], true);
@@ -1028,11 +1013,11 @@ mod tests {
     }
 
     #[test]
-    fn workflow_preview_blocks_missing_workflow_and_empty_task() {
+    fn task_preview_blocks_missing_profile_and_empty_task() {
         let config: ProjectConfig =
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
 
-        let preview = workflow_preview_json(&config, "missing", "  ");
+        let preview = task_preview_json(&config, "missing", "  ");
         let codes = preview["issues"]
             .as_array()
             .unwrap()
@@ -1042,7 +1027,7 @@ mod tests {
 
         assert_eq!(preview["status"], "blocked");
         assert_eq!(preview["requires_confirmation"], false);
-        assert!(codes.contains(&"workflow_not_found"));
+        assert!(codes.contains(&"task_profile_not_found"));
         assert!(codes.contains(&"task_empty"));
     }
 
@@ -1326,24 +1311,24 @@ diff --git a/tracked.txt b/tracked.txt
     }
 
     #[test]
-    fn cli_exposes_phase10_command_surface() {
+    fn cli_exposes_current_command_surface() {
         let command = Cli::command();
         let root = subcommand_names(&command);
 
         assert!(root.contains(&"doctor"));
         assert!(root.contains(&"config"));
-        assert!(root.contains(&"workflow"));
+        assert!(root.contains(&"task"));
         assert!(root.contains(&"runs"));
         assert!(root.contains(&"server"));
         assert!(root.contains(&"tools"));
 
-        let workflow = find_subcommand(&command, "workflow");
-        let workflow_commands = subcommand_names(workflow);
-        assert!(workflow_commands.contains(&"validate"));
-        assert!(workflow_commands.contains(&"preview"));
-        assert!(workflow_commands.contains(&"run"));
-        let workflow_run = find_subcommand(workflow, "run");
-        assert!(arg_names(workflow_run).contains(&"repo"));
+        let task = find_subcommand(&command, "task");
+        let task_commands = subcommand_names(task);
+        assert!(task_commands.contains(&"validate"));
+        assert!(task_commands.contains(&"preview"));
+        assert!(task_commands.contains(&"run"));
+        let task_run = find_subcommand(task, "run");
+        assert!(arg_names(task_run).contains(&"repo"));
 
         let runs = find_subcommand(&command, "runs");
         let runs_commands = subcommand_names(runs);

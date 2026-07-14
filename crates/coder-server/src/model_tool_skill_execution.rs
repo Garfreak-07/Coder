@@ -228,7 +228,7 @@ fn skill_fork_subagent_run_request(
     let provider_settings = state.provider_settings.lock().unwrap().clone();
     apply_provider_settings_to_project_config(&mut config, &provider_settings);
     let workflow_id = model_tool_string(input, &["workflow_id"])
-        .or(run_context.workflow_id)
+        .or(run_context.task_profile_id)
         .unwrap_or_else(|| "model-tool".to_owned());
     let node_id = model_tool_string(input, &["node_id"])
         .or(run_context.node_id)
@@ -249,7 +249,7 @@ fn skill_fork_subagent_run_request(
         .unwrap_or_else(|| "model-tool".to_owned());
     let repo_root = model_tool_string(input, &["repo_root", "cwd"]).or(run_context.repo_root);
     let backend_context = model_tool_object(input, "backend_context").unwrap_or_else(|| json!({}));
-    let subagent_name = resolve_skill_fork_agent(execution_policy, &config, &parent_agent_id)?;
+    let subagent_name = resolve_skill_fork_profile(execution_policy, &config, &parent_agent_id)?;
     let run_in_background = model_tool_bool(input, &["run_in_background", "runInBackground"]);
     Ok(SubagentRunToolRequest {
         config,
@@ -274,7 +274,7 @@ fn skill_fork_subagent_run_request(
     })
 }
 
-fn resolve_skill_fork_agent(
+fn resolve_skill_fork_profile(
     execution_policy: &SkillExecutionPolicy,
     config: &ProjectConfig,
     parent_agent_id: &str,
@@ -287,30 +287,26 @@ fn resolve_skill_fork_agent(
         .map(str::to_owned);
     if let Some(requested_agent) = requested_agent {
         return config
-            .agents
+            .task_profiles
             .contains_key(&requested_agent)
             .then_some(requested_agent.clone())
             .ok_or_else(|| {
                 ApiError::bad_request(format!(
-                    "Skill fork requests unknown agent '{requested_agent}'"
+                    "Skill fork requests unknown task profile '{requested_agent}'"
                 ))
             });
     }
-    if config.agents.contains_key(parent_agent_id) {
+    if config.task_profiles.contains_key(parent_agent_id) {
         return Ok(parent_agent_id.to_owned());
     }
-    let mut executors = config
-        .agents
-        .iter()
-        .filter(|(_, agent)| agent.role == "executor")
-        .map(|(agent_id, _)| agent_id.clone());
-    if let Some(only_executor) = executors.next() {
-        if executors.next().is_none() {
-            return Ok(only_executor);
+    let mut profiles = config.task_profiles.keys().cloned();
+    if let Some(only_profile) = profiles.next() {
+        if profiles.next().is_none() {
+            return Ok(only_profile);
         }
     }
     Err(ApiError::bad_request(
-        "Skill fork must specify an agent when the parent agent is unavailable and the config does not define exactly one executor",
+        "Skill fork must specify a task profile when the parent profile is unavailable and the config does not define exactly one task profile",
     ))
 }
 
@@ -341,44 +337,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn skill_fork_agent_resolution_uses_the_only_executor_when_parent_is_external() {
+    fn skill_fork_profile_resolution_uses_the_only_profile_when_parent_is_external() {
         let policy = SkillExecutionPolicy::default();
         let config = crate::default_project_config();
-        let resolution = resolve_skill_fork_agent(&policy, &config, "model-tool").unwrap();
+        let resolution = resolve_skill_fork_profile(&policy, &config, "model-tool").unwrap();
 
-        assert_eq!(resolution, "executor");
+        assert_eq!(resolution, "code");
     }
 
     #[test]
-    fn skill_fork_agent_resolution_inherits_configured_parent() {
+    fn skill_fork_profile_resolution_inherits_configured_parent() {
         let policy = SkillExecutionPolicy::default();
         let config = crate::default_project_config();
-        let resolution = resolve_skill_fork_agent(&policy, &config, "workflow-planner").unwrap();
+        let resolution = resolve_skill_fork_profile(&policy, &config, "code").unwrap();
 
-        assert_eq!(resolution, "workflow-planner");
+        assert_eq!(resolution, "code");
     }
 
     #[test]
-    fn skill_fork_agent_resolution_rejects_unknown_requested_agent() {
+    fn skill_fork_profile_resolution_rejects_unknown_requested_profile() {
         let policy = SkillExecutionPolicy {
             agent: Some("reviewer".to_owned()),
             ..SkillExecutionPolicy::default()
         };
         let config = crate::default_project_config();
-        let error = resolve_skill_fork_agent(&policy, &config, "model-tool").unwrap_err();
+        let error = resolve_skill_fork_profile(&policy, &config, "model-tool").unwrap_err();
 
-        assert!(error.message.contains("unknown agent 'reviewer'"));
+        assert!(error.message.contains("unknown task profile 'reviewer'"));
     }
 
     #[test]
-    fn skill_fork_agent_resolution_marks_matching_config_agent() {
+    fn skill_fork_profile_resolution_accepts_matching_config_profile() {
         let policy = SkillExecutionPolicy {
-            agent: Some("executor".to_owned()),
+            agent: Some("code".to_owned()),
             ..SkillExecutionPolicy::default()
         };
         let config = crate::default_project_config();
-        let resolution = resolve_skill_fork_agent(&policy, &config, "model-tool").unwrap();
+        let resolution = resolve_skill_fork_profile(&policy, &config, "model-tool").unwrap();
 
-        assert_eq!(resolution, "executor");
+        assert_eq!(resolution, "code");
     }
 }

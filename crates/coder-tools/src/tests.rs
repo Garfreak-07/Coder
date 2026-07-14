@@ -313,6 +313,20 @@ fn find_files_skips_sensitive_paths_and_bounds_results() {
 }
 
 #[test]
+fn find_files_treats_match_all_wildcards_as_no_filter() {
+    let root = temp_repo();
+    fs::write(root.join("index.html"), "<!doctype html>\n").unwrap();
+
+    for query in ["*", "*.*", "**/*", "**\\*"] {
+        let files = find_files(&root, Some(query), &[], 10).unwrap();
+        assert_eq!(files.len(), 1, "query {query}");
+        assert_eq!(files[0].path, "index.html");
+    }
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn search_text_returns_matches_and_skips_hidden_runtime_dirs() {
     let root = temp_repo();
     fs::write(root.join("src.txt"), "first\nneedle here\n").unwrap();

@@ -4,12 +4,6 @@ use serde_json::{json, Value};
 
 use crate::ApiState;
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct RunTokenBudgetState {
-    limit: u64,
-    used: u64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RunTokenBudgetSnapshot {
     pub(crate) limit: u64,
@@ -92,7 +86,7 @@ fn usage_u64(usage: &Value, keys: &[&str]) -> Option<u64> {
 pub(crate) fn workflow_token_budget(request: &HarnessRunRequest) -> Option<u64> {
     request
         .backend_context
-        .pointer("/coder/workflow_loop/token_budget")
+        .pointer("/coder/task/token_budget")
         .and_then(Value::as_u64)
         .filter(|limit| *limit > 0)
 }
@@ -101,12 +95,7 @@ pub(crate) fn initialize_run_token_budget(state: &ApiState, run_id: &RunId, limi
     let Some(limit) = limit.filter(|limit| *limit > 0) else {
         return;
     };
-    if let Ok(mut budgets) = state.run_token_budgets.lock() {
-        budgets
-            .entry(run_id.to_string())
-            .and_modify(|budget| budget.limit = budget.limit.min(limit))
-            .or_insert(RunTokenBudgetState { limit, used: 0 });
-    }
+    state.session_host.initialize_token_budget(run_id, limit);
 }
 
 pub(crate) fn check_run_token_budget(
@@ -132,12 +121,8 @@ pub(crate) fn check_existing_run_token_budget(
     state: &ApiState,
     run_id: &RunId,
 ) -> Option<RunTokenBudgetSnapshot> {
-    let budgets = state.run_token_budgets.lock().ok()?;
-    let budget = budgets.get(run_id.as_str())?;
-    Some(RunTokenBudgetSnapshot {
-        limit: budget.limit,
-        used: budget.used,
-    })
+    let (limit, used) = state.session_host.token_budget(run_id)?;
+    Some(RunTokenBudgetSnapshot { limit, used })
 }
 
 pub(crate) fn record_existing_run_token_usage(
@@ -145,27 +130,16 @@ pub(crate) fn record_existing_run_token_usage(
     run_id: &RunId,
     usage: RunTokenUsage,
 ) -> Option<RunTokenBudgetSnapshot> {
-    let mut budgets = state.run_token_budgets.lock().ok()?;
-    let budget = budgets.get_mut(run_id.as_str())?;
-    budget.used = budget.used.saturating_add(usage.charge());
-    Some(RunTokenBudgetSnapshot {
-        limit: budget.limit,
-        used: budget.used,
-    })
+    let (limit, used) = state.session_host.charge_tokens(run_id, usage.charge())?;
+    Some(RunTokenBudgetSnapshot { limit, used })
 }
 
 pub(crate) fn clear_run_token_budget(state: &ApiState, run_id: &RunId) {
-    if let Ok(mut budgets) = state.run_token_budgets.lock() {
-        budgets.remove(run_id.as_str());
-    }
+    state.session_host.clear_token_budget(run_id);
 }
 
 pub(crate) fn clear_run_token_budget_if_inactive(state: &ApiState, run_id: &RunId) {
-    let run_active = state
-        .active_run_controls
-        .lock()
-        .map(|runs| runs.contains_key(run_id.as_str()))
-        .unwrap_or(true);
+    let run_active = state.session_host.task_is_active(run_id);
     if run_active || crate::subagent_tools::has_background_subagents_for_run(state, run_id) {
         return;
     }

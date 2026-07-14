@@ -173,7 +173,7 @@ impl FinalReport {
         self
     }
 
-    pub fn refresh_planner_style_summary(&mut self, requested: Option<&str>, completed: &[String]) {
+    pub fn refresh_evidence_summary(&mut self, requested: Option<&str>, completed: &[String]) {
         let requested = requested
             .map(|value| compact_summary_text(value, 320))
             .filter(|value| !value.is_empty())

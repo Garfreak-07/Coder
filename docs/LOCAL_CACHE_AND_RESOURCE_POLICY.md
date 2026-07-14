@@ -13,21 +13,18 @@ The server and CLI default to a workspace-local `.coder` store:
   sessions/
   runs/
   background-tasks/
-  timeline/
   blobs/
-  artifacts/
   settings/
   checkpoints/
-  changesets/
   repo-index/
   plugin-cache/
   skill-cache/
-  logs/
   tmp/
 ```
 
-Use `--store` to place durable state somewhere else. Developer scripts should
-prefer a repo-local or F-drive path when large live tests are expected.
+Use `--store` to place durable state somewhere else. Development and CI should
+prefer an explicitly sized cache location when large test artifacts are
+expected.
 
 Runtime cache resolution:
 
@@ -40,7 +37,7 @@ Runtime cache resolution:
 
 Keep these until the user deletes runs or store data:
 
-- Planner sessions
+- Conversation sessions
 - run metadata and events
 - reports
 - artifacts
@@ -79,19 +76,17 @@ $env:CARGO_TARGET_DIR="F:\bbb\cargo-target"
 This is a developer workspace choice, not a Coder user workflow. Product code
 does not create Cargo build caches in users' target projects.
 
-## Current Validation Snapshot
+Rust debug `incremental/` and `deps/` directories are developer build output,
+not Coder runtime cache. On a constrained development disk, disable incremental
+artifacts for validation runs:
 
-The 2026-07-12 Windows development baseline measured 0.08 GB under Coder `tmp`.
-This is a workspace measurement, not a product requirement.
+```powershell
+$env:CARGO_INCREMENTAL="0"
+cargo test --workspace
+```
 
-A local server process used 12.41 MiB working set before MCP registration and
-16.35 MiB with one initialized stdio connection. Its Node test server used
-37.84 MiB and no child remained after unregistering; the host settled at 16.64
-MiB without an explicit allocator trim. A real `deepseek-v4-flash` MCP task
-completed in five provider turns, wrote and verified the exact returned value,
-and used 17,367 input tokens, 15,232 cache-read tokens, and 459 output tokens.
-This validates lifecycle and accounting behavior for one tool; it is not a
-stress-test claim.
+Deleting an exact Cargo target directory is safe only when a rebuild is
+acceptable. It may also remove the locally built `coder-rust` executable.
 
 ## API Endpoints
 

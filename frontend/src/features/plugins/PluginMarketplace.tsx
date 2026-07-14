@@ -26,7 +26,7 @@ export function PluginMarketplace({ marketplaces, plugins }: PluginMarketplacePr
               <code>{plugin.version}</code>
             </div>
             <p>{plugin.description}</p>
-            <div className="timeline-meta">
+            <div className="plugin-meta">
               <span>{plugin.trust_level}</span>
               <span>{plugin.risk_level}</span>
             </div>

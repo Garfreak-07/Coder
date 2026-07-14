@@ -1,12 +1,12 @@
 use coder_core::{FinalReport, ReportStatus, RunId, RunStatus};
 
-pub(crate) struct WorkflowReportInput<'a> {
+pub(crate) struct TaskReportInput<'a> {
     pub(crate) run_id: &'a RunId,
-    pub(crate) workflow_id: &'a str,
+    pub(crate) task_profile_id: &'a str,
     pub(crate) request: &'a str,
     pub(crate) status: RunStatus,
     pub(crate) reason: Option<&'a str>,
-    pub(crate) dispatched_nodes: usize,
+    pub(crate) agent_runs: usize,
     pub(crate) checks: Vec<String>,
     pub(crate) evidence_refs: Vec<coder_core::EvidenceRef>,
     pub(crate) blockers: Vec<String>,
@@ -14,7 +14,7 @@ pub(crate) struct WorkflowReportInput<'a> {
     pub(crate) patch_refs: Vec<String>,
 }
 
-pub(crate) fn workflow_run_report(input: WorkflowReportInput<'_>) -> FinalReport {
+pub(crate) fn task_run_report(input: TaskReportInput<'_>) -> FinalReport {
     let report_status = match input.status {
         RunStatus::Completed => ReportStatus::Completed,
         RunStatus::Blocked => ReportStatus::Blocked,
@@ -24,10 +24,10 @@ pub(crate) fn workflow_run_report(input: WorkflowReportInput<'_>) -> FinalReport
     let mut report = FinalReport::with_status(
         report_status,
         format!(
-            "Workflow '{workflow_id}' finished with status '{}' after dispatching {} node(s).",
+            "Task profile '{task_profile_id}' finished with status '{}' after {} agent run(s).",
             run_status_str(input.status),
-            input.dispatched_nodes,
-            workflow_id = input.workflow_id
+            input.agent_runs,
+            task_profile_id = input.task_profile_id
         ),
     );
     report.checks = input.checks;
@@ -52,10 +52,10 @@ pub(crate) fn workflow_run_report(input: WorkflowReportInput<'_>) -> FinalReport
         .dedup_by(|left, right| left.kind == right.kind && left.reference == right.reference);
     report.evidence_refs = evidence_refs;
     let mut completed = report.checks.clone();
-    if completed.is_empty() && input.dispatched_nodes > 0 {
-        completed.push(format!("Dispatched {} node(s).", input.dispatched_nodes));
+    if completed.is_empty() && input.agent_runs > 0 {
+        completed.push(format!("Completed {} agent run(s).", input.agent_runs));
     }
-    report.refresh_planner_style_summary(Some(input.request), &completed);
+    report.refresh_evidence_summary(Some(input.request), &completed);
     report
 }
 

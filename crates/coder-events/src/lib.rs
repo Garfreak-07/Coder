@@ -4,8 +4,9 @@ use serde_json::{Map, Value};
 use time::OffsetDateTime;
 
 pub const DEFAULT_LARGE_PAYLOAD_PREVIEW_LIMIT: usize = 4096;
+pub const OUTPUT_PROTOCOL_VERSION: u16 = 1;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventRef {
     pub label: String,
     pub uri: String,
@@ -31,7 +32,7 @@ impl LargePayloadRef {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CoderEvent {
     pub event_id: String,
     pub run_id: RunId,
@@ -72,6 +73,128 @@ impl CoderEvent {
 
     pub fn from_jsonl_line(line: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str(line)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputPriority {
+    Critical,
+    High,
+    #[default]
+    Normal,
+    Low,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputStreamBehavior {
+    Queue,
+    Interrupt,
+    Replace,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpeechTokenKind {
+    Literal,
+    Special,
+    Flush,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OutputEvent {
+    SessionStarted,
+    TurnStarted,
+    TurnCompleted,
+    TurnCancelled {
+        reason: String,
+    },
+    TextStarted,
+    TextDelta {
+        delta: String,
+    },
+    TextCompleted {
+        text: String,
+    },
+    SpeechIntentStarted {
+        intent_id: String,
+        stream_id: String,
+        behavior: OutputStreamBehavior,
+        priority: i32,
+    },
+    SpeechIntentToken {
+        intent_id: String,
+        stream_id: String,
+        sequence: u64,
+        kind: SpeechTokenKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+    },
+    SpeechIntentEnded {
+        intent_id: String,
+        stream_id: String,
+    },
+    SpeechIntentCancelled {
+        intent_id: String,
+        stream_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    AvatarCue {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        emotion: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        intensity: Option<f32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        motion: Option<String>,
+    },
+    CodeEvent {
+        event: Box<CoderEvent>,
+    },
+    Error {
+        message: String,
+        recoverable: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutputEnvelope {
+    pub protocol_version: u16,
+    pub event_id: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    pub sequence: u64,
+    #[serde(with = "time::serde::rfc3339")]
+    pub timestamp: OffsetDateTime,
+    pub source: String,
+    #[serde(default)]
+    pub priority: OutputPriority,
+    pub output: OutputEvent,
+}
+
+impl OutputEnvelope {
+    pub fn new(
+        session_id: impl Into<String>,
+        turn_id: Option<String>,
+        sequence: u64,
+        source: impl Into<String>,
+        priority: OutputPriority,
+        output: OutputEvent,
+    ) -> Self {
+        Self {
+            protocol_version: OUTPUT_PROTOCOL_VERSION,
+            event_id: format!("out_{}", uuid::Uuid::new_v4()),
+            session_id: session_id.into(),
+            turn_id,
+            sequence,
+            timestamp: OffsetDateTime::now_utc(),
+            source: source.into(),
+            priority,
+            output,
+        }
     }
 }
 
@@ -283,5 +406,30 @@ mod tests {
         assert_eq!(payload.preview, "abc");
         assert!(payload.truncated);
         assert_eq!(payload.blob_ref, "blob://sha256/test");
+    }
+
+    #[test]
+    fn output_envelope_roundtrips_typed_speech_events() {
+        let output = OutputEnvelope::new(
+            "session-1",
+            Some("turn-1".to_owned()),
+            3,
+            "conversation",
+            OutputPriority::Normal,
+            OutputEvent::SpeechIntentToken {
+                intent_id: "intent-1".to_owned(),
+                stream_id: "stream-1".to_owned(),
+                sequence: 2,
+                kind: SpeechTokenKind::Literal,
+                value: Some("hello".to_owned()),
+            },
+        );
+
+        let value = serde_json::to_value(&output).unwrap();
+        assert_eq!(value["protocol_version"], OUTPUT_PROTOCOL_VERSION);
+        assert_eq!(value["output"]["type"], "speech_intent_token");
+        assert_eq!(value["output"]["kind"], "literal");
+        let decoded: OutputEnvelope = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, output);
     }
 }

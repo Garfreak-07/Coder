@@ -118,9 +118,7 @@ fn local_layout_creates_required_directories() {
     let root = temp_root();
     let store = RunStore::new(&root);
 
-    let layout = store.ensure_local_layout().unwrap();
-
-    assert_eq!(layout.root, root);
+    store.ensure_local_layout().unwrap();
     for dir in LOCAL_STORE_DIRS {
         assert!(root.join(dir).is_dir(), "{dir} should exist");
     }
@@ -137,7 +135,7 @@ fn session_records_append_jsonl_and_reject_secret_like_payloads() {
             "session_1",
             1,
             "session.created",
-            json!({"workflow_id": "planner-led", "mode": "discuss"}),
+            json!({"workflow_id": "code", "mode": "discuss"}),
         )
         .unwrap();
     store
@@ -177,7 +175,7 @@ fn session_record_next_sequence_uses_persistent_sidecar() {
         .append_session_record_next(
             "session_1",
             "session.created",
-            json!({"workflow_id": "planner-led"}),
+            json!({"workflow_id": "code"}),
         )
         .unwrap();
     let second = store
@@ -635,7 +633,6 @@ fn clear_disposable_caches_preserves_durable_store_data() {
 
     fs::write(root.join("repo-index").join("index.jsonl"), b"repo").unwrap();
     fs::write(root.join("tmp").join("scratch.txt"), b"tmp").unwrap();
-    fs::write(root.join("logs").join("server.log"), b"log").unwrap();
     store.write_blob(b"blob").unwrap();
     store
         .append_session_record("session-1", 1, "session.created", json!({}))
@@ -653,7 +650,6 @@ fn clear_disposable_caches_preserves_durable_store_data() {
     assert!(root.join("tmp").exists());
     assert!(!root.join("repo-index").join("index.jsonl").exists());
     assert!(!root.join("tmp").join("scratch.txt").exists());
-    assert!(root.join("logs").join("server.log").exists());
     assert!(root.join("sessions").join("session-1.jsonl").exists());
     assert_eq!(store.cache_bucket_usage("blobs").unwrap().entries, 1);
     let _ = fs::remove_dir_all(root);
@@ -740,46 +736,6 @@ fn compaction_circuit_state_persists_failures_and_resets_on_success() {
         .record_compaction_circuit_outcome("../escape", 3, false)
         .unwrap_err();
     assert!(matches!(invalid, StoreError::InvalidFileName(_)));
-    let _ = fs::remove_dir_all(root);
-}
-
-#[test]
-fn goal_state_json_roundtrips_deletes_and_rejects_unsafe_or_secret_like_state() {
-    let root = temp_root();
-    let store = RunStore::new(&root);
-    let state = json!({
-        "session_id": "session-1",
-        "objective": "Ship the goal runtime",
-        "status": "active",
-        "token_budget": 100,
-        "tokens_used": 5
-    });
-
-    assert!(store.read_goal_state_json("session-1").unwrap().is_none());
-    let reference = store.write_goal_state_json("session-1", &state).unwrap();
-    assert_eq!(reference, "goal://sessions/session-1.json");
-    assert_eq!(
-        store.read_goal_state_json("session-1").unwrap().unwrap(),
-        state
-    );
-    assert!(store.delete_goal_state("session-1").unwrap());
-    assert!(store.read_goal_state_json("session-1").unwrap().is_none());
-    assert!(!store.delete_goal_state("session-1").unwrap());
-
-    let invalid_write = store
-        .write_goal_state_json("../escape", &json!({"objective": "safe"}))
-        .unwrap_err();
-    let invalid_read = store.read_goal_state_json("../escape").unwrap_err();
-    let secret_write = store
-        .write_goal_state_json("session-secret", &json!({"objective": "api_key=abc"}))
-        .unwrap_err();
-
-    assert!(matches!(invalid_write, StoreError::InvalidFileName(_)));
-    assert!(matches!(invalid_read, StoreError::InvalidFileName(_)));
-    assert!(matches!(
-        secret_write,
-        StoreError::SessionRecordSecretLikeText
-    ));
     let _ = fs::remove_dir_all(root);
 }
 
@@ -1187,7 +1143,7 @@ fn evidence_report_does_not_fail_on_cancelled_command_event() {
 }
 
 #[test]
-fn evidence_report_includes_plan_context_from_run_started() {
+fn evidence_report_includes_task_context_from_run_started() {
     let root = temp_root();
     let store = RunStore::new(&root);
     let run_id = RunId::from_string("run-1");
@@ -1199,12 +1155,9 @@ fn evidence_report_includes_plan_context_from_run_started() {
                 1,
                 "run.started",
                 json!({
-                    "plan_context": {
-                        "original_user_request": "Update Planner loop",
-                        "plan_draft": {
-                            "goal": "Update Planner loop",
-                            "acceptance_criteria": ["final report cites plan context"]
-                        }
+                    "task_context": {
+                        "goal": "Update task runtime",
+                        "constraints": ["final report cites task context"]
                     }
                 }),
             ),
@@ -1216,12 +1169,12 @@ fn evidence_report_includes_plan_context_from_run_started() {
     assert!(report
         .checks
         .iter()
-        .any(|check| check == "plan_context: Update Planner loop"));
+        .any(|check| check == "task_context: Update task runtime"));
     assert!(!report
         .checks
         .iter()
-        .any(|check| check == "acceptance: final report cites plan context"));
-    assert!(report.summary.contains("Requested: Update Planner loop"));
+        .any(|check| check == "acceptance: final report cites task context"));
+    assert!(report.summary.contains("Requested: Update task runtime"));
     let _ = fs::remove_dir_all(root);
 }
 

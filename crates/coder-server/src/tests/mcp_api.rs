@@ -272,7 +272,7 @@ async fn model_executor_routes_frozen_tool_to_real_stdio_mcp_and_redacts_events(
             turn_context: coder_workflow::TurnContext {
                 run_id: Some(run_id.to_string()),
                 selected_tools: vec![provider_name],
-                start_work_authorized: true,
+                host_approved: true,
                 ..coder_workflow::TurnContext::default()
             },
         })

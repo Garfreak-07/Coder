@@ -13,10 +13,10 @@ use coder_core::RunId;
 use coder_store::{DurableJsonlPageOptions, RunStore};
 use serde_json::{json, Value};
 
-use crate::planner_runtime::validation_issue_summary;
 use crate::{
-    default_project_config, now_timestamp_string, stored_run_exists, ApiError, ApiState,
-    RunPermissionUpdatePersistence, RunPermissionUpdateRequest, RunPermissionUpdateResponse,
+    default_project_config, now_timestamp_string, stored_run_exists, validation_issue_summary,
+    ApiError, ApiState, RunPermissionUpdatePersistence, RunPermissionUpdateRequest,
+    RunPermissionUpdateResponse,
 };
 
 const PERMISSION_UPDATE_EVENT_KIND: &str = "permission.updated";

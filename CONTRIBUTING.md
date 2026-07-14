@@ -2,24 +2,29 @@
 
 Thanks for considering a contribution.
 
-Coder aims to stay small, safe, Planner-led, and token-efficient. Contributions should preserve that direction.
+Coder aims to stay small, safe, and token-efficient. Contributions should preserve that direction.
 
 ## Principles
 
-- Keep the ordinary workflow surface agent-only.
+- Keep Conversation tool-free and its context isolated from code tasks.
+- Add capability runtimes only for real execution boundaries; do not add
+  permanent role graphs.
 - Prefer simple deterministic runtime code over extra exposed nodes.
 - Keep prompts short and artifact-shaped.
 - Avoid broad filesystem writes.
 - Never require secrets in committed files.
-- Keep Planner as the only human communication and subjective decision point.
+- Keep permissions, budgets, cancellation, and evidence enforcement in the host.
 
 ## Before submitting changes
 
 Run:
 
 ```powershell
-python -m unittest discover -s tests
-python -m compileall src tests
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+npm --prefix frontend test
+npm --prefix frontend run build
 ```
 
 If you add behavior that can modify files, include:

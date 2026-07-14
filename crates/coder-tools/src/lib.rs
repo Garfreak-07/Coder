@@ -195,7 +195,7 @@ pub fn find_files(
     let root = canonical_repo_root(repo_root)?;
     let query = query
         .map(|item| item.trim().to_lowercase())
-        .filter(|item| !item.is_empty());
+        .filter(|item| !item.is_empty() && !is_match_all_file_query(item));
     let extension_filter = normalize_extensions(extensions);
     let mut files = Vec::new();
     let limit = max_results.clamp(1, 1000);
@@ -208,6 +208,10 @@ pub fn find_files(
         &mut files,
     )?;
     Ok(files)
+}
+
+fn is_match_all_file_query(query: &str) -> bool {
+    matches!(query, "*" | "*.*" | "**/*" | "**\\*")
 }
 
 pub fn search_text(

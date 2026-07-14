@@ -2,7 +2,13 @@ use super::*;
 
 #[tokio::test]
 async fn provider_settings_endpoints_store_secret_refs_without_returning_keys() {
-    let app = router(ApiState::new(RunStore::new(temp_root())));
+    let store_root = temp_root();
+    let store = RunStore::new(&store_root);
+    let credentials = crate::credential_store::tests::MemoryKeyringStore::default();
+    let app = router(ApiState::new_with_credential_store(
+        store.clone(),
+        std::sync::Arc::new(credentials.clone()),
+    ));
     let initial = app
         .clone()
         .oneshot(
@@ -54,7 +60,7 @@ async fn provider_settings_endpoints_store_secret_refs_without_returning_keys() 
     );
     assert_eq!(
         save_body["settings"]["api_keys"]["deepseek"]["source"],
-        "settings"
+        "keyring"
     );
     assert!(!save_body.to_string().contains("sk-secret-value"));
     assert_eq!(save_body["status"]["default_model"], "deepseek-chat");
@@ -82,9 +88,79 @@ async fn provider_settings_endpoints_store_secret_refs_without_returning_keys() 
         save_body["status"]["default_status"]["stream_idle_timeout_ms"],
         45_000
     );
+    assert_eq!(
+        credentials.value("deepseek").as_deref(),
+        Some("sk-secret-value")
+    );
+    let persisted = fs::read_to_string(store_root.join("settings").join("providers.json")).unwrap();
+    assert!(!persisted.contains("sk-secret-value"));
+    assert!(!persisted.contains("api_key"));
+
+    let missing_credential_app = router(ApiState::new_with_credential_store(
+        store.clone(),
+        std::sync::Arc::new(crate::credential_store::tests::MemoryKeyringStore::default()),
+    ));
+    let missing_credential = missing_credential_app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v3/providers/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let missing_credential_body = response_json(missing_credential).await;
+    assert_eq!(
+        missing_credential_body["settings"]["default_model"],
+        "deepseek-chat"
+    );
+    assert!(missing_credential_body["settings"]["api_keys"]["deepseek"].is_null());
+
+    let recovered_app = router(ApiState::new_with_credential_store(
+        store,
+        std::sync::Arc::new(credentials.clone()),
+    ));
+    let recovered = recovered_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v3/providers/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let recovered_body = response_json(recovered).await;
+    assert_eq!(recovered_body["settings"]["default_model"], "deepseek-chat");
+    assert_eq!(
+        recovered_body["settings"]["api_keys"]["deepseek"]["configured"],
+        true
+    );
+    assert_eq!(
+        recovered_body["settings"]["api_keys"]["deepseek"]["source"],
+        "keyring"
+    );
+
+    let update = post_json(
+        recovered_app.clone(),
+        "/api/v3/providers/settings",
+        json!({
+            "api_keys": {"deepseek": "updated-secret-value"}
+        }),
+    )
+    .await;
+    assert_eq!(update.status(), StatusCode::OK);
+    assert_eq!(
+        credentials.value("deepseek").as_deref(),
+        Some("updated-secret-value")
+    );
+    assert!(!response_json(update)
+        .await
+        .to_string()
+        .contains("updated-secret-value"));
 
     let test = post_json(
-        app.clone(),
+        recovered_app.clone(),
         "/api/v3/providers/test",
         json!({"provider": "deepseek", "mock": true}),
     )
@@ -99,10 +175,10 @@ async fn provider_settings_endpoints_store_secret_refs_without_returning_keys() 
     assert_eq!(test_body["test"]["mode"], "mock");
     assert_eq!(test_body["test"]["model"], "deepseek-chat");
     assert_eq!(test_body["test"]["endpoint"], Value::Null);
-    assert!(!test_body.to_string().contains("sk-secret-value"));
+    assert!(!test_body.to_string().contains("updated-secret-value"));
 
     let remove = post_json(
-        app,
+        recovered_app,
         "/api/v3/providers/settings",
         json!({
             "api_keys": {"deepseek": null}
@@ -111,6 +187,68 @@ async fn provider_settings_endpoints_store_secret_refs_without_returning_keys() 
     .await;
     let remove_body = response_json(remove).await;
     assert!(remove_body["settings"]["api_keys"]["deepseek"].is_null());
+    assert_eq!(credentials.value("deepseek"), None);
+    let _ = fs::remove_dir_all(store_root);
+}
+
+#[tokio::test]
+async fn provider_settings_keyring_failure_does_not_commit_or_persist() {
+    let store_root = temp_root();
+    let store = RunStore::new(&store_root);
+    let credentials = crate::credential_store::tests::MemoryKeyringStore::default();
+    credentials.fail_with("injected keyring failure");
+    let state =
+        ApiState::new_with_credential_store(store, std::sync::Arc::new(credentials.clone()));
+    let app = router(state.clone());
+
+    let response = post_json(
+        app,
+        "/api/v3/providers/settings",
+        json!({
+            "default_model": "should-not-commit",
+            "api_keys": {"deepseek": "must-not-leak"}
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = response_json(response).await;
+    assert!(!body.to_string().contains("must-not-leak"));
+    assert_eq!(
+        state.provider_settings.lock().unwrap().default_model,
+        "deepseek-v4-flash"
+    );
+    assert!(!store_root.join("settings").join("providers.json").exists());
+    credentials.clear_failure();
+    assert_eq!(credentials.value("deepseek"), None);
+    let _ = fs::remove_dir_all(store_root);
+}
+
+#[tokio::test]
+async fn provider_settings_store_failure_rolls_back_keyring_change() {
+    let store_root = temp_root();
+    fs::create_dir_all(&store_root).unwrap();
+    fs::write(store_root.join("settings"), "blocks settings directory").unwrap();
+    let credentials = crate::credential_store::tests::MemoryKeyringStore::default();
+    let state = ApiState::new_with_credential_store(
+        RunStore::new(&store_root),
+        std::sync::Arc::new(credentials.clone()),
+    );
+    let app = router(state.clone());
+
+    let response = post_json(
+        app,
+        "/api/v3/providers/settings",
+        json!({"api_keys": {"deepseek": "must-roll-back"}}),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!response_json(response)
+        .await
+        .to_string()
+        .contains("must-roll-back"));
+    assert_eq!(credentials.value("deepseek"), None);
+    assert!(state.provider_settings.lock().unwrap().api_keys.is_empty());
+    let _ = fs::remove_dir_all(store_root);
 }
 
 #[test]
@@ -376,171 +514,6 @@ fn provider_test_body_disables_deepseek_thinking_for_short_probe() {
 }
 
 #[test]
-fn planner_chat_body_bounds_tokens_and_disables_deepseek_thinking() {
-    let messages = vec![json!({
-        "role": "user",
-        "content": "challenge question"
-    })];
-    let deepseek = planner_chat_completion_body(
-        "deepseek",
-        "deepseek-v4-flash",
-        messages.clone(),
-        PLANNER_CHAT_MAX_OUTPUT_TOKENS_DEFAULT,
-        None,
-    );
-    assert_eq!(deepseek["model"], "deepseek-v4-flash");
-    assert_eq!(deepseek["temperature"], 0.2);
-    assert_eq!(deepseek["max_tokens"], 900);
-    assert_eq!(deepseek["thinking"]["type"], "disabled");
-    assert_eq!(deepseek["response_format"]["type"], "json_object");
-    assert_eq!(deepseek["messages"], json!(messages));
-
-    let generic = planner_chat_completion_body(
-        "openai-compatible",
-        "gpt-compatible-test",
-        Vec::new(),
-        1_200,
-        Some("max"),
-    );
-    assert_eq!(generic["model"], "gpt-compatible-test");
-    assert_eq!(generic["max_tokens"], 1_200);
-    assert_eq!(generic["reasoning_effort"], "xhigh");
-    assert!(generic.get("thinking").is_none());
-    assert!(generic.get("response_format").is_none());
-
-    let deepseek_effort = planner_chat_completion_body(
-        "deepseek",
-        "deepseek-v4-flash",
-        Vec::new(),
-        1_200,
-        Some("medium"),
-    );
-    assert_eq!(deepseek_effort["thinking"]["type"], "enabled");
-    assert!(deepseek_effort.get("reasoning_effort").is_none());
-}
-
-#[test]
-fn planner_chat_tool_body_uses_frozen_snapshot_without_conflicting_json_mode() {
-    let tools = json!([{
-        "type": "function",
-        "function": {
-            "name": "repo_read_file_range",
-            "parameters": {"type": "object"}
-        }
-    }]);
-    let body = planner_chat_completion_body_with_tools(
-        "deepseek",
-        "deepseek-chat",
-        Vec::new(),
-        900,
-        None,
-        tools.clone(),
-        true,
-    );
-
-    assert_eq!(body["tools"], tools);
-    assert_eq!(body["tool_choice"], "auto");
-    assert_eq!(body["parallel_tool_calls"], true);
-    assert!(body.get("response_format").is_none());
-    assert_eq!(body["thinking"]["type"], "disabled");
-}
-
-#[test]
-fn planner_provider_retention_policy_matches_claude_prompt_dump_bounds() {
-    assert_eq!(CLAUDE_DUMP_PROMPTS_MAX_CACHED_REQUESTS, 5);
-    assert_eq!(PLANNER_PROVIDER_RETAINED_FULL_REQUEST_BODIES, 1);
-    assert_eq!(PLANNER_PROVIDER_RESPONSE_MAX_BYTES, 2 * 1024 * 1024);
-    assert_eq!(
-        PLANNER_PROVIDER_STREAM_PENDING_MAX_BYTES,
-        PLANNER_PROVIDER_RESPONSE_MAX_BYTES
-    );
-}
-
-#[tokio::test]
-async fn planner_provider_rejects_oversized_non_streaming_response() {
-    let oversized_content = "x".repeat(PLANNER_PROVIDER_RESPONSE_MAX_BYTES + 1);
-    let provider_base_url = spawn_openai_compatible_test_server_with_payload(json!({
-        "choices": [
-            {
-                "message": {
-                    "content": oversized_content
-                }
-            }
-        ]
-    }))
-    .await;
-    let url = provider_chat_completions_endpoint(&provider_base_url);
-    let response = crate::outbound_http::HttpClientFactory::new(
-        crate::outbound_http::OutboundProxyRoute::Direct,
-    )
-    .builder(&url, crate::outbound_http::ClientRouteClass::ProviderApi)
-    .unwrap()
-    .build()
-    .unwrap()
-    .post(url)
-    .json(&json!({}))
-    .send()
-    .await
-    .unwrap();
-
-    let error = parse_live_planner_response_with_idle_timeout(
-        response,
-        &[],
-        planner_provider_trace(true, "unknown", false, None),
-        Duration::from_secs(90),
-    )
-    .await
-    .unwrap_err();
-
-    assert!(
-        error.contains("planner model response exceeded"),
-        "unexpected planner response error: {error}"
-    );
-    assert!(error.contains(&PLANNER_PROVIDER_RESPONSE_MAX_BYTES.to_string()));
-}
-
-#[tokio::test]
-async fn planner_provider_rejects_oversized_streaming_pending_line() {
-    let provider_base_url = spawn_raw_openai_compatible_test_server(
-        StatusCode::OK,
-        "text/event-stream",
-        format!(
-            "data: {}",
-            "x".repeat(PLANNER_PROVIDER_STREAM_PENDING_MAX_BYTES + 1)
-        ),
-    )
-    .await;
-    let url = provider_chat_completions_endpoint(&provider_base_url);
-    let response = crate::outbound_http::HttpClientFactory::new(
-        crate::outbound_http::OutboundProxyRoute::Direct,
-    )
-    .builder(&url, crate::outbound_http::ClientRouteClass::ProviderApi)
-    .unwrap()
-    .build()
-    .unwrap()
-    .post(url)
-    .json(&json!({}))
-    .send()
-    .await
-    .unwrap();
-
-    let error = parse_live_planner_response_with_idle_timeout(
-        response,
-        &[],
-        planner_provider_trace(true, "unknown", false, None),
-        Duration::from_secs(90),
-    )
-    .await
-    .unwrap_err();
-
-    assert!(
-        error.contains("planner streaming response pending line exceeded"),
-        "unexpected planner streaming error: {error}"
-    );
-    assert!(error.contains(&PLANNER_PROVIDER_STREAM_PENDING_MAX_BYTES.to_string()));
-}
-
-#[test]
 fn provider_settings_resolve_alias_models_without_overwriting_explicit_models_or_secrets() {
     let mut config = default_project_config();
     config.models.insert(
@@ -579,7 +552,7 @@ fn provider_settings_resolve_alias_models_without_overwriting_explicit_models_or
 
     apply_provider_settings_to_project_config(&mut config, &settings);
 
-    for model_id in ["default", "planner_chat", "economy_alias"] {
+    for model_id in ["default", "economy_alias"] {
         let model = config.models.get(model_id).unwrap();
         assert_eq!(model.provider, "deepseek", "{model_id}");
         assert_eq!(model.model, "deepseek-v4-flash", "{model_id}");

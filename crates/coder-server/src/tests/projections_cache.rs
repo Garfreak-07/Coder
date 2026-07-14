@@ -127,8 +127,7 @@ async fn timeline_projects_public_items_without_raw_payloads() {
             .unwrap();
     let mut report = FinalReport::completed("Done").with_check("cargo test: completed exit 0");
     report.next_steps.push("No next step recorded.".to_owned());
-    report
-        .refresh_planner_style_summary(Some("Update README.md"), &["Updated README.md".to_owned()]);
+    report.refresh_evidence_summary(Some("Update README.md"), &["Updated README.md".to_owned()]);
     store.write_report(&run_id, &report).unwrap();
     let app = router(ApiState::new(store));
 

@@ -89,7 +89,7 @@ export function PluginsPage({ onStatus }: PluginsPageProps) {
   }
 
   return (
-    <main className="plugins-page">
+    <main className="plugins-page" id="main-content">
       <PluginMarketplace marketplaces={marketplaces} plugins={plugins} />
       <InstalledPlugins
         plugins={installedPlugins}

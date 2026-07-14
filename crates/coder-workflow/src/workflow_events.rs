@@ -1,4 +1,3 @@
-use coder_config::WorkflowNodeSpec;
 use coder_core::RunId;
 use coder_events::CoderEvent;
 use coder_harness::HarnessRunEvent;
@@ -10,7 +9,8 @@ pub(super) struct BackendEventContext<'a> {
     pub(super) run_id: &'a RunId,
     pub(super) sequence: &'a mut u64,
     pub(super) round: u32,
-    pub(super) node: &'a WorkflowNodeSpec,
+    pub(super) task_profile_id: &'a str,
+    pub(super) harness_id: &'a str,
 }
 
 pub(super) struct BackendSelectionEvent<'a> {
@@ -28,7 +28,7 @@ pub(super) struct BackendBlockedEvent<'a> {
 
 pub(super) struct NodeOutcomeEvent<'a> {
     pub(super) round: u32,
-    pub(super) node: &'a WorkflowNodeSpec,
+    pub(super) task_profile_id: &'a str,
     pub(super) kind: &'a str,
     pub(super) status: &'a str,
     pub(super) reason: Option<&'a str>,
@@ -44,6 +44,9 @@ impl WorkflowRunner {
     ) -> Result<(), WorkflowError> {
         let event = CoderEvent::new(run_id.clone(), *sequence, kind, payload);
         self.store.append_event(run_id, &event)?;
+        if let Some(event_sink) = &self.event_sink {
+            event_sink(&event);
+        }
         *sequence += 1;
         Ok(())
     }
@@ -64,6 +67,9 @@ impl WorkflowRunner {
             event = event.with_ref(reference.label, reference.uri);
         }
         self.store.append_event(run_id, &event)?;
+        if let Some(event_sink) = &self.event_sink {
+            event_sink(&event);
+        }
         *sequence += 1;
         Ok(())
     }
@@ -75,9 +81,9 @@ impl WorkflowRunner {
     ) -> Result<(), WorkflowError> {
         let mut payload = json!({
             "round": context.round,
-            "node_id": context.node.id,
-            "agent_id": context.node.agent,
-            "harness_id": context.node.harness,
+            "node_id": context.task_profile_id,
+            "agent_id": context.task_profile_id,
+            "harness_id": context.harness_id,
             "backend": selection.backend,
             "requested_backend": selection.requested_backend,
             "status": "selected",
@@ -106,9 +112,9 @@ impl WorkflowRunner {
             "backend.blocked",
             json!({
                 "round": context.round,
-                "node_id": context.node.id,
-                "agent_id": context.node.agent,
-                "harness_id": context.node.harness,
+                "node_id": context.task_profile_id,
+                "agent_id": context.task_profile_id,
+                "harness_id": context.harness_id,
                 "backend": blocked.backend,
                 "status": "blocked",
                 "fallback_allowed": blocked.fallback_allowed,
@@ -130,7 +136,7 @@ impl WorkflowRunner {
     ) -> Result<(), WorkflowError> {
         let mut payload = json!({
             "round": outcome.round,
-            "node_id": outcome.node.id,
+            "node_id": outcome.task_profile_id,
             "status": outcome.status
         });
         if let Some(reason) = outcome.reason {
@@ -164,7 +170,6 @@ fn backend_blocked_summary(backend: &str, reason: &str, fallback_allowed: bool) 
 fn backend_display_name(backend: &str) -> &'static str {
     match backend {
         "native-rust" | "native_mock" | "mock" => "Native",
-        "planner-model" => "Planner",
         _ => "unknown",
     }
 }

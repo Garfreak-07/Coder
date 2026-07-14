@@ -466,12 +466,12 @@ mod tests {
     fn unspecified_hook_model_does_not_select_an_unrelated_config_entry() {
         let unrelated = ModelSpec {
             provider: "deepseek".to_owned(),
-            model: "planner-only".to_owned(),
+            model: "unrelated-model".to_owned(),
             base_url_env: None,
             api_key_env: None,
             capabilities: coder_config::ModelCapabilities::default(),
         };
-        let context = hook_context(BTreeMap::from([("planner_chat".to_owned(), unrelated)]));
+        let context = hook_context(BTreeMap::from([("unrelated".to_owned(), unrelated)]));
         let settings = ProviderSettings::default();
 
         let (model, source) = prompt_hook_model_spec(&context, &settings, None);

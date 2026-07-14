@@ -41,9 +41,8 @@ pub enum MemoryScope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentMemoryRole {
-    PlanningChat,
-    WorkflowSupervisor,
-    TaskExecution,
+    Conversation,
+    Task,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -51,21 +50,20 @@ pub enum AgentMemoryRole {
 pub enum MemoryPurpose {
     CodingKnowledge,
     ProjectRules,
-    PlanningContext,
+    ConversationContext,
     ExecutionContext,
     PersonaStyle,
     HistoricalEvidence,
-    WorkflowCheckpoint,
+    TaskCheckpoint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryAllowedContext {
     AssistantMessage,
-    PlannerTaskState,
-    PlannerOrder,
+    ConversationState,
+    TaskContext,
     ExecutionPrompt,
-    WorkflowSupervision,
     FinalReport,
 }
 
@@ -459,9 +457,9 @@ pub fn ensure_memory_write_allowed(
     record: &MemoryRecord,
 ) -> Result<(), MemoryError> {
     validate_memory_record_safety(record)?;
-    if is_long_term_scope(record.scope) && confirmed_by != AgentMemoryRole::PlanningChat {
+    if is_long_term_scope(record.scope) && confirmed_by != AgentMemoryRole::Conversation {
         return Err(MemoryError::PolicyViolation(
-            "only planning_chat can confirm long-term memory writes".to_owned(),
+            "only conversation can confirm long-term memory writes".to_owned(),
         ));
     }
     Ok(())
@@ -727,47 +725,37 @@ struct MemoryPolicy {
 impl MemoryPolicy {
     fn for_role(role: AgentMemoryRole) -> Self {
         match role {
-            AgentMemoryRole::PlanningChat => Self {
+            AgentMemoryRole::Conversation => Self {
                 allowed_purposes: BTreeSet::from([
                     MemoryPurpose::CodingKnowledge,
                     MemoryPurpose::ProjectRules,
-                    MemoryPurpose::PlanningContext,
+                    MemoryPurpose::ConversationContext,
                     MemoryPurpose::PersonaStyle,
                     MemoryPurpose::HistoricalEvidence,
-                    MemoryPurpose::WorkflowCheckpoint,
+                    MemoryPurpose::TaskCheckpoint,
                 ]),
                 allowed_contexts: BTreeSet::from([
                     MemoryAllowedContext::AssistantMessage,
-                    MemoryAllowedContext::PlannerTaskState,
+                    MemoryAllowedContext::ConversationState,
                 ]),
                 max_records: 12,
                 max_tokens: 4000,
             },
-            AgentMemoryRole::WorkflowSupervisor => Self {
+            AgentMemoryRole::Task => Self {
                 allowed_purposes: BTreeSet::from([
                     MemoryPurpose::CodingKnowledge,
                     MemoryPurpose::ProjectRules,
-                    MemoryPurpose::PlanningContext,
+                    MemoryPurpose::ExecutionContext,
                     MemoryPurpose::HistoricalEvidence,
-                    MemoryPurpose::WorkflowCheckpoint,
+                    MemoryPurpose::TaskCheckpoint,
                 ]),
                 allowed_contexts: BTreeSet::from([
-                    MemoryAllowedContext::WorkflowSupervision,
-                    MemoryAllowedContext::PlannerOrder,
+                    MemoryAllowedContext::ExecutionPrompt,
+                    MemoryAllowedContext::TaskContext,
                     MemoryAllowedContext::FinalReport,
                 ]),
                 max_records: 10,
                 max_tokens: 3000,
-            },
-            AgentMemoryRole::TaskExecution => Self {
-                allowed_purposes: BTreeSet::from([
-                    MemoryPurpose::CodingKnowledge,
-                    MemoryPurpose::ExecutionContext,
-                    MemoryPurpose::HistoricalEvidence,
-                ]),
-                allowed_contexts: BTreeSet::from([MemoryAllowedContext::ExecutionPrompt]),
-                max_records: 6,
-                max_tokens: 2000,
             },
         }
     }
@@ -848,7 +836,7 @@ fn chunk_allowed(
     {
         return false;
     }
-    if request.role == AgentMemoryRole::TaskExecution
+    if request.role == AgentMemoryRole::Task
         && (chunk.sensitivity == MemorySensitivity::Private
             || chunk.acl.sensitivity == MemorySensitivity::Private)
     {
@@ -1046,21 +1034,18 @@ fn validate_knowledge_chunk(chunk: &KnowledgeChunk) -> Result<(), MemoryError> {
         ));
     }
     if chunk.purpose.contains(&MemoryPurpose::PersonaStyle)
-        && (chunk.acl.allowed_agents != [AgentMemoryRole::PlanningChat]
+        && (chunk.acl.allowed_agents != [AgentMemoryRole::Conversation]
             || chunk.acl.allowed_contexts != [MemoryAllowedContext::AssistantMessage])
     {
         return Err(MemoryError::Validation(
-            "persona_style memory is only allowed for planning_chat assistant_message".to_owned(),
+            "persona_style memory is only allowed for conversation assistant_message".to_owned(),
         ));
     }
-    if chunk
-        .acl
-        .allowed_agents
-        .contains(&AgentMemoryRole::TaskExecution)
+    if chunk.acl.allowed_agents.contains(&AgentMemoryRole::Task)
         && chunk.purpose.contains(&MemoryPurpose::PersonaStyle)
     {
         return Err(MemoryError::Validation(
-            "task_execution cannot receive persona_style memory".to_owned(),
+            "task cannot receive persona_style memory".to_owned(),
         ));
     }
     reject_secret_like_text(&chunk.text)
@@ -1233,21 +1218,18 @@ fn contexts_for_agents(
         return vec![MemoryAllowedContext::AssistantMessage];
     }
     let mut contexts = Vec::new();
-    if agents.contains(&AgentMemoryRole::PlanningChat) {
+    if agents.contains(&AgentMemoryRole::Conversation) {
         contexts.extend([
             MemoryAllowedContext::AssistantMessage,
-            MemoryAllowedContext::PlannerTaskState,
+            MemoryAllowedContext::ConversationState,
         ]);
     }
-    if agents.contains(&AgentMemoryRole::WorkflowSupervisor) {
+    if agents.contains(&AgentMemoryRole::Task) {
         contexts.extend([
-            MemoryAllowedContext::WorkflowSupervision,
-            MemoryAllowedContext::PlannerOrder,
+            MemoryAllowedContext::ExecutionPrompt,
+            MemoryAllowedContext::TaskContext,
             MemoryAllowedContext::FinalReport,
         ]);
-    }
-    if agents.contains(&AgentMemoryRole::TaskExecution) {
-        contexts.push(MemoryAllowedContext::ExecutionPrompt);
     }
     let mut seen = BTreeSet::new();
     contexts
@@ -1439,21 +1421,20 @@ mod tests {
     }
 
     #[test]
-    fn only_planning_chat_can_confirm_long_term_memory_write() {
+    fn only_conversation_can_confirm_long_term_memory_write() {
         let record = fixture_record("Rust owns the control plane.");
 
-        let error =
-            ensure_memory_write_allowed(AgentMemoryRole::TaskExecution, &record).unwrap_err();
+        let error = ensure_memory_write_allowed(AgentMemoryRole::Task, &record).unwrap_err();
 
         assert!(error
             .to_string()
-            .contains("only planning_chat can confirm long-term memory writes"));
+            .contains("only conversation can confirm long-term memory writes"));
         let supervisor_error =
-            ensure_memory_write_allowed(AgentMemoryRole::WorkflowSupervisor, &record).unwrap_err();
+            ensure_memory_write_allowed(AgentMemoryRole::Task, &record).unwrap_err();
         assert!(supervisor_error
             .to_string()
-            .contains("only planning_chat can confirm long-term memory writes"));
-        assert!(ensure_memory_write_allowed(AgentMemoryRole::PlanningChat, &record).is_ok());
+            .contains("only conversation can confirm long-term memory writes"));
+        assert!(ensure_memory_write_allowed(AgentMemoryRole::Conversation, &record).is_ok());
     }
 
     #[test]
@@ -1476,14 +1457,14 @@ mod tests {
             &store,
             KnowledgeTextImportRequest {
                 title: "Project notes".to_owned(),
-                text: "# Architecture\n\nRust owns the control plane.\n\n## Workflow\n\nPlanner loops through executor.".to_owned(),
+                text: "# Architecture\n\nRust owns the control plane.\n\n## Tasks\n\nEach task runs through one agent.".to_owned(),
                 owner_scope: "project".to_owned(),
                 tags: vec!["rust".to_owned()],
                 allowed_agents: vec![
-                    AgentMemoryRole::PlanningChat,
-                    AgentMemoryRole::WorkflowSupervisor,
+                    AgentMemoryRole::Conversation,
+                    AgentMemoryRole::Task,
                 ],
-                purpose: vec![MemoryPurpose::ProjectRules, MemoryPurpose::PlanningContext],
+                purpose: vec![MemoryPurpose::ProjectRules, MemoryPurpose::ConversationContext],
                 allowed_contexts: Vec::new(),
                 sensitivity: MemorySensitivity::Project,
             },
@@ -1496,7 +1477,7 @@ mod tests {
         assert!(result.chunks[0]
             .acl
             .allowed_contexts
-            .contains(&MemoryAllowedContext::PlannerOrder));
+            .contains(&MemoryAllowedContext::TaskContext));
         assert_eq!(store.list_sources().unwrap().len(), 1);
         assert_eq!(store.list_chunks(None).unwrap().len(), 2);
         let _ = fs::remove_dir_all(root);
@@ -1513,8 +1494,8 @@ mod tests {
                 text: "api_key should never be stored".to_owned(),
                 owner_scope: "project".to_owned(),
                 tags: Vec::new(),
-                allowed_agents: vec![AgentMemoryRole::PlanningChat],
-                purpose: vec![MemoryPurpose::PlanningContext],
+                allowed_agents: vec![AgentMemoryRole::Conversation],
+                purpose: vec![MemoryPurpose::ConversationContext],
                 allowed_contexts: Vec::new(),
                 sensitivity: MemorySensitivity::Project,
             },
@@ -1536,9 +1517,9 @@ mod tests {
                 text: "Rust API v3 owns workflow evidence. src/lib.rs must be verified.".to_owned(),
                 owner_scope: "project".to_owned(),
                 tags: vec!["rust".to_owned()],
-                allowed_agents: vec![AgentMemoryRole::WorkflowSupervisor],
+                allowed_agents: vec![AgentMemoryRole::Task],
                 purpose: vec![MemoryPurpose::ProjectRules],
-                allowed_contexts: vec![MemoryAllowedContext::PlannerOrder],
+                allowed_contexts: vec![MemoryAllowedContext::TaskContext],
                 sensitivity: MemorySensitivity::Project,
             },
         )
@@ -1547,9 +1528,9 @@ mod tests {
         let allowed = retrieve_knowledge_hints(
             &result.chunks,
             &KnowledgeRetrievalRequest {
-                role: AgentMemoryRole::WorkflowSupervisor,
+                role: AgentMemoryRole::Task,
                 query: "workflow evidence".to_owned(),
-                requested_context: MemoryAllowedContext::PlannerOrder,
+                requested_context: MemoryAllowedContext::TaskContext,
                 backend: RetrievalBackendKind::Lexical,
                 scope: Some("project".to_owned()),
                 tags: vec!["rust".to_owned()],
@@ -1567,7 +1548,7 @@ mod tests {
         let denied = retrieve_knowledge_hints(
             &result.chunks,
             &KnowledgeRetrievalRequest {
-                role: AgentMemoryRole::TaskExecution,
+                role: AgentMemoryRole::Task,
                 query: "workflow evidence".to_owned(),
                 requested_context: MemoryAllowedContext::ExecutionPrompt,
                 backend: RetrievalBackendKind::Lexical,
@@ -1591,12 +1572,12 @@ mod tests {
             &store,
             KnowledgeTextImportRequest {
                 title: "Runtime notes".to_owned(),
-                text: "# Rust Runtime\n\nRust native backend owns workflow canvas orchestration and run events.\n\n# Recipe\n\nTomato sauce simmers with basil and pasta.".to_owned(),
+                text: "# Rust Runtime\n\nRust native backend owns task execution and run events.\n\n# Recipe\n\nTomato sauce simmers with basil and pasta.".to_owned(),
                 owner_scope: "project".to_owned(),
                 tags: vec!["rust".to_owned(), "runtime".to_owned()],
-                allowed_agents: vec![AgentMemoryRole::WorkflowSupervisor],
+                allowed_agents: vec![AgentMemoryRole::Task],
                 purpose: vec![MemoryPurpose::ProjectRules],
-                allowed_contexts: vec![MemoryAllowedContext::PlannerOrder],
+                allowed_contexts: vec![MemoryAllowedContext::TaskContext],
                 sensitivity: MemorySensitivity::Project,
             },
         )
@@ -1613,8 +1594,8 @@ mod tests {
         let lexical = retrieve_knowledge_hints(
             &result.chunks,
             &retrieval_request(
-                AgentMemoryRole::WorkflowSupervisor,
-                MemoryAllowedContext::PlannerOrder,
+                AgentMemoryRole::Task,
+                MemoryAllowedContext::TaskContext,
                 "native backend run events",
                 default_backend,
             ),
@@ -1623,8 +1604,8 @@ mod tests {
         let dense = retrieve_knowledge_hints(
             &result.chunks,
             &retrieval_request(
-                AgentMemoryRole::WorkflowSupervisor,
-                MemoryAllowedContext::PlannerOrder,
+                AgentMemoryRole::Task,
+                MemoryAllowedContext::TaskContext,
                 "native backend run events",
                 RetrievalBackendKind::DenseMock,
             ),
@@ -1633,8 +1614,8 @@ mod tests {
         let hybrid = retrieve_knowledge_hints(
             &result.chunks,
             &retrieval_request(
-                AgentMemoryRole::WorkflowSupervisor,
-                MemoryAllowedContext::PlannerOrder,
+                AgentMemoryRole::Task,
+                MemoryAllowedContext::TaskContext,
                 "native backend run events",
                 RetrievalBackendKind::Hybrid,
             ),
@@ -1649,8 +1630,8 @@ mod tests {
         let dense_again = retrieve_knowledge_hints(
             &result.chunks,
             &retrieval_request(
-                AgentMemoryRole::WorkflowSupervisor,
-                MemoryAllowedContext::PlannerOrder,
+                AgentMemoryRole::Task,
+                MemoryAllowedContext::TaskContext,
                 "native backend run events",
                 RetrievalBackendKind::DenseMock,
             ),
@@ -1672,7 +1653,7 @@ mod tests {
             tags: vec!["private".to_owned()],
             purpose: vec![MemoryPurpose::ExecutionContext],
             acl: MemoryAcl {
-                allowed_agents: vec![AgentMemoryRole::TaskExecution],
+                allowed_agents: vec![AgentMemoryRole::Task],
                 allowed_contexts: vec![MemoryAllowedContext::ExecutionPrompt],
                 sensitivity: MemorySensitivity::Private,
             },
@@ -1691,8 +1672,8 @@ mod tests {
             tags: vec!["secret".to_owned()],
             purpose: vec![MemoryPurpose::ProjectRules],
             acl: MemoryAcl {
-                allowed_agents: vec![AgentMemoryRole::WorkflowSupervisor],
-                allowed_contexts: vec![MemoryAllowedContext::PlannerOrder],
+                allowed_agents: vec![AgentMemoryRole::Task],
+                allowed_contexts: vec![MemoryAllowedContext::TaskContext],
                 sensitivity: MemorySensitivity::Secret,
             },
             sensitivity: MemorySensitivity::Secret,
@@ -1706,7 +1687,7 @@ mod tests {
         let executor_dense = retrieve_knowledge_hints(
             &chunks,
             &KnowledgeRetrievalRequest {
-                role: AgentMemoryRole::TaskExecution,
+                role: AgentMemoryRole::Task,
                 query: "private workflow notes".to_owned(),
                 requested_context: MemoryAllowedContext::ExecutionPrompt,
                 backend: RetrievalBackendKind::DenseMock,
@@ -1721,9 +1702,9 @@ mod tests {
         let supervisor_hybrid = retrieve_knowledge_hints(
             &chunks,
             &KnowledgeRetrievalRequest {
-                role: AgentMemoryRole::WorkflowSupervisor,
+                role: AgentMemoryRole::Task,
                 query: "api_key retrieval output".to_owned(),
-                requested_context: MemoryAllowedContext::PlannerOrder,
+                requested_context: MemoryAllowedContext::TaskContext,
                 backend: RetrievalBackendKind::Hybrid,
                 scope: Some("all".to_owned()),
                 tags: Vec::new(),

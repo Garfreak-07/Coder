@@ -1,8 +1,7 @@
-use axum::Json;
+use axum::{extract::State, Json};
 
-use crate::api_types::{
-    AgentRoleCard, AgentRoleCardsResponse, CapabilitiesResponse, HealthResponse,
-};
+use crate::api_types::{CapabilitiesResponse, HealthResponse};
+use crate::ApiState;
 
 pub(crate) async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
@@ -12,16 +11,16 @@ pub(crate) async fn health() -> Json<HealthResponse> {
     })
 }
 
-pub(crate) async fn capabilities() -> Json<CapabilitiesResponse> {
+pub(crate) async fn capabilities(State(state): State<ApiState>) -> Json<CapabilitiesResponse> {
     Json(CapabilitiesResponse {
         api_version: "v3",
-        workflow: vec![
-            "validate",
-            "preview",
-            "run_mock",
-            "library_in_memory",
-            "graph_semantics",
-        ],
+        capabilities: state
+            .session_host
+            .capability_ids()
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        tasks: vec!["preview", "run"],
         runs: vec![
             "list",
             "detail",
@@ -63,13 +62,7 @@ pub(crate) async fn capabilities() -> Json<CapabilitiesResponse> {
             "patch_apply",
             "apply_patch",
         ],
-        planner_chat: vec![
-            "sessions",
-            "turns",
-            "discuss_no_execute",
-            "work_preview",
-            "persistent_goals",
-        ],
+        conversations: vec!["sessions", "turns", "plain_chat"],
         settings: vec![
             "provider_settings",
             "provider_status",
@@ -104,45 +97,6 @@ pub(crate) async fn capabilities() -> Json<CapabilitiesResponse> {
             "knowledge_sources_list",
             "knowledge_chunks_list",
             "knowledge_lexical_retrieve",
-        ],
-    })
-}
-
-pub(crate) async fn agent_role_cards() -> Json<AgentRoleCardsResponse> {
-    Json(AgentRoleCardsResponse {
-        role_cards: vec![
-            AgentRoleCard {
-                id: "planner",
-                label: "Planner",
-                archetype: "planner",
-                role: "planner",
-                engine_id: "planner-engine",
-                default_capabilities: vec![
-                    "negotiate_contract",
-                    "make_plan",
-                    "judge_completion",
-                    "judge_risk",
-                    "make_next_decision",
-                    "round_summarize",
-                ],
-                description: "Plans work, decides readiness, and owns final reports.",
-                default_output_contract: "planner_conversation",
-            },
-            AgentRoleCard {
-                id: "executor",
-                label: "Executor",
-                archetype: "executor",
-                role: "executor",
-                engine_id: "code-worker-engine",
-                default_capabilities: vec![
-                    "follow_planner_order",
-                    "modify_files",
-                    "optional_check_command",
-                    "return_execution_result",
-                ],
-                description: "Executes planner-approved work and returns evidence.",
-                default_output_contract: "execution_result",
-            },
         ],
     })
 }

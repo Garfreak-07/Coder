@@ -749,7 +749,7 @@ pub fn permission_policy_explanation(policy: &PermissionPolicy) -> Value {
         "mode": policy.mode,
         "mode_semantics": {
             "source": "config.permissions.mode",
-            "note": "Coder keeps explicit harness permission fields authoritative; mode is exposed for UI/planner reasoning and future interactive rule updates."
+            "note": "Coder keeps explicit harness permission fields authoritative; mode is exposed for UI and future interactive rule updates."
         },
         "rule_precedence": ["deny", "ask", "allow"],
         "rule_source_precedence": [

@@ -48,17 +48,9 @@ Binary and untracked file handling:
 - If a user edits, adds, removes, or otherwise changes files after the review
   diff is recorded, Undo refuses and keeps the current working tree intact.
 
-Frontend rendering lives in:
+Review and undo are exposed as backend API capabilities. API clients can build
+their own review surface from the changeset and diff endpoints.
 
-```text
-frontend/src/features/review-changes/ReviewChangesCard.tsx
-frontend/src/features/review-changes/changeSetTypes.ts
-```
-
-Future work can add run-start snapshots and checkpoint restore fallback, but
-the current implementation already provides explicit diff review, accept, and
-safe reverse-patch undo.
-
-Review/undo is part of the explicit Start Work path. Planner Chat remains
+Review/undo is part of the Task result path. Conversation remains
 side-effect free; chat turns never create reviewable changes. Accept records
 user approval of a changeset and does not remove timeline or evidence records.

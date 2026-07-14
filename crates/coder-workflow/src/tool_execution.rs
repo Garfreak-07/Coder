@@ -2,7 +2,6 @@ use std::env;
 
 pub const DEFAULT_MAX_TOOL_USE_CONCURRENCY: usize = 10;
 pub const CODER_MAX_TOOL_USE_CONCURRENCY_ENV: &str = "CODER_MAX_TOOL_USE_CONCURRENCY";
-pub const CLAUDE_MAX_TOOL_USE_CONCURRENCY_ENV: &str = "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolConcurrency {
@@ -41,9 +40,7 @@ pub struct ToolExecutionBatch {
 }
 
 pub fn max_tool_use_concurrency_from_env() -> usize {
-    let configured = env::var(CODER_MAX_TOOL_USE_CONCURRENCY_ENV)
-        .ok()
-        .or_else(|| env::var(CLAUDE_MAX_TOOL_USE_CONCURRENCY_ENV).ok());
+    let configured = env::var(CODER_MAX_TOOL_USE_CONCURRENCY_ENV).ok();
     parse_max_tool_use_concurrency(configured.as_deref())
 }
 
@@ -76,7 +73,6 @@ pub fn partition_tool_steps(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum StreamingToolStatus {
     Queued,
     Executing,
@@ -85,9 +81,7 @@ pub enum StreamingToolStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum StreamingToolUpdateKind {
-    Progress,
     Result,
     SyntheticError,
 }
@@ -95,7 +89,6 @@ pub enum StreamingToolUpdateKind {
 impl StreamingToolUpdateKind {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Progress => "progress",
             Self::Result => "result",
             Self::SyntheticError => "synthetic_error",
         }
@@ -103,7 +96,6 @@ impl StreamingToolUpdateKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct StreamingToolUpdate {
     pub tool_id: String,
     pub tool_name: String,
@@ -117,7 +109,6 @@ struct TrackedStreamingTool {
     name: String,
     concurrency: ToolConcurrency,
     status: StreamingToolStatus,
-    pending_progress: Vec<String>,
     results: Vec<(StreamingToolUpdateKind, String)>,
 }
 
@@ -128,28 +119,15 @@ impl TrackedStreamingTool {
             name: name.into(),
             concurrency,
             status: StreamingToolStatus::Queued,
-            pending_progress: Vec::new(),
             results: Vec::new(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum StreamingToolSyntheticErrorReason {
-    SiblingError,
-    UserInterrupted,
-    StreamingFallback,
-    MissingToolResult,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct StreamingToolExecutorState {
     tools: Vec<TrackedStreamingTool>,
     max_concurrent_tools: usize,
-    discarded: bool,
-    sibling_error: Option<String>,
 }
 
 impl Default for StreamingToolExecutorState {
@@ -157,27 +135,16 @@ impl Default for StreamingToolExecutorState {
         Self {
             tools: Vec::new(),
             max_concurrent_tools: usize::MAX,
-            discarded: false,
-            sibling_error: None,
         }
     }
 }
 
-#[allow(dead_code)]
 impl StreamingToolExecutorState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn with_max_concurrency(max_concurrent_tools: usize) -> Self {
         Self {
             max_concurrent_tools: max_concurrent_tools.max(1),
             ..Self::default()
         }
-    }
-
-    pub fn tracked_tool_count(&self) -> usize {
-        self.tools.len()
     }
 
     pub fn add_tool(
@@ -186,21 +153,9 @@ impl StreamingToolExecutorState {
         name: impl Into<String>,
         concurrency: ToolConcurrency,
     ) -> Vec<String> {
-        if self.discarded {
-            return Vec::new();
-        }
         self.tools
             .push(TrackedStreamingTool::new(id, name, concurrency));
         self.start_ready_tools()
-    }
-
-    pub fn push_progress(&mut self, tool_id: &str, content: impl Into<String>) {
-        if self.discarded {
-            return;
-        }
-        if let Some(tool) = self.tool_mut(tool_id) {
-            tool.pending_progress.push(content.into());
-        }
     }
 
     pub fn complete_tool(
@@ -210,9 +165,6 @@ impl StreamingToolExecutorState {
         is_error: bool,
         cancels_siblings: bool,
     ) -> Vec<String> {
-        if self.discarded {
-            return Vec::new();
-        }
         let Some(index) = self.tool_index(tool_id) else {
             return Vec::new();
         };
@@ -226,7 +178,6 @@ impl StreamingToolExecutorState {
 
         if is_error && cancels_siblings {
             let description = format!("{}({})", self.tools[index].name, self.tools[index].id);
-            self.sibling_error = Some(description.clone());
             for (candidate_index, tool) in self.tools.iter_mut().enumerate() {
                 if candidate_index == index || tool.status == StreamingToolStatus::Yielded {
                     continue;
@@ -249,10 +200,7 @@ impl StreamingToolExecutorState {
         self.start_ready_tools()
     }
 
-    pub fn cancel_unfinished(&mut self, reason: StreamingToolSyntheticErrorReason) {
-        if self.discarded {
-            return;
-        }
+    pub fn cancel_unfinished(&mut self) {
         for tool in &mut self.tools {
             if matches!(
                 tool.status,
@@ -262,28 +210,14 @@ impl StreamingToolExecutorState {
                 tool.results.clear();
                 tool.results.push((
                     StreamingToolUpdateKind::SyntheticError,
-                    synthetic_error_message(reason, self.sibling_error.as_deref()),
+                    "Model response ended before this tool produced a result".to_owned(),
                 ));
             }
         }
     }
 
     pub fn yield_available(&mut self) -> Vec<StreamingToolUpdate> {
-        if self.discarded {
-            return Vec::new();
-        }
         let mut updates = Vec::new();
-        for tool in &mut self.tools {
-            for progress in tool.pending_progress.drain(..) {
-                updates.push(StreamingToolUpdate {
-                    tool_id: tool.id.clone(),
-                    tool_name: tool.name.clone(),
-                    kind: StreamingToolUpdateKind::Progress,
-                    content: progress,
-                });
-            }
-        }
-
         for tool in &mut self.tools {
             if tool.status == StreamingToolStatus::Yielded {
                 continue;
@@ -303,12 +237,6 @@ impl StreamingToolExecutorState {
             }
         }
         updates
-    }
-
-    pub fn discard(&mut self) {
-        self.discarded = true;
-        self.sibling_error = None;
-        self.tools.clear();
     }
 
     fn start_ready_tools(&mut self) -> Vec<String> {
@@ -344,28 +272,6 @@ impl StreamingToolExecutorState {
 
     fn tool_index(&self, tool_id: &str) -> Option<usize> {
         self.tools.iter().position(|tool| tool.id == tool_id)
-    }
-
-    fn tool_mut(&mut self, tool_id: &str) -> Option<&mut TrackedStreamingTool> {
-        self.tools.iter_mut().find(|tool| tool.id == tool_id)
-    }
-}
-
-fn synthetic_error_message(
-    reason: StreamingToolSyntheticErrorReason,
-    sibling_error: Option<&str>,
-) -> String {
-    match reason {
-        StreamingToolSyntheticErrorReason::SiblingError => sibling_error
-            .map(|description| format!("Cancelled: parallel tool call {description} errored"))
-            .unwrap_or_else(|| "Cancelled: parallel tool call errored".to_owned()),
-        StreamingToolSyntheticErrorReason::UserInterrupted => "User rejected tool use".to_owned(),
-        StreamingToolSyntheticErrorReason::StreamingFallback => {
-            "Streaming fallback - tool execution discarded".to_owned()
-        }
-        StreamingToolSyntheticErrorReason::MissingToolResult => {
-            "Model response ended before this tool produced a result".to_owned()
-        }
     }
 }
 
@@ -407,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn max_tool_use_concurrency_uses_claude_default_and_positive_override() {
+    fn max_tool_use_concurrency_uses_default_and_positive_override() {
         assert_eq!(parse_max_tool_use_concurrency(None), 10);
         assert_eq!(parse_max_tool_use_concurrency(Some("")), 10);
         assert_eq!(parse_max_tool_use_concurrency(Some("0")), 10);
@@ -416,7 +322,7 @@ mod tests {
 
     #[test]
     fn streaming_executor_starts_safe_tools_together_and_honors_exclusive_barrier() {
-        let mut state = StreamingToolExecutorState::new();
+        let mut state = StreamingToolExecutorState::with_max_concurrency(usize::MAX);
 
         assert_eq!(
             state.add_tool("read-1", "read_file", ToolConcurrency::ConcurrentSafe),
@@ -468,32 +374,8 @@ mod tests {
     }
 
     #[test]
-    fn streaming_executor_yields_progress_immediately_and_completed_safe_results() {
-        let mut state = StreamingToolExecutorState::new();
-        state.add_tool("read-1", "read_file", ToolConcurrency::ConcurrentSafe);
-        state.add_tool("read-2", "git_diff", ToolConcurrency::ConcurrentSafe);
-        state.push_progress("read-1", "halfway");
-        state.complete_tool("read-2", "diff done", false, false);
-
-        let updates = state.yield_available();
-
-        assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].tool_id, "read-1");
-        assert_eq!(updates[0].kind, StreamingToolUpdateKind::Progress);
-
-        state.complete_tool("read-1", "read done", false, false);
-        let updates = state.yield_available();
-
-        assert_eq!(updates.len(), 2);
-        assert_eq!(updates[0].tool_id, "read-1");
-        assert_eq!(updates[0].kind, StreamingToolUpdateKind::Result);
-        assert_eq!(updates[1].tool_id, "read-2");
-        assert_eq!(updates[1].kind, StreamingToolUpdateKind::Result);
-    }
-
-    #[test]
     fn streaming_executor_shell_error_cancels_queued_and_running_siblings() {
-        let mut state = StreamingToolExecutorState::new();
+        let mut state = StreamingToolExecutorState::with_max_concurrency(usize::MAX);
         state.add_tool("bash-1", "bash", ToolConcurrency::ConcurrentSafe);
         state.add_tool("read-1", "read_file", ToolConcurrency::ConcurrentSafe);
         state.add_tool("read-2", "repo_search", ToolConcurrency::ConcurrentSafe);
@@ -511,28 +393,12 @@ mod tests {
     }
 
     #[test]
-    fn streaming_executor_discard_releases_tracked_tools_and_suppresses_updates() {
-        let mut state = StreamingToolExecutorState::new();
-        state.add_tool("read-1", "read_file", ToolConcurrency::ConcurrentSafe);
-        state.push_progress("read-1", "progress");
-
-        state.discard();
-
-        assert_eq!(state.tracked_tool_count(), 0);
-        assert!(state.yield_available().is_empty());
-        assert!(state
-            .add_tool("read-2", "git_diff", ToolConcurrency::ConcurrentSafe)
-            .is_empty());
-        assert_eq!(state.tracked_tool_count(), 0);
-    }
-
-    #[test]
     fn streaming_executor_can_synthesize_missing_results_before_followup() {
-        let mut state = StreamingToolExecutorState::new();
+        let mut state = StreamingToolExecutorState::with_max_concurrency(usize::MAX);
         state.add_tool("tool-1", "repo_search", ToolConcurrency::ConcurrentSafe);
         state.add_tool("tool-2", "read_file", ToolConcurrency::ConcurrentSafe);
 
-        state.cancel_unfinished(StreamingToolSyntheticErrorReason::MissingToolResult);
+        state.cancel_unfinished();
 
         let updates = state.yield_available();
         assert_eq!(updates.len(), 2);

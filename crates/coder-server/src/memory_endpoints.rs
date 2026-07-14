@@ -25,9 +25,9 @@ pub(crate) async fn load_project_memory(
     State(state): State<ApiState>,
     Json(request): Json<ProjectMemoryLoadRequest>,
 ) -> Result<Json<ProjectMemoryLoadResponse>, ApiError> {
-    if request.requested_by_role != AgentMemoryRole::PlanningChat {
+    if request.requested_by_role != AgentMemoryRole::Conversation {
         return Err(ApiError::forbidden(
-            "only planning_chat can read project long-term memory",
+            "only conversation can read project long-term memory",
         ));
     }
     let memory_path = resolve_repo_relative_path(&request.repo_root, &request.memory_path)?;
@@ -64,9 +64,9 @@ pub(crate) async fn propose_project_memory_write(
             "project memory write proposals require scope 'project'",
         ));
     }
-    if request.proposed_by_role != AgentMemoryRole::PlanningChat {
+    if request.proposed_by_role != AgentMemoryRole::Conversation {
         return Err(ApiError::forbidden(
-            "only planning_chat can propose project memory writes",
+            "only conversation can propose project memory writes",
         ));
     }
     let run_id = RunId::from_string(request.run_id);

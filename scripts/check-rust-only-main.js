@@ -69,11 +69,9 @@ assertNoPatterns(walkFiles(rel("frontend")), [
 
 assertNoPatterns([
   rel("frontend", "src", "App.tsx"),
-  rel("frontend", "src", "components", "AppSidebar.tsx"),
-  rel("frontend", "src", "features", "planner-chat", "PlannerChatPage.tsx")
+  rel("frontend", "src", "components", "AppSidebar.tsx")
 ], [
   "Draft Plan",
-  "plannerDraft",
   "Ready card",
   "Discuss/Work",
   "Discuss mode",

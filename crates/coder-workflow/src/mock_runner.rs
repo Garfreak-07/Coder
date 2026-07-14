@@ -1,4 +1,4 @@
-use coder_config::{validate_project_config, ProjectConfig, WorkflowSpec};
+use coder_config::{validate_project_config, ProjectConfig, TaskProfile};
 use coder_core::{FinalReport, RunId, RunRequest, RunState, RunStatus, WorkflowId};
 use coder_events::CoderEvent;
 use coder_store::RunStore;
@@ -32,7 +32,7 @@ impl<'a> MockWorkflowRunner<'a> {
         }
         let workflow = self
             .config
-            .workflows
+            .task_profiles
             .get(workflow_id)
             .ok_or_else(|| WorkflowError::WorkflowNotFound(workflow_id.to_owned()))?;
 
@@ -52,71 +52,37 @@ impl<'a> MockWorkflowRunner<'a> {
             sequence,
             "run.started",
             json!({
-                "workflow_id": workflow_id,
-                "task": task,
-                "max_rounds": workflow.max_rounds
+                "task_profile_id": workflow_id,
+                "task": task
             }),
         )?;
         sequence += 1;
 
-        let requested_rounds = options.requested_rounds.max(1);
-        let rounds_to_run = requested_rounds.min(workflow.max_rounds);
-        let max_rounds_reached = requested_rounds > workflow.max_rounds;
-
-        for round in 1..=rounds_to_run {
-            self.emit(&run_id, sequence, "round.started", json!({"round": round}))?;
-            sequence += 1;
-
-            for node in &workflow.nodes {
-                self.emit(
-                    &run_id,
-                    sequence,
-                    "node.started",
-                    json!({
-                        "round": round,
-                        "node_id": node.id,
-                        "agent": node.agent,
-                        "harness": node.harness
-                    }),
-                )?;
-                sequence += 1;
-                self.emit(
-                    &run_id,
-                    sequence,
-                    "node.completed",
-                    json!({
-                        "round": round,
-                        "node_id": node.id,
-                        "status": "completed",
-                        "mock": true
-                    }),
-                )?;
-                sequence += 1;
-            }
-
-            self.emit(
-                &run_id,
-                sequence,
-                "round.completed",
-                json!({"round": round, "status": "completed"}),
-            )?;
-            sequence += 1;
-        }
-
-        let outcome = if max_rounds_reached {
-            MockRunOutcome::Blocked
-        } else {
-            options.outcome
-        };
-        let report = report_for_mock_run(
+        self.emit(
             &run_id,
-            workflow_id,
-            workflow,
-            task,
-            rounds_to_run,
-            outcome,
-            max_rounds_reached,
-        );
+            sequence,
+            "agent.started",
+            json!({
+                "agent_id": workflow_id,
+                "harness_id": workflow.harness,
+                "mock": true
+            }),
+        )?;
+        sequence += 1;
+        self.emit(
+            &run_id,
+            sequence,
+            "agent.completed",
+            json!({
+                "agent_id": workflow_id,
+                "status": "completed",
+                "mock": true
+            }),
+        )?;
+        sequence += 1;
+
+        let outcome = options.outcome;
+        let report = report_for_mock_run(&run_id, workflow_id, workflow, task, outcome);
         let report_ref = self.store.write_report(&run_id, &report)?;
         self.emit(
             &run_id,
@@ -136,8 +102,7 @@ impl<'a> MockWorkflowRunner<'a> {
             terminal_event,
             json!({
                 "status": outcome.as_status_str(),
-                "report_ref": report_ref,
-                "max_rounds_reached": max_rounds_reached
+                "report_ref": report_ref
             }),
         )?;
 
@@ -193,14 +158,12 @@ impl MockRunOutcome {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MockRunOptions {
     pub outcome: MockRunOutcome,
-    pub requested_rounds: u32,
 }
 
 impl Default for MockRunOptions {
     fn default() -> Self {
         Self {
             outcome: MockRunOutcome::Completed,
-            requested_rounds: 1,
         }
     }
 }
@@ -215,26 +178,19 @@ pub struct MockRunOutput {
 fn report_for_mock_run(
     run_id: &RunId,
     workflow_id: &str,
-    workflow: &WorkflowSpec,
+    workflow: &TaskProfile,
     task: &str,
-    rounds: u32,
     outcome: MockRunOutcome,
-    max_rounds_reached: bool,
 ) -> FinalReport {
-    let visited_nodes = workflow.nodes.len() as u32 * rounds;
+    let visited_nodes = usize::from(!workflow.harness.is_empty());
     let summary = format!(
-        "Mock workflow '{workflow_id}' accepted task '{task}' and visited {visited_nodes} node(s) across {rounds} round(s)."
+        "Mock task profile '{workflow_id}' accepted task '{task}' and ran {visited_nodes} agent(s)."
     );
     let mut report = match outcome {
         MockRunOutcome::Completed => FinalReport::completed(summary),
-        MockRunOutcome::Blocked => FinalReport::blocked(
-            summary,
-            if max_rounds_reached {
-                "max_rounds reached before a terminal completed outcome"
-            } else {
-                "mock run requested blocked outcome"
-            },
-        ),
+        MockRunOutcome::Blocked => {
+            FinalReport::blocked(summary, "mock run requested blocked outcome")
+        }
         MockRunOutcome::Failed => FinalReport::failed(summary, "mock run requested failed outcome"),
     };
     report = report
@@ -243,11 +199,6 @@ fn report_for_mock_run(
             "event_log",
             format!("eventlog://runs/{}/events.jsonl", run_id.as_str()),
         );
-    report.refresh_planner_style_summary(
-        Some(task),
-        &[format!(
-            "Visited {visited_nodes} node(s) across {rounds} round(s)."
-        )],
-    );
+    report.refresh_evidence_summary(Some(task), &[format!("Ran {visited_nodes} task agent(s).")]);
     report
 }

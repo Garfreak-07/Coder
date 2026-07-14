@@ -375,7 +375,7 @@ fn build_current_change_set(
     let command_checks = report
         .checks
         .iter()
-        .filter(|check| !check.starts_with("plan_context:") && !check.starts_with("acceptance:"))
+        .filter(|check| !check.starts_with("task_context:") && !check.starts_with("acceptance:"))
         .map(|check| CommandCheckSummary {
             command: check.clone(),
             status: if check.contains("failed") {

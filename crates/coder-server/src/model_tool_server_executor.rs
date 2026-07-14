@@ -15,7 +15,6 @@ use std::{
 use crate::model_tool_async_attachments::{
     drain_async_hook_response_attachments, drain_async_rewake_notification_attachments,
     drain_idle_queue_async_rewake_notification_attachments,
-    drain_planner_user_guidance_attachments,
 };
 use crate::model_tool_dispatch::ModelMcpToolRoute;
 use crate::model_tool_execute_pipeline::execute_model_tool_response_with_turn_context_and_route;
@@ -131,7 +130,6 @@ impl ModelToolExecutor for ServerModelToolExecutor {
         let mut all_attachments = skill_context_modifier_attachments(host_context, results);
         let mut async_rewake_delivered = false;
         for run_id in &run_ids {
-            all_attachments.extend(drain_planner_user_guidance_attachments(&self.state, run_id));
             all_attachments.extend(drain_async_hook_response_attachments(
                 &self.state.store,
                 run_id,
@@ -225,7 +223,7 @@ fn apply_turn_context_to_tool_input(
     }
     input.insert(
         "approved".to_owned(),
-        Value::Bool(turn_context.start_work_authorized),
+        Value::Bool(turn_context.host_approved),
     );
     if canonical_builtin_tool_name(tool_name) == Some("command_run") {
         input.insert("sandbox".to_owned(), Value::Bool(false));
@@ -271,7 +269,7 @@ mod tests {
                 repo_root: Some("F:/repo".to_owned()),
                 harness_id: Some("host-harness".to_owned()),
                 agent_id: Some("host-agent".to_owned()),
-                start_work_authorized: true,
+                host_approved: true,
                 ..TurnContext::default()
             },
             "command_run",
@@ -328,7 +326,7 @@ mod tests {
             }),
             turn_context: TurnContext {
                 selected_tools: vec![provider_name.clone()],
-                start_work_authorized: authorized,
+                host_approved: authorized,
                 ..TurnContext::default()
             },
         };

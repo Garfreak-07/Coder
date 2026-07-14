@@ -366,7 +366,7 @@ async fn model_tool_execute_skill_records_invoked_skill_event() {
                 1,
                 "run.started",
                 json!({
-                    "workflow_id": "planner-led",
+                    "workflow_id": "code",
                     "repo_root": ""
                 }),
             ),
@@ -488,7 +488,7 @@ Session: ${CLAUDE_SESSION_ID}.
                 1,
                 "run.started",
                 json!({
-                    "workflow_id": "planner-led",
+                    "workflow_id": "code",
                     "repo_root": ""
                 }),
             ),
@@ -1286,19 +1286,11 @@ This should not be inlined into the parent model turn.
     let store = RunStore::new(&store_root);
     let run_id = RunId::from_string("run-fork-skill");
     let mut config = default_project_config();
-    config.agents.insert(
-        "general-purpose".to_owned(),
-        coder_config::AgentSpec {
-            role: "executor".to_owned(),
-            model: "default".to_owned(),
-            system: "General purpose skill subagent.".to_owned(),
-            tools: Default::default(),
-            disallowed_tools: Default::default(),
-            memory: Default::default(),
-            output_contract: "implementation_report".to_owned(),
-            runtime: Default::default(),
-        },
-    );
+    let mut general_profile = config.task_profiles["code"].clone();
+    general_profile.instructions = "General purpose skill subagent.".to_owned();
+    config
+        .task_profiles
+        .insert("general-purpose".to_owned(), general_profile);
     let harness = config.harnesses.get_mut("native-code-edit").unwrap();
     harness.backend = "mock".to_owned();
     harness.tools = vec!["Skill".to_owned(), "agent_subagent".to_owned()];

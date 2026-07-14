@@ -22,9 +22,10 @@ pub use permissions::{
     PermissionSettingsUpdateApplication, PermissionUpdate, PermissionUpdateApplication,
     PermissionUpdateDestination, PERMISSION_FIELDS,
 };
-pub use validation::{validate_project_config, validate_workflow};
+pub use validation::{validate_project_config, validate_task_profile};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProjectConfig {
     pub version: u16,
     #[serde(default, alias = "disableAllHooks")]
@@ -38,25 +39,9 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub models: BTreeMap<String, ModelSpec>,
     #[serde(default)]
-    pub agents: BTreeMap<String, AgentSpec>,
-    #[serde(default)]
     pub harnesses: BTreeMap<String, HarnessSpec>,
     #[serde(default)]
-    pub surface_bindings: SurfaceBindings,
-    #[serde(default)]
-    pub workflows: BTreeMap<String, WorkflowSpec>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct SurfaceBindings {
-    #[serde(default)]
-    pub planner_chat: Option<AgentHarnessBinding>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentHarnessBinding {
-    pub agent: String,
-    pub harness: String,
+    pub task_profiles: BTreeMap<String, TaskProfile>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -243,22 +228,6 @@ impl ModelSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentSpec {
-    pub role: String,
-    pub model: String,
-    pub system: String,
-    #[serde(default)]
-    pub tools: Vec<String>,
-    #[serde(default, alias = "disallowedTools", alias = "disallowed-tools")]
-    pub disallowed_tools: Vec<String>,
-    #[serde(default)]
-    pub memory: MemoryAccess,
-    pub output_contract: String,
-    #[serde(default)]
-    pub runtime: AgentRuntimePolicy,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentRuntimePolicy {
     #[serde(default)]
@@ -398,27 +367,6 @@ fn default_max_consecutive_compaction_failures() -> u8 {
     AGENT_MAX_CONSECUTIVE_COMPACTION_FAILURES_DEFAULT
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MemoryAccess {
-    #[serde(default)]
-    pub read: Vec<MemoryScope>,
-    #[serde(default)]
-    pub write: Vec<MemoryScope>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryScope {
-    User,
-    Project,
-    Agent,
-    Workflow,
-    Run,
-    RepoFacts,
-    KnowledgeHints,
-    ExternalDocs,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HarnessSpec {
     pub backend: String,
@@ -427,13 +375,11 @@ pub struct HarnessSpec {
     #[serde(default)]
     pub permissions: PermissionPolicy,
     #[serde(default)]
-    pub memory: MemoryAccess,
-    #[serde(default)]
     pub verification: VerificationPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentToolResolution {
+pub struct TaskToolResolution {
     pub selected_tools: Vec<String>,
     pub requested_tools: Vec<String>,
     pub disallowed_tools: Vec<String>,
@@ -444,13 +390,13 @@ pub struct AgentToolResolution {
     pub wildcard: bool,
 }
 
-pub fn resolve_agent_tools(agent: &AgentSpec, harness: &HarnessSpec) -> AgentToolResolution {
-    let requested_specs = parsed_tool_specs(&agent.tools);
+pub fn resolve_task_tools(profile: &TaskProfile, harness: &HarnessSpec) -> TaskToolResolution {
+    let requested_specs = parsed_tool_specs(&profile.tools);
     let requested_tools = requested_specs
         .iter()
         .map(|spec| spec.tool_name.clone())
         .collect::<Vec<_>>();
-    let disallowed_tools = normalized_tool_specs(&agent.disallowed_tools);
+    let disallowed_tools = normalized_tool_specs(&profile.disallowed_tools);
     let disallowed_set = disallowed_tools.iter().cloned().collect::<BTreeSet<_>>();
     let harness_specs = parsed_tool_specs(&harness.tools);
     let harness_tool_names = harness_specs
@@ -498,7 +444,7 @@ pub fn resolve_agent_tools(agent: &AgentSpec, harness: &HarnessSpec) -> AgentToo
     let allowed_agent_types =
         resolve_allowed_agent_types(&selected_tools, &selected_source_specs, &harness_specs);
 
-    AgentToolResolution {
+    TaskToolResolution {
         selected_tools,
         requested_tools,
         disallowed_tools,
@@ -606,10 +552,6 @@ fn intersect_preserving_order(left: Vec<String>, right: &[String]) -> Vec<String
         .collect()
 }
 
-pub const WORKFLOW_MAX_ROUNDS_DEFAULT: u32 = 3;
-pub const WORKFLOW_MAX_ROUNDS_MIN: u32 = 1;
-pub const WORKFLOW_MAX_ROUNDS_MAX: u32 = 20;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PermissionDecision {
@@ -678,97 +620,57 @@ fn deny() -> PermissionDecision {
 pub struct VerificationPolicy {
     #[serde(default)]
     pub require_evidence: bool,
-    #[serde(default)]
-    pub allowed_checks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkflowSpec {
-    pub name: String,
-    #[serde(default = "default_max_rounds")]
-    pub max_rounds: u32,
+#[serde(deny_unknown_fields)]
+pub struct TaskProfile {
+    pub model: String,
+    pub harness: String,
+    pub instructions: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub disallowed_tools: Vec<String>,
+    #[serde(default)]
+    pub runtime: AgentRuntimePolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
-    #[serde(default)]
-    pub nodes: Vec<WorkflowNodeSpec>,
-    #[serde(default)]
-    pub edges: Vec<WorkflowEdgeSpec>,
-    #[serde(default)]
-    pub stop: StopPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResolvedWorkflowCostPolicy {
+pub struct ResolvedTaskCostPolicy {
     pub token_budget: u64,
     pub token_budget_source: String,
     pub model_id: String,
     pub provider: String,
     pub model: String,
     pub default_max_turns: u32,
-    pub max_rounds: u32,
 }
 
-pub fn resolve_workflow_cost_policy(
+pub fn resolve_task_cost_policy(
     config: &ProjectConfig,
     workflow_id: &str,
-) -> Option<ResolvedWorkflowCostPolicy> {
-    let workflow = config.workflows.get(workflow_id)?;
-    let node = workflow
-        .nodes
-        .iter()
-        .find(|node| {
-            config
-                .agents
-                .get(&node.agent)
-                .is_some_and(|agent| agent.role == "executor")
-        })
-        .or_else(|| workflow.nodes.first())?;
-    let agent = config.agents.get(&node.agent)?;
-    let model = config.models.get(&agent.model)?;
-    let runtime = resolve_agent_runtime_policy(model, &agent.runtime);
-    let derived_budget = (u64::from(runtime.context_window_tokens)
-        .saturating_add(u64::from(runtime.max_output_tokens).saturating_mul(2)))
-    .saturating_mul(u64::from(workflow.max_rounds.max(1)))
-    .clamp(64_000, 2_000_000);
-    Some(ResolvedWorkflowCostPolicy {
-        token_budget: workflow.token_budget.unwrap_or(derived_budget),
-        token_budget_source: if workflow.token_budget.is_some() {
+) -> Option<ResolvedTaskCostPolicy> {
+    let profile = config.task_profiles.get(workflow_id)?;
+    let model = config.models.get(&profile.model)?;
+    let runtime = resolve_agent_runtime_policy(model, &profile.runtime);
+    let derived_budget = u64::from(runtime.context_window_tokens)
+        .saturating_add(u64::from(runtime.max_output_tokens).saturating_mul(2))
+        .clamp(64_000, 2_000_000);
+    Some(ResolvedTaskCostPolicy {
+        token_budget: profile.token_budget.unwrap_or(derived_budget),
+        token_budget_source: if profile.token_budget.is_some() {
             "configured"
         } else {
             "model_capability_default"
         }
         .to_owned(),
-        model_id: agent.model.clone(),
+        model_id: profile.model.clone(),
         provider: model.provider.clone(),
         model: model.model.clone(),
         default_max_turns: runtime.max_turns,
-        max_rounds: workflow.max_rounds,
     })
-}
-
-fn default_max_rounds() -> u32 {
-    WORKFLOW_MAX_ROUNDS_DEFAULT
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkflowNodeSpec {
-    pub id: String,
-    pub agent: String,
-    pub harness: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkflowEdgeSpec {
-    pub from: String,
-    pub to: String,
-    pub on: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct StopPolicy {
-    #[serde(default)]
-    pub on_status: Vec<String>,
-    pub final_report_agent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -857,26 +759,18 @@ mod tests {
     }
 
     #[test]
-    fn workflow_token_budget_is_optional_but_must_be_positive() {
+    fn task_profile_token_budget_is_optional_but_must_be_positive() {
         let mut config: ProjectConfig =
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
-        config
-            .workflows
-            .get_mut("planner-led")
-            .unwrap()
-            .token_budget = Some(100_000);
+        config.task_profiles.get_mut("code").unwrap().token_budget = Some(100_000);
         assert_eq!(validate_project_config(&config).status, "pass");
 
-        config
-            .workflows
-            .get_mut("planner-led")
-            .unwrap()
-            .token_budget = Some(0);
+        config.task_profiles.get_mut("code").unwrap().token_budget = Some(0);
         let report = validate_project_config(&config);
         assert!(report
             .issues
             .iter()
-            .any(|issue| issue.code == "workflow_token_budget_zero"));
+            .any(|issue| issue.code == "task_profile_token_budget_zero"));
     }
 
     #[test]
@@ -1025,121 +919,10 @@ PostToolUse:
     }
 
     #[test]
-    fn invalid_edge_reference_is_reported() {
+    fn task_runtime_policy_bounds_are_reported() {
         let mut config: ProjectConfig =
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
-        config
-            .workflows
-            .get_mut("planner-led")
-            .unwrap()
-            .edges
-            .push(WorkflowEdgeSpec {
-                from: "planner".to_owned(),
-                to: "missing".to_owned(),
-                on: "completed".to_owned(),
-            });
-
-        let report = validate_project_config(&config);
-
-        assert_eq!(report.status, "error");
-        assert!(report
-            .issues
-            .iter()
-            .any(|issue| issue.code == "workflow_edge_target_not_found"));
-    }
-
-    #[test]
-    fn invalid_stop_policy_is_reported() {
-        let mut config: ProjectConfig =
-            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
-        let workflow = config.workflows.get_mut("planner-led").unwrap();
-        workflow.stop.final_report_agent = Some("missing".to_owned());
-        workflow.stop.on_status.push("mystery".to_owned());
-
-        let report = validate_project_config(&config);
-
-        assert_eq!(report.status, "error");
-        assert!(report
-            .issues
-            .iter()
-            .any(|issue| issue.code == "workflow_final_report_agent_not_found"));
-        assert!(report
-            .issues
-            .iter()
-            .any(|issue| issue.code == "workflow_stop_status_unknown"));
-    }
-
-    #[test]
-    fn invalid_transition_condition_is_reported() {
-        let mut config: ProjectConfig =
-            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
-        config
-            .workflows
-            .get_mut("planner-led")
-            .unwrap()
-            .edges
-            .push(WorkflowEdgeSpec {
-                from: "planner".to_owned(),
-                to: "executor".to_owned(),
-                on: "maybe".to_owned(),
-            });
-
-        let report = validate_project_config(&config);
-
-        assert_eq!(report.status, "error");
-        assert!(report
-            .issues
-            .iter()
-            .any(|issue| issue.code == "workflow_edge_condition_unknown"));
-    }
-
-    #[test]
-    fn non_planner_agents_cannot_request_long_term_memory_scopes() {
-        let mut config: ProjectConfig =
-            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
-        config
-            .agents
-            .get_mut("executor")
-            .unwrap()
-            .memory
-            .read
-            .push(MemoryScope::Project);
-
-        let report = validate_project_config(&config);
-
-        assert_eq!(report.status, "error");
-        assert!(report
-            .issues
-            .iter()
-            .any(|issue| issue.code == "agent_long_term_memory_for_non_planner"));
-    }
-
-    #[test]
-    fn execution_harnesses_cannot_request_long_term_memory_scopes() {
-        let mut config: ProjectConfig =
-            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
-        config
-            .harnesses
-            .get_mut("native-code-edit")
-            .unwrap()
-            .memory
-            .read
-            .push(MemoryScope::Project);
-
-        let report = validate_project_config(&config);
-
-        assert_eq!(report.status, "error");
-        assert!(report
-            .issues
-            .iter()
-            .any(|issue| issue.code == "harness_long_term_memory_for_execution_backend"));
-    }
-
-    #[test]
-    fn agent_runtime_policy_bounds_are_reported() {
-        let mut config: ProjectConfig =
-            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
-        let runtime = &mut config.agents.get_mut("executor").unwrap().runtime;
+        let runtime = &mut config.task_profiles.get_mut("code").unwrap().runtime;
         runtime.max_output_tokens = Some(AGENT_MAX_OUTPUT_TOKENS_MAX + 1);
         runtime.max_turns = Some(0);
         runtime.effort = Some("ultracode".to_owned());
@@ -1156,12 +939,12 @@ PostToolUse:
 
         assert_eq!(report.status, "error");
         for code in [
-            "agent_max_output_tokens_out_of_range",
-            "agent_max_turns_out_of_range",
-            "agent_effort_level_unknown",
-            "agent_compact_output_reserve_tokens_out_of_range",
-            "agent_max_output_recovery_attempts_out_of_range",
-            "agent_max_consecutive_compaction_failures_out_of_range",
+            "task_profile_max_output_tokens_out_of_range",
+            "task_profile_max_turns_out_of_range",
+            "task_profile_effort_level_unknown",
+            "task_profile_compact_output_reserve_tokens_out_of_range",
+            "task_profile_max_output_recovery_attempts_out_of_range",
+            "task_profile_max_consecutive_compaction_failures_out_of_range",
             "model_context_window_tokens_out_of_range",
             "model_auto_compact_token_limit_out_of_range",
             "model_effective_context_window_percent_out_of_range",
@@ -1219,39 +1002,35 @@ PostToolUse:
     }
 
     #[test]
-    fn workflow_cost_policy_is_model_aware_bounded_and_explicitly_overridable() {
+    fn task_cost_policy_is_model_aware_bounded_and_explicitly_overridable() {
         let mut config: ProjectConfig =
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
-        let derived = resolve_workflow_cost_policy(&config, "planner-led").unwrap();
-        assert_eq!(derived.token_budget, 432_000);
+        let derived = resolve_task_cost_policy(&config, "code").unwrap();
+        assert_eq!(derived.token_budget, 144_000);
         assert_eq!(derived.token_budget_source, "model_capability_default");
         assert_eq!(derived.default_max_turns, 24);
 
-        config
-            .workflows
-            .get_mut("planner-led")
-            .unwrap()
-            .token_budget = Some(90_000);
-        let explicit = resolve_workflow_cost_policy(&config, "planner-led").unwrap();
+        config.task_profiles.get_mut("code").unwrap().token_budget = Some(90_000);
+        let explicit = resolve_task_cost_policy(&config, "code").unwrap();
         assert_eq!(explicit.token_budget, 90_000);
         assert_eq!(explicit.token_budget_source, "configured");
     }
 
     #[test]
-    fn agent_tool_resolution_applies_allow_and_disallow_lists() {
+    fn task_tool_resolution_applies_allow_and_disallow_lists() {
         let config: ProjectConfig =
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
         let mut harness = config.harnesses.get("native-code-edit").unwrap().clone();
         harness.tools.push("agent_subagent".to_owned());
-        let mut agent = config.agents.get("executor").unwrap().clone();
-        agent.tools = vec![
+        let mut profile = config.task_profiles.get("code").unwrap().clone();
+        profile.tools = vec![
             "command_run".to_owned(),
             "patch_apply".to_owned(),
             "agent_subagent".to_owned(),
         ];
-        agent.disallowed_tools = vec!["patch_apply".to_owned()];
+        profile.disallowed_tools = vec!["patch_apply".to_owned()];
 
-        let resolution = resolve_agent_tools(&agent, &harness);
+        let resolution = resolve_task_tools(&profile, &harness);
 
         assert_eq!(
             resolution.selected_tools,
@@ -1262,18 +1041,18 @@ PostToolUse:
     }
 
     #[test]
-    fn agent_tool_resolution_parses_agent_allowed_types() {
+    fn task_tool_resolution_parses_subagent_allowed_types() {
         let config: ProjectConfig =
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
         let mut harness = config.harnesses.get("native-code-edit").unwrap().clone();
         harness.tools.push("agent_subagent".to_owned());
-        let mut agent = config.agents.get("executor").unwrap().clone();
-        agent.tools = vec![
-            "Agent(reviewer, planner)".to_owned(),
+        let mut profile = config.task_profiles.get("code").unwrap().clone();
+        profile.tools = vec![
+            "Agent(reviewer, coordinator)".to_owned(),
             "patch_apply".to_owned(),
         ];
 
-        let resolution = resolve_agent_tools(&agent, &harness);
+        let resolution = resolve_task_tools(&profile, &harness);
 
         assert_eq!(
             resolution.selected_tools,
@@ -1285,7 +1064,7 @@ PostToolUse:
         );
         assert_eq!(
             resolution.allowed_agent_types,
-            Some(vec!["reviewer".to_owned(), "planner".to_owned()])
+            Some(vec!["reviewer".to_owned(), "coordinator".to_owned()])
         );
         assert_eq!(
             normalized_tool_name("Task(reviewer)").as_deref(),
@@ -1294,14 +1073,14 @@ PostToolUse:
     }
 
     #[test]
-    fn agent_tool_resolution_treats_missing_tools_as_harness_wildcard() {
+    fn task_tool_resolution_treats_missing_tools_as_harness_wildcard() {
         let config: ProjectConfig =
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
         let harness = config.harnesses.get("native-code-edit").unwrap();
-        let mut agent = config.agents.get("executor").unwrap().clone();
-        agent.disallowed_tools = vec!["command_preview".to_owned()];
+        let mut profile = config.task_profiles.get("code").unwrap().clone();
+        profile.disallowed_tools = vec!["command_preview".to_owned()];
 
-        let resolution = resolve_agent_tools(&agent, harness);
+        let resolution = resolve_task_tools(&profile, harness);
 
         assert!(resolution.wildcard);
         assert!(resolution
@@ -1315,12 +1094,12 @@ PostToolUse:
     }
 
     #[test]
-    fn agent_tool_config_errors_when_node_harness_cannot_supply_requested_tool() {
+    fn task_tool_config_errors_when_harness_cannot_supply_requested_tool() {
         let mut config: ProjectConfig =
             serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
         config
-            .agents
-            .get_mut("executor")
+            .task_profiles
+            .get_mut("code")
             .unwrap()
             .tools
             .push("unsupported_tool".to_owned());
@@ -1331,7 +1110,7 @@ PostToolUse:
         assert!(report
             .issues
             .iter()
-            .any(|issue| issue.code == "workflow_node_agent_tool_not_in_harness"));
+            .any(|issue| issue.code == "task_profile_tool_not_in_harness"));
     }
 
     #[test]
@@ -1349,40 +1128,6 @@ PostToolUse:
             .issues
             .iter()
             .any(|issue| issue.code == "harness_backend_unknown"));
-    }
-
-    #[test]
-    fn domain_specific_verifier_backend_is_not_part_of_core() {
-        let mut config: ProjectConfig =
-            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
-        config
-            .harnesses
-            .get_mut("native-code-edit")
-            .unwrap()
-            .backend = "browser-verifier".to_owned();
-
-        let report = validate_project_config(&config);
-
-        assert_eq!(report.status, "error");
-        assert!(report
-            .issues
-            .iter()
-            .any(|issue| issue.code == "harness_backend_unknown"));
-    }
-
-    #[test]
-    fn planner_chat_surface_binding_must_reference_explicit_contracts() {
-        let mut config: ProjectConfig =
-            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
-        config.surface_bindings.planner_chat.as_mut().unwrap().agent = "executor".to_owned();
-
-        let report = validate_project_config(&config);
-
-        assert_eq!(report.status, "error");
-        assert!(report
-            .issues
-            .iter()
-            .any(|issue| issue.code == "planner_chat_agent_contract_invalid"));
     }
 
     #[test]
@@ -1498,25 +1243,5 @@ PostToolUse:
             issue.code == "harness_tool_permission_denied"
                 && issue.target == "harnesses.native-code-edit.permissions.read_files"
         }));
-    }
-
-    #[test]
-    fn planner_model_harness_must_deny_side_effect_permissions() {
-        let mut config: ProjectConfig =
-            serde_yaml::from_str(include_str!("../../../examples/coder.yaml")).unwrap();
-        config
-            .harnesses
-            .get_mut("workflow-planner")
-            .unwrap()
-            .permissions
-            .run_commands = PermissionDecision::Ask;
-
-        let report = validate_project_config(&config);
-
-        assert_eq!(report.status, "error");
-        assert!(report
-            .issues
-            .iter()
-            .any(|issue| issue.code == "planner_model_side_effect_permission_not_denied"));
     }
 }

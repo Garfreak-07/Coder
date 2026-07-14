@@ -5,8 +5,11 @@ use std::{
 
 use axum::{extract::State, Json};
 use coder_config::ProjectConfig;
+use coder_store::RunStore;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::credential_store::{KeyringStore, PROVIDER_KEYRING_SERVICE};
 use crate::provider_runtime::{
     normalize_provider, provider_api_key, provider_api_key_from_env, provider_base_url,
     provider_chat_completions_endpoint, provider_chat_completions_endpoint_for_display,
@@ -17,10 +20,109 @@ use crate::provider_runtime::{
     send_provider_request_with_retry,
 };
 use crate::{
-    ApiState, ProviderKeyState, ProviderSettings, ProviderSettingsPatch, ProviderSettingsResponse,
-    ProviderSettingsSaveResponse, ProviderStatus, ProviderStatusItem, ProviderTestRequest,
-    ProviderTestResponse, ProviderTestResult,
+    ApiError, ApiState, ProviderKeyState, ProviderNetworkSettings, ProviderSettings,
+    ProviderSettingsPatch, ProviderSettingsResponse, ProviderSettingsSaveResponse, ProviderStatus,
+    ProviderStatusItem, ProviderTestRequest, ProviderTestResponse, ProviderTestResult,
 };
+
+const PROVIDER_SETTINGS_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct StoredProviderSettings {
+    schema_version: u32,
+    default_provider: String,
+    default_model: String,
+    base_urls: BTreeMap<String, String>,
+    proxy_urls: BTreeMap<String, String>,
+    proxy_modes: BTreeMap<String, String>,
+    network: BTreeMap<String, ProviderNetworkSettings>,
+    configured_providers: BTreeSet<String>,
+    mock_mode: bool,
+}
+
+impl StoredProviderSettings {
+    fn from_runtime(settings: &ProviderSettings) -> Self {
+        Self {
+            schema_version: PROVIDER_SETTINGS_SCHEMA_VERSION,
+            default_provider: settings.default_provider.clone(),
+            default_model: settings.default_model.clone(),
+            base_urls: settings.base_urls.clone(),
+            proxy_urls: settings.proxy_urls.clone(),
+            proxy_modes: settings.proxy_modes.clone(),
+            network: settings.network.clone(),
+            configured_providers: settings
+                .api_keys
+                .iter()
+                .filter(|(_, state)| {
+                    state.configured
+                        && !state
+                            .secret
+                            .as_deref()
+                            .unwrap_or_default()
+                            .trim()
+                            .is_empty()
+                })
+                .map(|(provider, _)| provider.clone())
+                .collect(),
+            mock_mode: settings.mock_mode,
+        }
+    }
+
+    fn into_runtime(self, credential_store: &dyn KeyringStore) -> ProviderSettings {
+        if self.schema_version != PROVIDER_SETTINGS_SCHEMA_VERSION {
+            return ProviderSettings::default();
+        }
+        let mut settings = ProviderSettings::default();
+        apply_provider_settings_patch(
+            &mut settings,
+            ProviderSettingsPatch {
+                default_provider: Some(self.default_provider),
+                default_model: Some(self.default_model),
+                base_urls: Some(self.base_urls),
+                proxy_urls: Some(self.proxy_urls),
+                proxy_modes: Some(self.proxy_modes),
+                network: Some(self.network),
+                api_keys: None,
+                mock_mode: Some(self.mock_mode),
+            },
+        );
+        for provider in self.configured_providers {
+            let provider = normalize_provider(&provider);
+            if provider.is_empty() {
+                continue;
+            }
+            let Ok(Some(secret)) = credential_store.load(PROVIDER_KEYRING_SERVICE, &provider)
+            else {
+                continue;
+            };
+            let secret = secret.trim();
+            if secret.is_empty() {
+                continue;
+            }
+            settings.api_keys.insert(
+                provider,
+                ProviderKeyState {
+                    configured: true,
+                    source: "keyring".to_owned(),
+                    secret: Some(secret.to_owned()),
+                },
+            );
+        }
+        settings
+    }
+}
+
+pub(crate) fn load_provider_settings(
+    store: &RunStore,
+    credential_store: &dyn KeyringStore,
+) -> ProviderSettings {
+    store
+        .read_provider_settings::<StoredProviderSettings>()
+        .ok()
+        .flatten()
+        .map(|settings| settings.into_runtime(credential_store))
+        .unwrap_or_default()
+}
 
 pub(crate) async fn get_provider_settings(
     State(state): State<ApiState>,
@@ -33,14 +135,113 @@ pub(crate) async fn get_provider_settings(
 pub(crate) async fn save_provider_settings(
     State(state): State<ApiState>,
     Json(request): Json<ProviderSettingsPatch>,
-) -> Json<ProviderSettingsSaveResponse> {
-    let mut settings = state.provider_settings.lock().unwrap();
-    apply_provider_settings_patch(&mut settings, request);
-    let status = provider_status(&settings, None);
-    Json(ProviderSettingsSaveResponse {
-        settings: settings.clone(),
+) -> Result<Json<ProviderSettingsSaveResponse>, ApiError> {
+    let mut current = state.provider_settings.lock().unwrap();
+    let mut candidate = current.clone();
+    apply_provider_settings_patch(&mut candidate, request);
+    for key_state in candidate.api_keys.values_mut() {
+        if !key_state
+            .secret
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .is_empty()
+        {
+            key_state.configured = true;
+            key_state.source = "keyring".to_owned();
+        }
+    }
+    let changes = credential_changes(&current, &candidate);
+    apply_credential_changes(state.credential_store.as_ref(), &changes)?;
+    if let Err(error) = state
+        .store
+        .write_provider_settings(&StoredProviderSettings::from_runtime(&candidate))
+    {
+        rollback_credential_changes(state.credential_store.as_ref(), &changes);
+        return Err(ApiError::internal(format!(
+            "failed to persist provider settings: {error}"
+        )));
+    }
+    *current = candidate.clone();
+    let status = provider_status(&candidate, None);
+    Ok(Json(ProviderSettingsSaveResponse {
+        settings: candidate,
         status,
-    })
+    }))
+}
+
+#[derive(Debug)]
+struct CredentialChange {
+    provider: String,
+    previous: Option<String>,
+    next: Option<String>,
+}
+
+fn credential_changes(
+    current: &ProviderSettings,
+    candidate: &ProviderSettings,
+) -> Vec<CredentialChange> {
+    let providers = current
+        .api_keys
+        .keys()
+        .chain(candidate.api_keys.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    providers
+        .into_iter()
+        .filter_map(|provider| {
+            let previous = provider_secret(current, &provider);
+            let next = provider_secret(candidate, &provider);
+            (previous != next).then_some(CredentialChange {
+                provider,
+                previous,
+                next,
+            })
+        })
+        .collect()
+}
+
+fn provider_secret(settings: &ProviderSettings, provider: &str) -> Option<String> {
+    settings
+        .api_keys
+        .get(provider)
+        .and_then(|state| state.secret.as_deref())
+        .map(str::trim)
+        .filter(|secret| !secret.is_empty())
+        .map(str::to_owned)
+}
+
+fn apply_credential_changes(
+    store: &dyn KeyringStore,
+    changes: &[CredentialChange],
+) -> Result<(), ApiError> {
+    for (index, change) in changes.iter().enumerate() {
+        if let Err(error) = write_credential(store, &change.provider, change.next.as_deref()) {
+            rollback_credential_changes(store, &changes[..index]);
+            return Err(ApiError::internal(format!(
+                "failed to update provider credential for '{}': {error}",
+                change.provider
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn rollback_credential_changes(store: &dyn KeyringStore, changes: &[CredentialChange]) {
+    for change in changes.iter().rev() {
+        let _ = write_credential(store, &change.provider, change.previous.as_deref());
+    }
+}
+
+fn write_credential(
+    store: &dyn KeyringStore,
+    provider: &str,
+    secret: Option<&str>,
+) -> Result<(), crate::credential_store::CredentialStoreError> {
+    match secret {
+        Some(secret) => store.save(PROVIDER_KEYRING_SERVICE, provider, secret),
+        None => store.delete(PROVIDER_KEYRING_SERVICE, provider).map(|_| ()),
+    }
 }
 
 pub(crate) async fn get_provider_status(State(state): State<ApiState>) -> Json<ProviderStatus> {
@@ -233,13 +434,10 @@ fn provider_status_item(settings: &ProviderSettings, provider: &str) -> Provider
 }
 
 fn provider_credential_state(settings: &ProviderSettings, provider: &str) -> (bool, String) {
-    if settings
-        .api_keys
-        .get(provider)
-        .map(|state| state.configured && !state.secret.as_deref().unwrap_or("").trim().is_empty())
-        .unwrap_or(false)
-    {
-        return (true, "settings".to_owned());
+    if let Some(state) = settings.api_keys.get(provider).filter(|state| {
+        state.configured && !state.secret.as_deref().unwrap_or("").trim().is_empty()
+    }) {
+        return (true, state.source.clone());
     }
     if provider_api_key_from_env(provider, None).is_some() {
         return (true, "environment".to_owned());

@@ -16,7 +16,6 @@ use serde_json::{json, Value};
 
 use crate::model_tool_async_attachments::{
     drain_async_hook_response_attachments, drain_async_rewake_notification_attachments,
-    drain_planner_user_guidance_attachments,
 };
 use crate::model_tool_input::canonical_model_tool_name;
 use crate::model_tool_server_executor::server_model_tool_executor_with_mcp;
@@ -38,6 +37,7 @@ use crate::ApiState;
 const NATIVE_MODEL_TOOL_RESULT_MAX_CHARS: usize = 24_000;
 const NATIVE_MODEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 const NATIVE_READ_ONLY_MAX_TURNS: usize = 8;
+const NATIVE_TURN_LIMIT_REMINDER_REMAINING_TURNS: usize = 2;
 
 #[derive(Debug, Clone)]
 pub(crate) struct NativeModelBackend {
@@ -77,21 +77,6 @@ impl HarnessBackend for NativeModelBackend {
                 "side_effect_boundary": "structured_tools"
             }),
         );
-        if !native_model_agent_can_execute(&request) {
-            return Ok(blocked_result(
-                started,
-                "Native model execution requires an Executor or subagent role.",
-                "native_model_role_not_executable",
-            ));
-        }
-        if !start_work_authorized(&request) {
-            return Ok(blocked_result(
-                started,
-                "Native model execution requires Start Work authorization.",
-                "missing_start_work_approval",
-            ));
-        }
-
         let model = harness_model_spec(&request);
         let runtime = harness_agent_runtime(&request);
         if !runtime.supports_tool_calls {
@@ -281,6 +266,18 @@ async fn run_native_model_provider(
             turn,
             "before_provider_request",
         );
+        if let Some(reminder) = native_model_turn_limit_reminder(turn, max_turns) {
+            messages.push(reminder);
+            outcome.events.push(HarnessRunEvent::new(
+                "model.turn_limit.reminder",
+                json!({
+                    "backend": "native-rust",
+                    "turn": turn,
+                    "max_turns": max_turns,
+                    "remaining_turns": max_turns.saturating_sub(turn).saturating_add(1)
+                }),
+            ));
+        }
         let body = native_model_chat_completion_body(
             provider,
             model,
@@ -452,23 +449,19 @@ async fn run_native_model_provider(
         }
     }
 
-    if outcome.changed_files.is_empty() {
-        outcome.status = "blocked".to_owned();
-        outcome
-            .blockers
-            .push("native model tool loop reached its turn limit".to_owned());
-    } else {
-        outcome.status = "completed".to_owned();
-        if outcome.summary.trim().is_empty() {
-            outcome.summary = format!(
-                "Native model tool loop wrote {} file(s) and stopped after the tool turn limit without a final response.",
-                outcome.changed_files.len()
-            );
-        }
-        outcome
-            .checks
-            .push("native_model_tool_loop: stopped_after_turn_limit_with_file_writes".to_owned());
+    outcome.status = "blocked".to_owned();
+    outcome
+        .blockers
+        .push("native model tool loop reached its turn limit".to_owned());
+    if outcome.summary.trim().is_empty() && !outcome.changed_files.is_empty() {
+        outcome.summary = format!(
+            "Native model tool loop wrote {} file(s) but did not return a terminal status before its turn limit.",
+            outcome.changed_files.len()
+        );
     }
+    outcome
+        .checks
+        .push("native_model_tool_loop: reached_turn_limit".to_owned());
     Ok(outcome)
 }
 
@@ -597,6 +590,19 @@ fn native_model_output_recovery_message(attempt: u8, max_attempts: u8) -> Value 
     })
 }
 
+fn native_model_turn_limit_reminder(turn: usize, max_turns: usize) -> Option<Value> {
+    let remaining_turns = max_turns.saturating_sub(turn).saturating_add(1);
+    let reminder_at = max_turns.min(NATIVE_TURN_LIMIT_REMINDER_REMAINING_TURNS);
+    (remaining_turns == reminder_at).then(|| {
+        json!({
+            "role": "system",
+            "content": format!(
+                "Execution budget reminder: {remaining_turns} provider turns remain, including this one. Complete only essential work. Do not repeat repository discovery or checks whose successful results are already in context. After the task and essential verification are complete, stop calling tools and return a concise final status. If completion is impossible, report the concrete blocker."
+            )
+        })
+    })
+}
+
 fn native_model_output_recovery_event(
     attempt: u8,
     max_attempts: u8,
@@ -663,7 +669,7 @@ fn native_model_initial_messages(request: &coder_harness::HarnessRunRequest) -> 
 }
 
 fn native_model_system_prompt(request: &coder_harness::HarnessRunRequest) -> String {
-    const EXECUTION_CONTRACT: &str = "Work only after Start Work approval. Prefer tool calls for inspect -> write -> verify. Available tool calls use repo-relative paths; never include the repo root, absolute paths, or secrets. Use the apply_patch tool to edit files so related add, update, delete, and move operations commit atomically. Do not use command tools for manual file edits; reserve them for checks and task-required generators. Use command_background for long-running checks, then read_command_output to observe completion. Finish with a short status.";
+    const EXECUTION_CONTRACT: &str = "Prefer tool calls for inspect -> write -> verify. Available tool calls use repo-relative paths; never include the repo root, absolute paths, or secrets. Use the apply_patch tool to edit files so related add, update, delete, and move operations commit atomically. Do not use command tools for manual file edits; reserve them for checks and task-required generators. Use command_background for long-running checks, then read_command_output to observe completion. Finish with a short status.";
     let agent_system = request
         .backend_context
         .pointer("/coder/agent/system")
@@ -680,9 +686,9 @@ fn native_model_system_prompt(request: &coder_harness::HarnessRunRequest) -> Str
 }
 
 fn native_model_user_prompt(request: &coder_harness::HarnessRunRequest) -> String {
-    let plan_context = request
+    let task_context = request
         .backend_context
-        .pointer("/coder/plan_context")
+        .pointer("/coder/task_context")
         .cloned()
         .unwrap_or(Value::Null);
     let runtime = harness_agent_runtime(request);
@@ -691,8 +697,8 @@ fn native_model_user_prompt(request: &coder_harness::HarnessRunRequest) -> Strin
         native_model_max_turns(request, &runtime)
     );
     format!(
-        "Task:\n{}\n\nRepo root is already selected and must not be repeated in file paths.\n{}Finish as soon as implementation and checks are complete.\nPlan context JSON:\n{}\n\nTreat affected_paths as the approved change scope when it is present.",
-        request.task, turn_limit, plan_context
+        "Task:\n{}\n\nRepo root is already selected and must not be repeated in file paths.\n{}Finish as soon as implementation and checks are complete.\nTask context JSON:\n{}\n\nTask context provides constraints but does not grant permissions or expand repository scope.",
+        request.task, turn_limit, task_context
     )
 }
 
@@ -782,7 +788,7 @@ fn native_model_tool_is_authorized(
 fn native_model_is_read_only(request: &coder_harness::HarnessRunRequest) -> bool {
     request
         .backend_context
-        .pointer("/coder/plan_context/plan_draft/execution_mode")
+        .pointer("/coder/task_context/execution_mode")
         .and_then(Value::as_str)
         == Some("read_only")
 }
@@ -911,11 +917,6 @@ fn native_model_turn_context(
         repo_root: Some(request.repo_root.clone()),
         harness_id: Some(request.harness_id.clone()),
         agent_id: Some(request.agent_id.clone()),
-        agent_role: request
-            .backend_context
-            .pointer("/coder/agent/role")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
         current_model: request
             .backend_context
             .pointer("/coder/model/model")
@@ -932,10 +933,10 @@ fn native_model_turn_context(
             .pointer("/coder/harness/permissions")
             .cloned()
             .and_then(|value| serde_json::from_value(value).ok()),
-        start_work_authorized: start_work_authorized(request),
+        host_approved: false,
         token_budget: request
             .backend_context
-            .pointer("/coder/workflow_loop/token_budget")
+            .pointer("/coder/task/token_budget")
             .and_then(Value::as_u64),
         ..TurnContext::default()
     }
@@ -1037,7 +1038,6 @@ fn drain_native_model_async_attachments(
 ) -> Vec<Value> {
     let run_id = RunId::from_string(request.run_id.to_string());
     let mut attachments = drain_async_hook_response_attachments(&state.store, &run_id);
-    attachments.extend(drain_planner_user_guidance_attachments(state, &run_id));
     attachments.extend(drain_async_rewake_notification_attachments(
         &state.store,
         &run_id,
@@ -1339,38 +1339,6 @@ fn dedupe_evidence_refs(values: Vec<EvidenceRef>) -> Vec<EvidenceRef> {
         .collect()
 }
 
-fn start_work_authorized(request: &coder_harness::HarnessRunRequest) -> bool {
-    request
-        .backend_context
-        .pointer("/coder/plan_context/start_work_authorized")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
-fn request_agent_role(request: &coder_harness::HarnessRunRequest) -> Option<&str> {
-    request
-        .backend_context
-        .pointer("/coder/agent/role")
-        .and_then(Value::as_str)
-}
-
-fn native_model_agent_can_execute(request: &coder_harness::HarnessRunRequest) -> bool {
-    request_agent_role(request) == Some("executor") || request_is_native_subagent(request)
-}
-
-fn request_is_native_subagent(request: &coder_harness::HarnessRunRequest) -> bool {
-    request
-        .backend_context
-        .pointer("/coder/subagent/context/agent_type")
-        .and_then(Value::as_str)
-        == Some("subagent")
-        || request
-            .backend_context
-            .pointer("/coder_subagent/context/agent_type")
-            .and_then(Value::as_str)
-            == Some("subagent")
-}
-
 fn blocked_result(
     started: HarnessRunEvent,
     summary: impl Into<String>,
@@ -1418,7 +1386,7 @@ mod tests {
     fn budget_test_request(run_id: &str, token_budget: u64) -> coder_harness::HarnessRunRequest {
         coder_harness::HarnessRunRequest {
             run_id: RunId::from_string(run_id),
-            workflow_id: "planner-led".to_owned(),
+            workflow_id: "code".to_owned(),
             node_id: "executor".to_owned(),
             agent_id: "executor".to_owned(),
             harness_id: "native-code-edit".to_owned(),
@@ -1427,7 +1395,7 @@ mod tests {
             backend_context: json!({
                 "coder": {
                     "agent": {"runtime": {"max_turns": 2}},
-                    "workflow_loop": {"token_budget": token_budget}
+                    "task": {"token_budget": token_budget}
                 }
             }),
         }
@@ -1550,7 +1518,7 @@ mod tests {
     fn native_system_prompt_uses_configured_agent_instructions() {
         let request = coder_harness::HarnessRunRequest {
             run_id: RunId::from_string("run-system-prompt"),
-            workflow_id: "planner-led".to_owned(),
+            workflow_id: "code".to_owned(),
             node_id: "executor".to_owned(),
             agent_id: "executor".to_owned(),
             harness_id: "native-code-edit".to_owned(),
@@ -1587,7 +1555,7 @@ mod tests {
     fn native_user_prompt_does_not_repeat_structured_tool_specs_or_task_goal() {
         let request = coder_harness::HarnessRunRequest {
             run_id: RunId::from_string("run-compact-user-prompt"),
-            workflow_id: "planner-led".to_owned(),
+            workflow_id: "code".to_owned(),
             node_id: "executor".to_owned(),
             agent_id: "executor".to_owned(),
             harness_id: "native-code-edit".to_owned(),
@@ -1596,12 +1564,9 @@ mod tests {
             backend_context: json!({
                 "coder": {
                     "harness": {"selected_tools": ["repo_read_file", "write_text_file"]},
-                    "plan_context": {
-                        "start_work_authorized": true,
-                        "plan_draft": {
-                            "affected_paths": ["README.md"],
-                            "acceptance_criteria": ["README.md exists"]
-                        }
+                    "task_context": {
+                        "scope": ["README.md"],
+                        "constraints": ["README.md exists"]
                     }
                 }
             }),
@@ -1619,7 +1584,7 @@ mod tests {
     fn native_tool_schema_enforces_subagent_inherited_tools() {
         let request = coder_harness::HarnessRunRequest {
             run_id: RunId::from_string("run-subagent-tools"),
-            workflow_id: "planner-led".to_owned(),
+            workflow_id: "code".to_owned(),
             node_id: "executor::child".to_owned(),
             agent_id: "child".to_owned(),
             harness_id: "native-code-edit".to_owned(),
@@ -1700,8 +1665,7 @@ mod tests {
             .selected_tools
             .contains(&"mcp__local__lookup".to_owned()));
 
-        request.backend_context["coder"]["plan_context"]["plan_draft"] =
-            json!({"execution_mode": "read_only"});
+        request.backend_context["coder"]["task_context"] = json!({"execution_mode": "read_only"});
         let read_only_schema = native_model_tools_schema(&request, &mcp_tools);
         assert!(!read_only_schema
             .as_array()
@@ -1717,7 +1681,7 @@ mod tests {
     fn typed_read_only_plan_removes_side_effect_tools_and_caps_turns() {
         let request = coder_harness::HarnessRunRequest {
             run_id: RunId::from_string("run-read-only-tools"),
-            workflow_id: "planner-led".to_owned(),
+            workflow_id: "code".to_owned(),
             node_id: "executor".to_owned(),
             agent_id: "executor".to_owned(),
             harness_id: "native-code-edit".to_owned(),
@@ -1740,9 +1704,8 @@ mod tests {
                             "Skill"
                         ]
                     },
-                    "plan_context": {
-                        "start_work_authorized": true,
-                        "plan_draft": {"execution_mode": "read_only"}
+                    "task_context": {
+                        "execution_mode": "read_only"
                     }
                 }
             }),
@@ -1781,7 +1744,7 @@ mod tests {
     fn native_executor_uses_configured_turn_and_response_bounds() {
         let mut request = coder_harness::HarnessRunRequest {
             run_id: RunId::from_string("run-default-turn-budget"),
-            workflow_id: "planner-led".to_owned(),
+            workflow_id: "code".to_owned(),
             node_id: "executor".to_owned(),
             agent_id: "executor".to_owned(),
             harness_id: "native-code-edit".to_owned(),
@@ -1799,6 +1762,22 @@ mod tests {
 
         request.backend_context["coder"]["agent"]["runtime"]["max_output_tokens"] = json!(64_000);
         assert_eq!(harness_agent_runtime(&request).max_output_tokens, 8_000);
+    }
+
+    #[test]
+    fn native_turn_limit_reminder_is_injected_once_before_the_final_tool_chance() {
+        assert!(native_model_turn_limit_reminder(1, 4).is_none());
+        assert!(native_model_turn_limit_reminder(2, 4).is_none());
+
+        let reminder = native_model_turn_limit_reminder(3, 4).unwrap();
+        assert_eq!(reminder["role"], "system");
+        let content = reminder["content"].as_str().unwrap();
+        assert!(content.contains("2 provider turns remain"));
+        assert!(content.contains("stop calling tools"));
+        assert!(content.contains("report the concrete blocker"));
+
+        assert!(native_model_turn_limit_reminder(4, 4).is_none());
+        assert!(native_model_turn_limit_reminder(1, 1).is_some());
     }
 
     #[test]
